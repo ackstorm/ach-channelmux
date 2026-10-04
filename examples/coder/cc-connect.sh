@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The workspace owner's coding agent in Slack: cc-connect behind ach-channelmux.
 # Run by a coder_script on every workspace start (see README.md here). Needs
-# CODER_AGENT_TOKEN (set by Coder), ACH_CHANNELMUX_URL and CC_CONNECT_MODEL
-# (OpenCode model id, provider/model) in the agent env. Log: /tmp/cc-connect.log
+# CODER_AGENT_TOKEN (set by Coder) and ACH_CHANNELMUX_URL in the agent env.
+# Log: /tmp/cc-connect.log
 set -euo pipefail
 
 VERSION=v1.5.1-beta.1-ackstorm.1
 WORKSPACE_DIR=${CC_CONNECT_WORKSPACE:-/workspace}
 
-: "${CODER_AGENT_TOKEN:?}" "${ACH_CHANNELMUX_URL:?}" "${CC_CONNECT_MODEL:?}"
+: "${CODER_AGENT_TOKEN:?}" "${ACH_CHANNELMUX_URL:?}"
 bin=$HOME/.local/bin/cc-connect
 conf=$HOME/.cc-connect/config.toml
 log=/tmp/cc-connect.log
@@ -60,7 +60,6 @@ type = "acp"
 [projects.agent.options]
 cmd = "opencode"
 args = ["acp"]
-env = { OPENCODE_CONFIG_CONTENT = '{"model":"$CC_CONNECT_MODEL"}' }
 
 [[projects.platforms]]
 type = "slack"

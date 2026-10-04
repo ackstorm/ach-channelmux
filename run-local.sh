@@ -3,7 +3,7 @@
 #
 #   SLACK_APP_TOKEN=xapp-... SLACK_BOT_TOKEN=xoxb-... \
 #   CODER_URL=https://coder.example.com CODER_SESSION_TOKEN=$(coder tokens create) \
-#   OPENCODE_MODEL=provider/model ./run-local.sh
+#   ./run-local.sh
 #
 # CODER_SESSION_TOKEN identifies you (resolved with Coder's GET /api/v2/users/me), as
 # CODER_AGENT_TOKEN does in a workspace: your DMs (by your Coder email) reach this cc-connect. Optional:
@@ -15,7 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-: "${SLACK_APP_TOKEN:?}" "${SLACK_BOT_TOKEN:?}" "${CODER_URL:?}" "${CODER_SESSION_TOKEN:?}" "${OPENCODE_MODEL:?}"
+: "${SLACK_APP_TOKEN:?}" "${SLACK_BOT_TOKEN:?}" "${CODER_URL:?}" "${CODER_SESSION_TOKEN:?}"
 work_dir=$(realpath "${DEFAULT_WORKSPACE:-$HOME}")
 # One state dir per workspace, so changing DEFAULT_WORKSPACE never reuses a
 # binding to another directory.
@@ -56,7 +56,6 @@ type = "acp"
 [projects.agent.options]
 cmd = "opencode"
 args = ["acp"]
-env = { OPENCODE_CONFIG_CONTENT = '{"model":"${OPENCODE_MODEL}"}' }
 
 [[projects.platforms]]
 type = "slack"

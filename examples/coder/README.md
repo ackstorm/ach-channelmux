@@ -12,7 +12,6 @@ Agent env:
 ```hcl
 env = {
   "ACH_CHANNELMUX_URL" = "http://ach-channelmux.ach.svc"   # the relay's publicUrl
-  "CC_CONNECT_MODEL"   = "provider/model"                  # OpenCode model id
 }
 ```
 

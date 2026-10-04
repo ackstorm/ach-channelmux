@@ -6,6 +6,11 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Removed
+
+- Examples no longer set the OpenCode model (`CC_CONNECT_MODEL`, `OPENCODE_MODEL`):
+  the agent's default model is its own configuration.
+
 ## [0.1.0] - 2026-10-04
 
 First public release: Socket Mode facade with hot standby, Web API allowlist scoped to
