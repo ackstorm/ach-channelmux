@@ -1,0 +1,17 @@
+# Local run of the relay image. Secrets come from your shell or a .env file:
+#   SLACK_APP_TOKEN, SLACK_BOT_TOKEN, AUTH_RESOLVER_URL, AUTH_RESOLVER_HEADER
+services:
+  ach-channelmux:
+    build: .
+    image: ach-channelmux:dev
+    ports: ["8080:8080"]
+    environment:
+      PUBLIC_URL: http://127.0.0.1:8080
+      SLACK_APP_TOKEN: ${SLACK_APP_TOKEN:?}
+      SLACK_BOT_TOKEN: ${SLACK_BOT_TOKEN:?}
+      AUTH_RESOLVER_URL: ${AUTH_RESOLVER_URL:?}
+      AUTH_RESOLVER_HEADER: ${AUTH_RESOLVER_HEADER:?}
+      AUTH_RESOLVER_EMAIL_FIELD: ${AUTH_RESOLVER_EMAIL_FIELD:-email}
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]

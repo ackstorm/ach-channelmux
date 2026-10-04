@@ -1,0 +1,42 @@
+image:
+  repo: ghcr.io/ackstorm/ach-channelmux
+  tag: v0.1.0
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+
+# REQUIRED. URL daemons use to reach the relay; the relay hands it back to
+# them for the Socket Mode WebSocket (ws(s)://<publicUrl>/socket). With the
+# release named "ach-channelmux" in namespace "ach": http://ach-channelmux.ach.svc
+publicUrl: ""
+
+# REQUIRED. How the relay resolves the token a daemon presents (in Coder, the
+# workspace agent's CODER_AGENT_TOKEN) to its owner: GET <url> with the token in
+# <header>; the owner's email is read from the JSON reply at <emailField>
+# (dotted path, e.g. data.email). 401/403 or no email: rejected.
+authResolver:
+  url: ""
+  header: ""
+  emailField: email
+
+# REQUIRED. The Slack app's credentials. The chart never creates this secret:
+#   kubectl -n <ns> create secret generic ach-channelmux-slack \
+#     --from-literal=app-token='xapp-…' --from-literal=bot-token='xoxb-…'
+slackSecretRef:
+  name: ach-channelmux-slack
+  appTokenKey: app-token
+  botTokenKey: bot-token
+
+resources: {}
+extraEnv: []
+
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  # The daemons keep a WebSocket open; the relay pings every 10 s, under the
+  # usual 60 s proxy read timeout, so no WebSocket-specific annotation is needed.
+  annotations: {}
+  tls: []
+  path: /
+  pathType: Prefix

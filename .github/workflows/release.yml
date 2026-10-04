@@ -1,0 +1,164 @@
+name: Release and Publish
+run-name: Release ${{ github.event.head_commit.message }}
+
+# Commit-message-driven release.
+#
+# A push to main whose head commit message starts with
+#   chore(release): v<MAJOR>.<MINOR>.<PATCH>[-<prerelease>]
+# (made by `make release-cut VERSION=X.Y.Z`) triggers this pipeline:
+#   1. parse the version from the commit message,
+#   2. run the gateway tests,
+#   3. `make release-bump VERSION=<X.Y.Z>` and commit the bumps back to main
+#      as github-actions[bot] with [skip ci],
+#   4. create and push the annotated v<X.Y.Z> tag at that commit,
+#   5. build and push the multi-arch image ghcr.io/<owner>/ach-channelmux:vX.Y.Z
+#      and :latest,
+#   6. push the Helm chart to oci://ghcr.io/<owner>/charts/ach-channelmux,
+#   7. create the GitHub release.
+#
+# A failure after step 4 leaves a tag without artifacts. Recover with
+# `gh run rerun --failed` or another `chore(release): vX.Y.Z` push: the bump
+# no-ops and the tag is re-pointed, unless its release is already published.
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  parse:
+    name: Parse release intent
+    runs-on: ubuntu-latest
+    if: "startsWith(github.event.head_commit.message, 'chore(release): v')"
+    outputs:
+      version: ${{ steps.extract.outputs.version }}
+    steps:
+      - name: Extract version from commit message
+        id: extract
+        env:
+          MSG: ${{ github.event.head_commit.message }}
+        run: |
+          FIRST=$(printf '%s' "$MSG" | head -n1)
+          VERSION=$(printf '%s' "$FIRST" | sed -nE 's/^chore\(release\): v([0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.-]+)?).*$/\1/p')
+          if [ -z "$VERSION" ]; then
+            echo "ERROR: could not parse semver from commit message" >&2
+            echo "First line: $FIRST" >&2
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected release version: v$VERSION"
+
+  test:
+    name: Tests
+    needs: parse
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: npm test
+
+  build-and-release:
+    name: Build + release
+    needs: [parse, test]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.parse.outputs.version }}
+      IMAGE: ghcr.io/${{ github.repository_owner }}/ach-channelmux
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          ref: main
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git identity
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Bump manifests via make release-bump
+        run: make release-bump VERSION="$VERSION"
+
+      - name: Commit + push manifest bumps to main
+        run: |
+          if git diff --quiet; then
+            echo "no manifest changes — already at v$VERSION"
+            exit 0
+          fi
+          git add chart/Chart.yaml chart/values.yaml \
+                  package.json package-lock.json
+          git commit -m "chore(release): bump manifests to v$VERSION [skip ci]"
+          git push origin main
+
+      - name: Assert a clean tree before tagging
+        run: |
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo "::error::working tree is dirty before tagging. Offending paths:"
+            git status --porcelain
+            exit 1
+          fi
+
+      # Never move a tag whose GitHub release already exists: that would
+      # silently re-point a shipped release at new code. Cut a new version.
+      - name: Create + push release tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            echo "::error::release v$VERSION is already published; cut a new version instead."
+            exit 1
+          fi
+          git tag -f -a "v$VERSION" -m "v$VERSION"
+          git push -f origin "refs/tags/v$VERSION"
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build + push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:v${{ env.VERSION }}
+            ${{ env.IMAGE }}:latest
+          labels: |
+            org.opencontainers.image.title=ach-channelmux
+            org.opencontainers.image.version=v${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Push Helm chart to OCI registry
+        uses: appany/helm-oci-chart-releaser@v0.5.0
+        with:
+          name: ach-channelmux
+          repository: ${{ github.repository_owner }}/charts/
+          tag: ${{ env.VERSION }}
+          path: chart
+          registry: ghcr.io
+          registry_username: ${{ github.actor }}
+          registry_password: ${{ secrets.GITHUB_TOKEN }}
+          update_dependencies: 'false'
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v$VERSION" --verify-tag --generate-notes \
+            --title "v$VERSION" \
+            --notes "Image: \`$IMAGE:v$VERSION\` · Chart: \`oci://ghcr.io/${{ github.repository_owner }}/charts/ach-channelmux --version $VERSION\`"

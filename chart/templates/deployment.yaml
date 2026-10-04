@@ -1,0 +1,84 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "ach-channelmux.labels" . | nindent 4 }}
+spec:
+  # State (subscribers, buffers, notices) lives in memory, and only one relay
+  # may hold the Slack Socket Mode connection: one replica, never two at once.
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      {{- include "ach-channelmux.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "ach-channelmux.labels" . | nindent 8 }}
+    spec:
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      terminationGracePeriodSeconds: 10
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ach-channelmux
+          image: "{{ .Values.image.repo }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "IfNotPresent" }}
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: PORT
+              value: "8080"
+            - name: PUBLIC_URL
+              value: {{ required "publicUrl is required (e.g. http://<release>.<namespace>.svc)" .Values.publicUrl | quote }}
+            - name: AUTH_RESOLVER_URL
+              value: {{ required "authResolver.url is required" .Values.authResolver.url | quote }}
+            - name: AUTH_RESOLVER_HEADER
+              value: {{ required "authResolver.header is required" .Values.authResolver.header | quote }}
+            - name: AUTH_RESOLVER_EMAIL_FIELD
+              value: {{ .Values.authResolver.emailField | default "email" | quote }}
+            - name: SLACK_APP_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "slackSecretRef.name is required" .Values.slackSecretRef.name | quote }}
+                  key: {{ required "slackSecretRef.appTokenKey is required" .Values.slackSecretRef.appTokenKey | quote }}
+            - name: SLACK_BOT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.slackSecretRef.name | quote }}
+                  key: {{ required "slackSecretRef.botTokenKey is required" .Values.slackSecretRef.botTokenKey | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources: {{ toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL

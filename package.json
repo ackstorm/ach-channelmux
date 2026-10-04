@@ -1,0 +1,26 @@
+{
+  "name": "ach-channelmux",
+  "version": "0.1.0",
+  "description": "Slack relay: one Slack app, a personal coding agent per user",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "start": "node src/main.ts",
+    "test": "node --test --test-concurrency=1 test/e2e.test.ts test/resolver.test.ts"
+  },
+  "dependencies": {
+    "@slack/socket-mode": "^2.0.7",
+    "@slack/web-api": "^7.19.0",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@slack/bolt": "^4.7.3",
+    "@types/node": "^26.6.4",
+    "@types/ws": "^8.18.2",
+    "typescript": "^5.9.3"
+  }
+}
