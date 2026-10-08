@@ -15,6 +15,7 @@ const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON
 // Session ids keep counting across restarts of the agent process, like real ones never repeat.
 let n = existsSync(process.env.MOCK_AGENT_LOG!) ? readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter((l) => l.includes('"m":"new"')).length : 0;
 const cancels = new Map<string, () => void>();
+let flaky = 0; // prompt "flaky" fails the first time
 const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[] }>();
 const models = (currentValue: string): acp.SessionConfigOption[] => [
   { id: "model", name: "Model", category: "model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
@@ -73,6 +74,7 @@ new acp.AgentSideConnection(
         const text = envelope ? envelope[1] + envelope[3] : raw;
         const images = prompt.filter((p) => p.type === "image").map((p: any) => p.mimeType);
         log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
+        if (text === "flaky" && !flaky++) throw new Error("gateway timeout");
         if (text === "wait") {
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };

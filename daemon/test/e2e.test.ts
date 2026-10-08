@@ -261,6 +261,16 @@ test("the model's thinking shows as a Thinking card", async () => {
   assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thinking", "in_progress", undefined], ["Thinking", "complete", "Weighing it."]]);
 });
 
+test("a failed turn offers Retry, which sends the same message again", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "flaky", { ts: "100.000023", thread_ts: "100.000001" }));
+  const failed = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && p.params.blocks?.includes('"retry"')));
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "x"));
+  const id = JSON.parse(failed.params.blocks)[0].accessory.value;
+  await click({ ts: failed.ts, thread_ts: "100.000001" }, { type: "button", action_id: "retry", value: id });
+  await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "flaky").length === 2);
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "white_check_mark"));
+});
+
 test("a subagent's own reply is not streamed as the agent's reply", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "subagent", { ts: "100.000013", thread_ts: "100.000001" }));

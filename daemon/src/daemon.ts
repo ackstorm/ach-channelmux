@@ -97,6 +97,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
   const outputs = new Map<string, Output>(); // session -> its running turn
+  const retries = new Map<string, { thread: string; blocks: acp.ContentBlock[]; ts?: string }>(); // Retry button -> the failed prompt
   const permissions = new Map<string, { sessionId: string; resolve: (optionId?: string) => void }>(); // request id -> its answer (none: cancelled)
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
@@ -431,6 +432,12 @@ export function createDaemon(cfg: DaemonConfig) {
           await upload(t, "changes.diff", Buffer.from(diffs.join("\n")), { snippet: "diff" }).catch((err) => log("diff_upload_failed", { error: String(err) }));
         }
         if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
+        if (outcome === "failed") {
+          // The error is in the reply; a button sends the same message again.
+          const id = randomUUID();
+          retries.set(id, { thread: t.thread, blocks, ts });
+          await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
+        }
         const took = Date.now() - started;
         if (took >= (cfg.doneNoticeMs ?? 60_000)) await say(t, `${DONE[outcome]} · ${duration(took)}`).catch(() => {});
         outputs.delete(t.sessionId);
@@ -945,6 +952,16 @@ export function createDaemon(cfg: DaemonConfig) {
     await stop(t);
     const b = body as any;
     await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
+  });
+
+  app.action("retry", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const r = retries.get((action as any).value);
+    retries.delete((action as any).value);
+    const t = r && threads[r.thread];
+    await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text: t ? "⚠️ The turn failed. Retrying…" : "⚠️ The turn failed. (Retry expired: send the message again.)", blocks: [] });
+    if (t) void prompt(t, r.blocks, { ts: r.ts });
   });
 
   app.action(/^ask_/, async ({ ack, body, action }) => {
