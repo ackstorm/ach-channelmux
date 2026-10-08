@@ -53,6 +53,7 @@ const newDaemon = () =>
     baseDir: base,
     stateFile: join(base, ".state", "threads.json"),
     log: () => {},
+    doneNoticeMs: 100, // the "wait" turns run longer: they end with a notice
   });
 const calls = (method: string) => slack.calls.filter((c) => c.method === method);
 const replies = (thread: string) => posts.filter((p) => p.params.thread_ts === thread && p.params.markdown_text).map((p) => p.params.markdown_text);
@@ -202,10 +203,12 @@ test("Slack's stop button cancels the running turn; a message meanwhile is queue
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait"));
   await slack.emit("events_api", slack.dm("UPEPE", "and then this", { ts: "100.000006", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")));
+  await sleep(150); // past doneNoticeMs
   await slack.emit("events_api", stopEvent("100.000001"));
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /^⏹️ Stopped · \d+s$/.test(p.params.text ?? ""))); // a long turn ends with a message, which notifies
 });
 
 test("Send now on a queued notice stops the running turn and the queued message runs", async () => {
@@ -403,7 +406,7 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await say("$compact", "500.000004");
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/compact"));
   await say("$model", "500.000012"); // after a turn the agent has reported its context use
-  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\*Context\* 24k \/ 200k \(12%\)/.test(p.params.text ?? "")));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\*Context\* 24k \/ 200k \(12%\)   ·   \*Cost\* \$0\.012/.test(p.params.text ?? "")));
   await say("$review branch", "500.000010"); // the agent's own command, with arguments
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/review branch"));
   await say("$HOME is unset", "500.000011"); // not a command: goes to the agent as a message

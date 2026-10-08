@@ -54,6 +54,8 @@ export interface DaemonConfig {
   /** Called when the agent process exits on its own. */
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
+  /** A turn at least this long ends with a short message, which notifies (a stream's end does not). Default 60 s. */
+  doneNoticeMs?: number;
 }
 
 interface Pending {
@@ -101,7 +103,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
-  const usage = new Map<string, { used: number; size: number }>(); // session -> context window use
+  const usage = new Map<string, { used: number; size: number; cost?: { amount: number; currency: string } | null }>(); // session -> context use, cost so far
   const turnDiffs = new Map<string, string[]>(); // session -> full diffs of the running turn's edits
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
@@ -340,6 +342,8 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // How a turn ended, as a reaction on the message that asked for it.
   const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
+  const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
+  const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   function prompt(t: Thread, blocks: acp.ContentBlock[], opts: { title?: string; ts?: string } = {}) {
     const { title, ts } = opts;
@@ -348,6 +352,7 @@ export function createDaemon(cfg: DaemonConfig) {
       void say(t, queued, [section(queued, button("Send now", "queue_now", t.thread))]);
     }
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
+      const started = Date.now();
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
       outputs.set(t.sessionId, out);
@@ -378,6 +383,8 @@ export function createDaemon(cfg: DaemonConfig) {
           await upload(t, "changes.diff", Buffer.from(diffs.join("\n")), { snippet: "diff" }).catch((err) => log("diff_upload_failed", { error: String(err) }));
         }
         if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
+        const took = Date.now() - started;
+        if (took >= (cfg.doneNoticeMs ?? 60_000)) await say(t, `${DONE[outcome]} · ${duration(took)}`).catch(() => {});
         outputs.delete(t.sessionId);
       }
     });
@@ -632,6 +639,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const summary = (t: Thread) => {
     const u = usage.get(t.sessionId);
     const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${Math.round((100 * u.used) / u.size)}%)`] : [];
+    if (u?.cost) context.push(`*Cost* ${u.cost.currency === "USD" ? "$" : `${u.cost.currency} `}${u.cost.amount.toFixed(u.cost.amount < 1 ? 3 : 2)}`);
     return `⚙️ ${[...selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``), ...context].join("   ·   ")}`;
   };
 

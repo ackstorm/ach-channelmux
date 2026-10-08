@@ -119,7 +119,7 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "t0", status: "completed" } });
           await say(sessionId, "Done.");
         }
-        await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 24_000, size: 200_000 } });
+        await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 24_000, size: 200_000, cost: { amount: 0.0123, currency: "USD" } } });
         return { stopReason: "end_turn" };
       },
       async setSessionConfigOption({ configId, value }) {
