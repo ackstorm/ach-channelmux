@@ -52,21 +52,29 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   const i = input ?? {};
   const path: string | undefined = i.filePath ?? i.path ?? u.locations?.[0]?.path;
   const command = typeof i.command === "string" ? i.command : undefined;
+  // A subagent's own tools (opencode) come titled "<subagent task>: glob"; they show as "↳ glob".
+  const child = u._meta?.["opencode/child-session"]?.title;
   let title: string | undefined = u.title ?? undefined;
+  if (child && title?.startsWith(`${child}: `)) title = title.slice(child.length + 2);
+  const subject = path ? rel(path) : (i.description ?? i.id); // a subagent's task, a skill's name
   if (command) title = command; // a shell card is its command
-  else if (title && path && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${rel(path)}`; // "read" -> "read calc.py"
+  else if (title && subject && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${subject}`; // "read" -> "read calc.py"
+  if (child && title) title = `↳ ${title}`;
   let details: string | undefined;
   if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
   else if (i.url) details = String(i.url);
+  else if (typeof i.code === "string") details = i.code;
   let output: string | undefined;
   let status: string | undefined = u.status ?? undefined;
   if (u.status === "completed" || u.status === "failed") {
     const content: any[] = u.content ?? [];
     const diffs = content.filter((c) => c.type === "diff");
-    const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim();
+    const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim()
+      .replace(/^<subagent[^>]*>\n?([\s\S]*?)\n?<\/subagent>$/, "$1");
     const exit = u.rawOutput?.metadata?.exit;
     const failed = typeof exit === "number" && exit !== 0 ? `exit ${exit}\n` : "";
-    if (failed) status = "failed"; // opencode reports a command that exits non-zero as completed
+    // opencode reports a command that exits non-zero, or a tool error, as completed
+    if (failed || u.rawOutput?.metadata?.error === true) status = "failed";
     const room = OUTPUT_MAX - 40; // headers and fences
     if (diffs.length) {
       const head = diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n");

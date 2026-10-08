@@ -107,6 +107,15 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   assert.deepEqual(pending, { title: "shell", status: "pending" }); // not "shell /w/proj"
   const grep = describeTool({ title: "grep", kind: "search", status: "pending" }, { pattern: "TODO", path: "/w/proj/src" }, cwd);
   assert.deepEqual(grep, { title: "grep src", status: "pending", details: "TODO in src" });
+  // A subagent, the tools it runs, a skill, opencode's code tool.
+  const meta = { "opencode/child-session": { id: "ses_c", title: "Count txt files" } };
+  const sub = describeTool({ title: "subagent", kind: "think", status: "completed", content: [{ type: "content", content: { type: "text", text: '<subagent sessionID="ses_c" state="completed">\nThere are 2.\n</subagent>' } }] }, { agent: "general", description: "Count txt files", prompt: "..." }, cwd);
+  assert.deepEqual(sub, { title: "subagent Count txt files", status: "completed", output: "```\nThere are 2.\n```" });
+  assert.deepEqual(describeTool({ title: "Count txt files: glob", kind: "search", status: "pending", _meta: meta }, { pattern: "*.txt" }, cwd), { title: "↳ glob", status: "pending", details: "*.txt" });
+  assert.equal(describeTool({ title: "Count txt files: read", kind: "read", status: "pending", _meta: meta }, { path: "a.txt" }, cwd).title, "↳ read a.txt");
+  assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
+  const code = describeTool({ title: "execute", kind: "other", status: "completed", rawOutput: { metadata: { error: true } }, content: [{ type: "content", content: { type: "text", text: "Unknown tool" } }] }, { code: "await x()" }, cwd);
+  assert.deepEqual(code, { title: "execute", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" });
   const long = describeTool({ title: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "z".repeat(2000) } }] }, {}, cwd).output!;
   assert.ok(long.length <= 500 && long.endsWith("…\n```"), "clipped inside a closed fence");
 });

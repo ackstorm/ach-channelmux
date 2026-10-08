@@ -228,6 +228,14 @@ test("a turn that ends after its tools with no reply gets one nudge, and the rep
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /Here is the result\./);
 });
 
+test("a subagent's own reply is not streamed as the agent's reply", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "subagent", { ts: "100.000013", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  const text = streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join("");
+  assert.equal(text, "Parent reply.");
+});
+
 test("an edit too long for its card also comes as a changes.diff snippet at the end of the turn", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));

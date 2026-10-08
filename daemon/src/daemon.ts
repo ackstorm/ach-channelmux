@@ -128,6 +128,8 @@ export function createDaemon(cfg: DaemonConfig) {
         const raw = (update as any).rawInput;
         if (raw && Object.keys(raw).length) inputs.set(update.toolCallId, raw); // opencode starts with {} and fills it later
       }
+      // A subagent's reply (opencode streams it on the parent session) is its card's output, not ours.
+      if (update.sessionUpdate === "agent_message_chunk" && (update as any)._meta?.["opencode/child-session"]) return;
       if (replaying.has(sessionId)) {
         if (update.sessionUpdate === "user_message_chunk") lastReply.set(sessionId, "");
         if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {

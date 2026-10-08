@@ -78,6 +78,11 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e1", title: "edit", kind: "edit", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", content: [{ type: "diff", path: `${cwd}/big.py`, oldText, newText }] } });
           await say(sessionId, "Edited.");
+        } else if (text === "subagent") {
+          // Like opencode: the subagent's reply streams on this session, tagged with its child session.
+          const _meta = { "opencode/child-session": { id: "ses_child", title: "Count" } };
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "CHILD REPLY" }, _meta } });
+          await say(sessionId, "Parent reply.");
         } else if (text === "silent") {
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed" } });
