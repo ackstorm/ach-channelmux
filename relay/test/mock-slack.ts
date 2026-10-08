@@ -31,6 +31,7 @@ export function createMockSlack(users: Record<string, string>) {
     if (url.pathname.startsWith("/files/")) {
       if (req.headers.authorization !== `Bearer ${BOT_TOKEN}`) return send({ ok: false }, 403);
       res.writeHead(200, { "content-type": "text/plain" });
+      if (url.pathname.endsWith(".vtt")) return res.end("WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nhello from\n\n2\n00:00:02.000 --> 00:00:04.000\na voice note\n");
       return res.end(`content of ${url.pathname.split("/")[2]}`);
     }
     if (url.pathname.startsWith("/upload/")) {
@@ -81,6 +82,8 @@ export function createMockSlack(users: Record<string, string>) {
         const id = `F_UP${mock.uploads.size + 1}`;
         return send({ ok: true, upload_url: `http://127.0.0.1:${port}/upload/${id}`, file_id: id });
       }
+      case "conversations.replies":
+        return send({ ok: true, messages: mock.replies?.(params) ?? [] });
       case "views.update":
         // Like Slack: an empty value fails the view schema (e.g. a button's value).
         if (params.view?.includes('"value":""')) return send({ ok: false, error: "invalid_arguments" });
@@ -115,6 +118,8 @@ export function createMockSlack(users: Record<string, string>) {
     onPost: undefined as ((params: Record<string, string>, ts: string) => void) | undefined,
     /** Per-method sliding windows; over the limit answers HTTP 429 with Retry-After: 1. */
     limits: {} as Record<string, { max: number; windowMs: number }>,
+    /** Optional: the messages conversations.replies answers. */
+    replies: undefined as ((params: Record<string, string>) => unknown[]) | undefined,
     /** Methods that answer ok:false with this error. */
     fail: new Map<string, string>(),
     /** Bodies posted to the upload URLs from files.getUploadURLExternal, by file id. */

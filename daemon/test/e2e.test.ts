@@ -263,6 +263,18 @@ test("attached files are saved to a temp folder and the agent gets their paths, 
   assert.equal(readFileSync(paths[1], "utf8"), "content of F2");
 });
 
+test("a voice clip reaches the agent as Slack's transcript, waited for while Slack transcribes it", async () => {
+  const clip = { id: "FV1", name: "audio_message.m4a", subtype: "slack_audio", mimetype: "video/mp4", size: 20, url_private_download: `${slack.url}/files/FV1/audio_message.m4a` };
+  const done = { ...clip, transcription: { status: "complete", preview: { content: "hello from", has_more: true } }, vtt: `${slack.url}/files/FV1/transcript.vtt` };
+  slack.replies = (p) => (p.ts === "100.000001" ? [{ ts: "100.000001" }, { ts: "100.000014", files: [done] }] : []);
+  await slack.emit("events_api", slack.dm("UPEPE", "", {
+    ts: "100.000014", thread_ts: "100.000001", subtype: "file_share", files: [{ ...clip, transcription: { status: "processing" } }],
+  }));
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("Voice message")));
+  assert.equal(p.text, "[Voice message, transcribed by Slack]\nhello from a voice note"); // the whole transcript, through the relay
+  slack.replies = undefined;
+});
+
 test("the agent sends a file to the thread with the send_file tool, without our token reaching the upload URL", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000011", thread_ts: "100.000001" }));
   const sent = await waitFor(() => agentLog().find((e) => e.m === "sent"));

@@ -10,6 +10,7 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
+import { setTimeout as sleep } from "node:timers/promises";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
 import { DIFF_IN_CARD, createOutput, describeTool, fullDiff, type Output } from "./output.ts";
@@ -27,6 +28,12 @@ const HELP = [
 ].join("\n");
 const BUILTIN = ["stop", "compact", "clear", "model", "mode", "effort", "settings", "help"];
 const SHELL_TIMEOUT_MS = 120_000;
+const VOICE_POLLS = 15; // seconds to wait for Slack to transcribe a voice clip
+type Where = { channel?: string; ts?: string; thread_ts?: string }; // a Slack message's place
+
+/** The text of a WebVTT transcript: its cues, without the header, numbers and timings. */
+const vttText = (vtt: string) =>
+  vtt.split("\n").map((l) => l.trim()).filter((l) => l && l !== "WEBVTT" && !l.includes("-->") && !/^\d+$/.test(l)).join(" ");
 const SHELL_SHOWN = 3_000; // output characters shown in Slack (the tail)
 
 const NUDGE =
@@ -188,9 +195,14 @@ export function createDaemon(cfg: DaemonConfig) {
   // Slack files, fetched through the relay's file proxy with this daemon's token and saved to a
   // temp folder. The agent only gets their paths: it opens a file when it needs to, so images
   // do not fill its context unasked.
-  async function attachments(files: any[] = []): Promise<string[]> {
+  async function attachments(files: any[] = [], m: Where = {}): Promise<string[]> {
     const notes: string[] = [];
     for (const f of files) {
+      const said = f.subtype === "slack_audio" ? await voice(f, m) : undefined;
+      if (said) {
+        notes.push(said);
+        continue;
+      }
       const url = f.url_private_download ?? f.url_private;
       // Our token is the relay token: it goes to the relay's file proxy and nowhere else.
       if (!url?.startsWith(`${cfg.relayUrl.replace(/\/$/, "")}/`) || f.size > MAX_FILE) {
@@ -207,6 +219,24 @@ export function createDaemon(cfg: DaemonConfig) {
       notes.push(`[Attached file saved at ${path}]`);
     }
     return notes;
+  }
+
+  // A Slack voice clip: Slack's own transcript (its preview, or the whole WebVTT when longer), polled
+  // for while Slack is still transcribing. Without one, the audio is saved like any other file.
+  async function voice(f: any, m: Where): Promise<string | undefined> {
+    for (let i = 0; f.transcription?.status === "processing" && m.channel && i < VOICE_POLLS; i++) {
+      await sleep(1_000);
+      const r: any = await slack.conversations.replies({ channel: m.channel, ts: m.thread_ts ?? m.ts!, oldest: m.ts, inclusive: true }).catch(() => ({}));
+      f = r.messages?.find((x: any) => x.ts === m.ts)?.files?.find((x: any) => x.id === f.id) ?? f;
+    }
+    const t = f.transcription;
+    if (t?.status !== "complete") return undefined;
+    let text: string = t.preview?.content ?? "";
+    if (t.preview?.has_more && f.vtt?.startsWith(`${cfg.relayUrl.replace(/\/$/, "")}/`)) {
+      const res = await fetch(f.vtt, { headers: { authorization: `Bearer ${cfg.token}` } });
+      if (res.ok) text = vttText(await res.text());
+    }
+    return text ? `[Voice message, transcribed by Slack]\n${text}` : undefined;
   }
 
   // ---------- MCP: the agent's Slack tools ----------
@@ -378,8 +408,8 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // A Slack message for the agent, wrapped so the session shows what came from Slack, from whom
   // and when (the relay preamble explains the envelope). Attachment notes go inside.
-  async function blocksFor(m: { text?: string; files?: any[]; user?: string; ts?: string }, edited = false): Promise<acp.ContentBlock[]> {
-    const [notes, who] = await Promise.all([attachments(m.files), person(m.user)]);
+  async function blocksFor(m: Where & { text?: string; files?: any[]; user?: string }, edited = false): Promise<acp.ContentBlock[]> {
+    const [notes, who] = await Promise.all([attachments(m.files, m), person(m.user)]);
     const body = [m.text, ...notes].filter(Boolean).join("\n\n").replaceAll("</slack>", "<\\/slack>");
     const from = who.name ? ` from="${attr(who.name)}"` : "";
     const edit = edited ? ` edited="true"` : "";

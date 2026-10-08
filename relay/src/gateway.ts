@@ -432,14 +432,18 @@ export function createGateway(cfg: GatewayConfig) {
     });
   }
 
-  function rewriteFiles(owner: Owner, payload: any) {
-    const files = payload?.event?.files;
+  function rewriteFiles(owner: Owner, files: any) {
     if (!Array.isArray(files)) return;
+    const proxy = (key: string, name: string, original: string) => {
+      owner.files.set(key, original);
+      return `${cfg.publicUrl}/files/${encodeURIComponent(key)}/${encodeURIComponent(name)}`;
+    };
     for (const f of files) {
+      if (!f.id) continue;
+      if (f.vtt) f.vtt = proxy(`${f.id}.vtt`, "transcript.vtt", f.vtt); // a voice clip's transcript
       const original = f.url_private_download ?? f.url_private;
-      if (!f.id || !original) continue;
-      owner.files.set(f.id, original);
-      const proxied = `${cfg.publicUrl}/files/${encodeURIComponent(f.id)}/${encodeURIComponent(f.name ?? "file")}`;
+      if (!original) continue;
+      const proxied = proxy(f.id, f.name ?? "file", original);
       if (f.url_private) f.url_private = proxied;
       if (f.url_private_download) f.url_private_download = proxied;
     }
@@ -523,7 +527,7 @@ export function createGateway(cfg: GatewayConfig) {
       if (body.trigger_id) owner.triggers.add(body.trigger_id);
       if (body.view?.id) owner.views.add(body.view.id);
     }
-    rewriteFiles(owner, body);
+    rewriteFiles(owner, body?.event?.files);
     if (type === "events_api") {
       const ev = body.event;
       if (ev.type === "message") {
@@ -662,7 +666,9 @@ export function createGateway(cfg: GatewayConfig) {
         }
         return { ok: true };
       }
-      return slack(method, params);
+      const r = await slack(method, params);
+      if (method === "conversations.replies") for (const m of r.messages ?? []) rewriteFiles(owner, m.files); // e.g. a clip's finished transcript
+      return r;
     }
     if (method === "views.open") {
       if (!owner.triggers.has(params.trigger_id)) return { ok: false, error: "restricted_action" };
