@@ -242,6 +242,14 @@ test("a turn that ends after its tools with no reply gets one nudge, and the rep
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /Here is the result\./);
 });
 
+test("the model's thinking shows as a Thinking card", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "think", { ts: "100.000017", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  const cards = streamed(since(n)).filter((c: any) => c.type === "task_update");
+  assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thinking", "in_progress", undefined], ["Thinking", "complete", "Weighing it."]]);
+});
+
 test("a subagent's own reply is not streamed as the agent's reply", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "subagent", { ts: "100.000013", thread_ts: "100.000001" }));

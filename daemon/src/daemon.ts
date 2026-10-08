@@ -147,6 +147,7 @@ export function createDaemon(cfg: DaemonConfig) {
       const out = outputs.get(sessionId);
       if (!out) return;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
+      else if (update.sessionUpdate === "agent_thought_chunk" && update.content.type === "text") out.thought(update.content.text);
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         const cwd = bySession.get(sessionId)?.cwd ?? "";
         void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), cwd));

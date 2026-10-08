@@ -127,6 +127,8 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let afterTool = false;
   let quiet = false; // a tool ran and no text has come since
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let thinking: { id: string; text: string } | null = null; // the model's thinking since its last text or tool
+  let thoughts = 0;
   const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
   const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
   let chain: Promise<unknown> = Promise.resolve();
@@ -177,10 +179,54 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     for (const part of splitMarkdown(text.trim())) await api("chat.postMessage", { channel, thread_ts: thread, markdown_text: part });
   }
 
+  function tool(id: string, info: ToolInfo) {
+    if (thinking && id !== thinking.id) endThought();
+    const prev = tasks.get(id);
+    const details = info.details ?? (prev?.details as string | undefined);
+    const output = info.output ?? (prev?.output as string | undefined);
+    const sources = info.sources ?? prev?.sources;
+    const task: Chunk = {
+      type: "task_update",
+      // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
+      id: prev?.id ?? `t${tasks.size + 1}`,
+      title: clip(String(info.title ?? prev?.title ?? "tool"), TITLE_MAX),
+      status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
+      ...(details && { details }),
+      ...(output && { output }),
+      ...(sources ? { sources } : {}),
+    };
+    // Agents repeat unchanged updates; each would cost an append from the shared budget.
+    const same = (k: string) => JSON.stringify(prev?.[k]) === JSON.stringify(task[k]);
+    if (prev && ["title", "status", "details", "output", "sources"].every(same)) return chain;
+    tasks.set(id, task);
+    afterTool = true;
+    quiet = true;
+    // Slack adds a card's sources to those it already shows: send them only when they change.
+    const { sources: _, ...withoutSources } = task;
+    const chunk = same("sources") ? withoutSources : task;
+    return run(async () => {
+      await flush();
+      await send([chunk]);
+    });
+  }
+
+  // The model's thinking is one folded card per stretch: opened when it starts, filled with its
+  // end when text or a tool follows (two appends, not one per chunk).
+  function endThought() {
+    if (!thinking) return;
+    const { id, text } = thinking;
+    thinking = null;
+    const tail = text.trim().replaceAll("\`\`\`", "ˋˋˋ");
+    void tool(id, { status: "completed", ...(tail && { output: tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail }) });
+  }
+
   return {
     begin: () => run(() => status("processing", opts.title ? { title: opts.title.slice(0, 200) } : {})),
     text(s: string) {
-      if (s.trim()) quiet = false;
+      if (s.trim()) {
+        endThought();
+        quiet = false;
+      }
       if (afterTool) {
         s = `\n\n${s}`;
         afterTool = false;
@@ -188,35 +234,12 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       pending += s;
       if (streaming && !timer) timer = setTimeout(() => run(flush), FLUSH_MS);
     },
-    tool(id: string, info: ToolInfo) {
-      const prev = tasks.get(id);
-      const details = info.details ?? (prev?.details as string | undefined);
-      const output = info.output ?? (prev?.output as string | undefined);
-      const sources = info.sources ?? prev?.sources;
-      const task: Chunk = {
-        type: "task_update",
-        // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
-        id: prev?.id ?? `t${tasks.size + 1}`,
-        title: clip(String(info.title ?? prev?.title ?? "tool"), TITLE_MAX),
-        status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
-        ...(details && { details }),
-        ...(output && { output }),
-        ...(sources ? { sources } : {}),
-      };
-      // Agents repeat unchanged updates; each would cost an append from the shared budget.
-      const same = (k: string) => JSON.stringify(prev?.[k]) === JSON.stringify(task[k]);
-      if (prev && ["title", "status", "details", "output", "sources"].every(same)) return chain;
-      tasks.set(id, task);
-      afterTool = true;
-      quiet = true;
-      // Slack adds a card's sources to those it already shows: send them only when they change.
-      const { sources: _, ...withoutSources } = task;
-      const chunk = same("sources") ? withoutSources : task;
-      return run(async () => {
-        await flush();
-        await send([chunk]);
-      });
+    thought(s: string) {
+      if (thinking) return void (thinking.text += s);
+      thinking = { id: `thought${++thoughts}`, text: s };
+      void tool(thinking.id, { title: "Thinking", status: "in_progress" });
     },
+    tool,
     /** True when the turn's last output was a tool call, with no reply after it. */
     get quiet() {
       return quiet;
@@ -229,12 +252,14 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
         await status("suspended");
       }),
     resume: () => run(() => status("processing")),
-    end: () =>
-      run(async () => {
+    end: () => {
+      endThought();
+      return run(async () => {
         await flush();
         if (stream) await stopStream().catch(() => status("active"));
         else await status("active");
-      }),
+      });
+    },
   };
 }
 

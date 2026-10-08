@@ -133,6 +133,22 @@ test("a card's details and output reach the stream, and a repeated identical upd
   assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", "$ ls", "a.txt"]]);
 });
 
+test("the model's thinking is one card, opened when it starts and filled when text follows", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  out.thought("Let me ");
+  out.thought("check the ```code```.");
+  out.text("Answer.");
+  await out.end();
+  const all = chunks(calls);
+  assert.deepEqual(all.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status, c.output]), [
+    ["Thinking", "in_progress", undefined],
+    ["Thinking", "complete", "Let me check the ˋˋˋcodeˋˋˋ."],
+  ]);
+  assert.equal(all.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "\n\nAnswer.");
+  assert.equal(out.quiet, false);
+});
+
 test("a card's sources go out once: Slack adds them to those it shows", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
