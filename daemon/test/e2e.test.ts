@@ -83,6 +83,7 @@ async function openPicker(thread: string) {
   return { msg, view: lastView() };
 }
 const since = (n: number) => slack.calls.slice(n);
+const turnEnded = (ts: string) => waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === ts && c.params.name === "white_check_mark"));
 const streamed = (calls: typeof slack.calls) =>
   calls.flatMap((c) => (c.params.chunks ? JSON.parse(c.params.chunks) : []));
 
@@ -527,6 +528,7 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   await submit(next.view, sessionChoice("new"));
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("login fails on Safari")));
   assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]/);
+  await turnEnded(root.ts!); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
 
 test("the picker message offers a one-tap new session in the last used folder", async () => {
@@ -538,4 +540,5 @@ test("the picker message offers a one-tap new session in the last used folder", 
   await click({ ts: msg.ts, thread_ts: "910.000001" }, { type: "button", action_id: "picker_quick", value: quick.value });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "quick one"));
   assert.equal(agentLog().filter((e) => e.m === "new").at(-1).cwd, last);
+  await turnEnded("910.000001");
 });
