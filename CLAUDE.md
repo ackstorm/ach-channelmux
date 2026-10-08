@@ -7,11 +7,13 @@ Two npm workspaces: the relay and the daemon (Slack ↔ ACP agent, e.g. `opencod
 ## Layout
 
 - `relay/src/gateway.ts`: the relay (upstream Socket Mode, downstream Socket Mode facade, Web API allowlist, files, working notice, preamble).
+- `relay/src/limiter.ts`: paces and retries upstream Slack calls, shared across every daemon.
 - `relay/src/resolver.ts`: token → owner email through the configured endpoint.
 - `relay/src/main.ts`: env config and the default session preamble.
-- `relay/test/`: `e2e.test.ts` (mock Slack + real Bolt clients as daemons), `resolver.test.ts`, `mock-slack.ts`.
-- `daemon/src/daemon.ts`: the daemon (folder picker, thread = ACP session, text segments, permission buttons, session reload).
-- `daemon/src/main.ts`: env config. `daemon/test/`: `e2e.test.ts` (mock Slack + real relay + daemon), `mock-agent.ts` (ACP).
+- `relay/test/`: `e2e.test.ts` (mock Slack + real Bolt clients as daemons), `resolver.test.ts`, `limiter.test.ts`, `load.test.ts`, `mock-slack.ts`.
+- `daemon/src/daemon.ts`: the daemon (folder picker, thread = ACP session, stop/queued, permission buttons, files, session reload).
+- `daemon/src/output.ts`: renders one agent turn into Slack (native stream with task cards, plain-message fallback).
+- `daemon/src/main.ts`: env config. `daemon/test/`: `e2e.test.ts` (mock Slack + real relay + daemon), `output.test.ts`, `mock-agent.ts` (ACP).
 - `chart/`: the relay's Helm chart. `examples/coder/`: the daemon in Coder workspaces.
 
 ## Rules
