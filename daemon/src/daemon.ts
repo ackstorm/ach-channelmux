@@ -703,7 +703,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
   const summary = (t: Thread) => {
     const u = usage.get(t.sessionId);
-    const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${Math.round((100 * u.used) / u.size)}%)`] : [];
+    const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${u.used && u.used < u.size / 100 ? "<1" : Math.round((100 * u.used) / u.size)}%)`] : [];
     if (u?.cost) context.push(`*Cost* ${u.cost.currency === "USD" ? "$" : `${u.cost.currency} `}${u.cost.amount.toFixed(u.cost.amount < 1 ? 3 : 2)}`);
     return `⚙️ ${[...selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``), ...context].join("   ·   ")}`;
   };
