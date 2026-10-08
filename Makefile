@@ -5,13 +5,21 @@ help: ## List targets
 	@grep -E '^[a-zA-Z_-]+:.*?## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  %-14s %s\n", $$1, $$2}'
 
 .PHONY: test
-test: ## Gateway tests + Helm lint
+test: ## Tests + Helm lint
 	npm test
 	helm lint $(CHART) --set publicUrl=http://ach-channelmux.ach.svc --set authResolver.url=http://whoami.example --set authResolver.header=X-Token
 
+.PHONY: daemon-bin
+daemon-bin: ## Build the daemon binaries and checksums into dist/ (needs bun)
+	@mkdir -p dist
+	@for t in x64:amd64 arm64:arm64; do \
+		bun build daemon/src/main.ts --compile --target=bun-linux-$${t%%:*} --outfile dist/ach-channelmux-daemon-linux-$${t##*:} || exit 1; \
+	done
+	cd dist && sha256sum ach-channelmux-daemon-* > checksums.txt
+
 .PHONY: image
 image: ## Build the image locally as ach-channelmux:dev
-	docker build -t ach-channelmux:dev .
+	docker build -f relay/Dockerfile -t ach-channelmux:dev .
 
 ##@ Release
 

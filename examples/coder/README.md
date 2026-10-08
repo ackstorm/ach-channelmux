@@ -1,9 +1,10 @@
-# Example: cc-connect in Coder workspaces
+# Example: the daemon in Coder workspaces
 
-`cc-connect.sh` installs a cc-connect build, writes its config and keeps it running, so
-the workspace owner's coding agent (OpenCode over ACP) answers their Slack DMs through
-ach-channelmux. cc-connect authenticates with the workspace agent's own `CODER_AGENT_TOKEN`
-(set by Coder, valid while the workspace runs); never pass the owner's session token.
+`daemon.sh` installs the ach-channelmux daemon and keeps it running, so the workspace
+owner's coding agent (`opencode acp`) answers their Slack DMs through ach-channelmux. The
+daemon authenticates with the workspace agent's own `CODER_AGENT_TOKEN` (set by Coder, valid
+while the workspace runs); never pass the owner's session token. The workspace image needs
+`opencode` on the PATH and glibc (the binaries are not built for musl/Alpine).
 
 ## Template
 
@@ -15,19 +16,19 @@ env = {
 }
 ```
 
-Copy `cc-connect.sh` next to `main.tf` and add:
+Copy `daemon.sh` next to `main.tf` and add:
 
 ```hcl
-resource "coder_script" "cc_connect" {
+resource "coder_script" "slack_agent" {
   agent_id     = coder_agent.main.id
   display_name = "Slack agent"
   icon         = "/icon/slack.svg"
   run_on_start = true
-  script       = file("${path.module}/cc-connect.sh")
+  script       = file("${path.module}/daemon.sh")
 }
 ```
 
-Optional env: `CC_CONNECT_WORKSPACE` (agent's starting directory, default `/workspace`).
+Optional env: `AGENT_BASE_DIR` (the folder picker offers it and its subfolders, default `/workspace`).
 
 ## Resolving the agent token
 
@@ -62,7 +63,7 @@ WHERE a.auth_token = $1
 
 ## Operations
 
-cc-connect build: the script pins `VERSION`, a release of a cc-connect fork with the
-patches the relay needs (Slack base URL, DM thread scope, ACP session load); the next
-workspace start installs a new one. Logs: `/tmp/cc-connect.log`. Thread sessions persist
-in `~/.local/state/cc-connect` (the home volume).
+Daemon build: the script pins `VERSION`, an ach-channelmux release; the next workspace
+start installs a new one. Logs: `/tmp/ach-channelmux-daemon.log`. The thread → session map
+persists in `~/.local/state/ach-channelmux/threads.json` and OpenCode's sessions in its own
+data dir, both on the home volume, so threads resume after a workspace restart.

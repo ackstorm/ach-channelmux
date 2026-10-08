@@ -7,14 +7,14 @@ run-name: Release ${{ github.event.head_commit.message }}
 #   chore(release): v<MAJOR>.<MINOR>.<PATCH>[-<prerelease>]
 # (made by `make release-cut VERSION=X.Y.Z`) triggers this pipeline:
 #   1. parse the version from the commit message,
-#   2. run the gateway tests,
+#   2. run the tests,
 #   3. `make release-bump VERSION=<X.Y.Z>` and commit the bumps back to main
 #      as github-actions[bot] with [skip ci],
 #   4. create and push the annotated v<X.Y.Z> tag at that commit,
 #   5. build and push the multi-arch image ghcr.io/<owner>/ach-channelmux:vX.Y.Z
 #      and :latest,
 #   6. push the Helm chart to oci://ghcr.io/<owner>/charts/ach-channelmux,
-#   7. create the GitHub release.
+#   7. build the daemon binaries and create the GitHub release with them.
 #
 # A failure after step 4 leaves a tag without artifacts. Recover with
 # `gh run rerun --failed` or another `chore(release): vX.Y.Z` push: the bump
@@ -130,6 +130,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: relay/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
@@ -155,10 +156,19 @@ jobs:
           registry_password: ${{ secrets.GITHUB_TOKEN }}
           update_dependencies: 'false'
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+      - name: Build daemon binaries
+        run: npm ci --ignore-scripts && make daemon-bin
+
       - name: Create GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "v$VERSION" --verify-tag --generate-notes \
             --title "v$VERSION" \
-            --notes "Image: \`$IMAGE:v$VERSION\` · Chart: \`oci://ghcr.io/${{ github.repository_owner }}/charts/ach-channelmux --version $VERSION\`"
+            --notes "Image: \`$IMAGE:v$VERSION\` · Chart: \`oci://ghcr.io/${{ github.repository_owner }}/charts/ach-channelmux --version $VERSION\` · Daemon: \`ach-channelmux-daemon-linux-{amd64,arm64}\`" \
+            dist/*

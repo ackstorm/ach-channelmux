@@ -24,6 +24,20 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm test
 
+  daemon:
+    name: Daemon binary
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - uses: oven-sh/setup-bun@v2
+      - run: npm ci --ignore-scripts
+      - run: make daemon-bin
+
   chart:
     name: Helm lint
     runs-on: ubuntu-latest
@@ -43,4 +57,5 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: .
+          file: relay/Dockerfile
           push: false

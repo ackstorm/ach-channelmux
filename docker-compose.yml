@@ -2,7 +2,7 @@
 #   SLACK_APP_TOKEN, SLACK_BOT_TOKEN, AUTH_RESOLVER_URL, AUTH_RESOLVER_HEADER
 services:
   ach-channelmux:
-    build: .
+    build: { context: ., dockerfile: relay/Dockerfile }
     image: ach-channelmux:dev
     ports: ["8080:8080"]
     environment:

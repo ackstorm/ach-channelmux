@@ -1,83 +1,34 @@
 #!/usr/bin/env bash
-# Runs the gateway against real Slack plus one local cc-connect behind it.
+# Runs the relay against real Slack plus one local daemon (from source) behind it.
 #
 #   SLACK_APP_TOKEN=xapp-... SLACK_BOT_TOKEN=xoxb-... \
 #   CODER_URL=https://coder.example.com CODER_SESSION_TOKEN=$(coder tokens create) \
 #   ./run-local.sh
 #
 # CODER_SESSION_TOKEN identifies you (resolved with Coder's GET /api/v2/users/me), as
-# CODER_AGENT_TOKEN does in a workspace: your DMs (by your Coder email) reach this cc-connect. Optional:
-# DEFAULT_WORKSPACE (agent's starting directory, default $HOME),
-# CC_CONNECT (cc-connect binary, default: cc-connect on PATH),
-# PORT (default 18080).
-# Thread sessions persist per workspace under ~/.local/state/ach-channelmux/.
+# CODER_AGENT_TOKEN does in a workspace: your DMs (by your Coder email) reach this daemon.
+# Optional: BASE_DIR (folders offered by the picker, default $HOME), AGENT_CMD (default
+# "opencode acp"), PORT (default 18080).
+# Thread sessions persist in ~/.local/state/ach-channelmux/threads.json.
 # Ctrl-C stops both.
 set -euo pipefail
 cd "$(dirname "$0")"
 
 : "${SLACK_APP_TOKEN:?}" "${SLACK_BOT_TOKEN:?}" "${CODER_URL:?}" "${CODER_SESSION_TOKEN:?}"
-work_dir=$(realpath "${DEFAULT_WORKSPACE:-$HOME}")
-# One state dir per workspace, so changing DEFAULT_WORKSPACE never reuses a
-# binding to another directory.
-state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/ach-channelmux/$(printf %s "$work_dir" | sha256sum | cut -c1-12)"
 port=${PORT:-18080}
-cc_bin=$(command -v "${CC_CONNECT:-cc-connect}")
-run=$(mktemp -d)
 trap 'kill 0' EXIT
 
-cat > "$run/config.toml" <<EOF
-data_dir = "$state_dir"
-[log]
-level = "info"
-
-[display]
-# Hide thinking and tool messages; each text segment is its own message.
-mode = "compact"
-
-[[projects]]
-name = "local"
-# The gateway only delivers the token owner's own DMs here, so "*" means that user.
-admin_from = "*"
-# Multi-workspace keeps /dir per thread; single-workspace (agent work_dir) makes it global.
-mode = "multi-workspace"
-base_dir = "$work_dir"
-# DMs have no channel name to match a folder, so bind them here.
-default_workspace = "$work_dir"
-# Never rotate a thread to a fresh session after idle: a thread resumes its
-# agent session (ACP session/load) however long it has been quiet.
-reset_on_idle_mins = 0
-# Close a thread's agent process (opencode acp + serve, ~350 MB) after 15 idle
-# minutes; the next message in the thread restarts it and resumes the session.
-agent_session_idle_timeout_mins = 15
-
-[projects.agent]
-type = "acp"
-
-[projects.agent.options]
-cmd = "opencode"
-args = ["acp"]
-
-[[projects.platforms]]
-type = "slack"
-
-[projects.platforms.options]
-bot_token = "\${CODER_SESSION_TOKEN}"
-app_token = "\${CODER_SESSION_TOKEN}"
-base_url = "http://127.0.0.1:$port/api/"
-allow_from = "*"
-session_scope = "thread"
-EOF
-
 AUTH_RESOLVER_URL="${CODER_URL%/}/api/v2/users/me" AUTH_RESOLVER_HEADER=Coder-Session-Token \
-  PORT=$port PUBLIC_URL="http://127.0.0.1:$port" node src/main.ts &
+  PORT=$port PUBLIC_URL="http://127.0.0.1:$port" node relay/src/main.ts &
 
-# Wait (max 15 s) for the gateway before starting the daemon.
+# Wait (max 15 s) for the relay before starting the daemon.
 for _ in $(seq 1 30); do
   curl -sf "http://127.0.0.1:$port/healthz" >/dev/null && break
   sleep 0.5
 done
-curl -sf "http://127.0.0.1:$port/healthz" >/dev/null || { echo "gateway did not start" >&2; exit 1; }
+curl -sf "http://127.0.0.1:$port/healthz" >/dev/null || { echo "relay did not start" >&2; exit 1; }
 
-"$cc_bin" -config "$run/config.toml" &
-echo "gateway :$port, cc-connect in $work_dir — DM the app in Slack. Ctrl-C to stop."
+RELAY_URL="http://127.0.0.1:$port" RELAY_TOKEN=$CODER_SESSION_TOKEN BASE_DIR=${BASE_DIR:-$HOME} \
+  node daemon/src/main.ts &
+echo "relay :$port, daemon on ${BASE_DIR:-$HOME} — DM the app in Slack. Ctrl-C to stop."
 wait

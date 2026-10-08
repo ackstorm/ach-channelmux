@@ -1,8 +1,5 @@
 ach-channelmux {{ .Chart.AppVersion }} is running as {{ .Release.Name }}.{{ .Release.Namespace }}.svc.
 
-Point each daemon's Slack platform at the relay, with a token that
-{{ .Values.authResolver.url }} resolves to its owner (header {{ .Values.authResolver.header }}).
-For cc-connect:
-  base_url  = "{{ .Values.publicUrl }}/api/"
-  bot_token = "<daemon token>"
-  app_token = "<daemon token>"
+Point each daemon at the relay, with a token that {{ .Values.authResolver.url }}
+resolves to its owner (header {{ .Values.authResolver.header }}):
+  RELAY_URL={{ .Values.publicUrl }} RELAY_TOKEN=<daemon token> ach-channelmux-daemon
