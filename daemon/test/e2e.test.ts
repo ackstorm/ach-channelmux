@@ -148,6 +148,33 @@ test("when Slack refuses streaming, replies arrive as one message per segment", 
   }
 });
 
+const stopEvent = (thread: string) => ({
+  type: "event_callback",
+  event_id: `EvStop${thread}`,
+  team_id: "T1",
+  api_app_id: "A1",
+  event: { type: "agent_session_stopped", channel: DM, thread_ts: thread, user: "UPEPE" },
+});
+
+test("Slack's stop button cancels the running turn; a message meanwhile is queued with a notice", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000005", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait"));
+  await slack.emit("events_api", slack.dm("UPEPE", "and then this", { ts: "100.000006", thread_ts: "100.000001" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")));
+  await slack.emit("events_api", stopEvent("100.000001"));
+  await waitFor(() => agentLog().some((e) => e.m === "cancel"));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
+});
+
+test("/stop in the thread cancels too", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000007", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "wait").length === 2);
+  const cancels = agentLog().filter((e) => e.m === "cancel").length;
+  await slack.emit("events_api", slack.dm("UPEPE", "/stop", { ts: "100.000008", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().filter((e) => e.m === "cancel").length > cancels);
+  assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
+});
+
 test("a reply in a thread the daemon does not know says so", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "200.000002", thread_ts: "200.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "200.000001" && /no agent session/.test(p.params.text)));

@@ -8,6 +8,7 @@ import * as acp from "@agentclientprotocol/sdk";
 
 const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON.stringify(entry) + "\n");
 let n = 0;
+const cancels = new Map<string, () => void>();
 
 new acp.AgentSideConnection(
   (conn) => {
@@ -33,6 +34,10 @@ new acp.AgentSideConnection(
       async prompt({ sessionId, prompt }) {
         const text = prompt.map((p) => (p.type === "text" ? p.text : "")).join("");
         log({ m: "prompt", sessionId, text });
+        if (text === "wait") {
+          await new Promise<void>((r) => cancels.set(sessionId, r));
+          return { stopReason: "cancelled" };
+        }
         if (text.includes("perm")) {
           const r = await conn.requestPermission({
             sessionId,
@@ -52,7 +57,10 @@ new acp.AgentSideConnection(
         }
         return { stopReason: "end_turn" };
       },
-      async cancel() {},
+      async cancel({ sessionId }) {
+        log({ m: "cancel", sessionId });
+        cancels.get(sessionId)?.();
+      },
     };
   },
   acp.ndJsonStream(Writable.toWeb(process.stdout), Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>),

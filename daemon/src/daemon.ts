@@ -138,6 +138,7 @@ export function createDaemon(cfg: DaemonConfig) {
   }
 
   function prompt(t: Thread, text: string, title?: string) {
+    if (outputs.has(t.sessionId)) void say(t, "📬 Queued: I'll start on this when the current turn ends.");
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
       outputs.set(t.sessionId, out);
@@ -176,6 +177,8 @@ export function createDaemon(cfg: DaemonConfig) {
     await prompt(t, text, `${basename(cwd)}: ${text.split("\n")[0]}`);
   }
 
+  const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
+
   // ---------- Slack ----------
 
   app.message(async ({ message }) => {
@@ -199,11 +202,21 @@ export function createDaemon(cfg: DaemonConfig) {
       return;
     }
     const t = threads[m.thread_ts];
+    if (t && m.text.trim() === "/stop") {
+      if (outputs.has(t.sessionId)) await stop(t);
+      else await say(t, "Nothing is running.");
+      return;
+    }
     // Not awaited: the turn can outlive Bolt's handler.
     if (t) return void prompt(t, m.text);
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Pick a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
+  });
+
+  app.event("agent_session_stopped", async ({ event }) => {
+    const t = threads[(event as any).thread_ts];
+    if (t && outputs.has(t.sessionId)) await stop(t);
   });
 
   app.action("folder", async ({ ack, body, action }) => {
