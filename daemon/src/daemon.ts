@@ -9,6 +9,7 @@ import { basename, dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
+import { createOutput, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -35,9 +36,6 @@ interface Thread {
   cwd: string;
 }
 
-// Slack caps markdown_text at 12k characters.
-const MAX_TEXT = 12_000;
-
 export function createDaemon(cfg: DaemonConfig) {
   const log = cfg.log ?? ((msg, extra) => console.log(JSON.stringify({ msg, ...(extra as object) })));
   const app = new App({
@@ -58,7 +56,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const loaded = new Map<string, Promise<unknown>>(); // sessions open in this agent process
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
-  const buffers = new Map<string, string>(); // session -> agent text not yet posted
+  const outputs = new Map<string, Output>(); // session -> its running turn
   const permissions = new Map<string, (optionId: string) => void>(); // request id -> resolver
 
   function save() {
@@ -77,20 +75,6 @@ export function createDaemon(cfg: DaemonConfig) {
   const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
     slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, text, ...(blocks && { blocks: blocks as any }) });
 
-  // Each finished text segment (cut by a tool call or the end of the turn) is its own message;
-  // tool calls and thinking stay hidden.
-  async function flush(sessionId: string) {
-    const text = buffers.get(sessionId)?.trim();
-    buffers.delete(sessionId);
-    const t = bySession.get(sessionId);
-    if (!text || !t) return;
-    await slack.chat.postMessage({
-      channel: t.channel,
-      thread_ts: t.thread,
-      markdown_text: text.length > MAX_TEXT ? `${text.slice(0, MAX_TEXT - 20)}\n\n…(truncated)` : text,
-    } as any);
-  }
-
   // ---------- ACP agent ----------
 
   const proc = spawn(cfg.agentCmd[0], cfg.agentCmd.slice(1), { stdio: ["pipe", "pipe", "inherit"], cwd: cfg.baseDir });
@@ -102,17 +86,17 @@ export function createDaemon(cfg: DaemonConfig) {
   });
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
-      if (!bySession.has(sessionId) || replaying.has(sessionId)) return;
-      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-        buffers.set(sessionId, (buffers.get(sessionId) ?? "") + update.content.text);
-      } else if (update.sessionUpdate === "tool_call") {
-        await flush(sessionId);
+      const out = outputs.get(sessionId);
+      if (!out || replaying.has(sessionId)) return;
+      if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
+      else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        void out.tool(update.toolCallId, update.title ?? undefined, update.status ?? undefined);
       }
     },
     async requestPermission({ sessionId, toolCall, options }) {
       const t = bySession.get(sessionId);
       if (!t) return { outcome: { outcome: "cancelled" } };
-      await flush(sessionId);
+      await outputs.get(sessionId)?.pause();
       const id = randomUUID();
       const what = `🔐 The agent wants to run *${toolCall.title ?? toolCall.kind ?? "a tool"}*`;
       const chosen = new Promise<string>((resolve) => permissions.set(id, resolve));
@@ -130,7 +114,9 @@ export function createDaemon(cfg: DaemonConfig) {
           })),
         },
       ]);
-      return { outcome: { outcome: "selected", optionId: await chosen } };
+      const optionId = await chosen;
+      await outputs.get(sessionId)?.resume();
+      return { outcome: { outcome: "selected", optionId } };
     },
   };
   const agent = new acp.ClientSideConnection(
@@ -151,20 +137,21 @@ export function createDaemon(cfg: DaemonConfig) {
     return p;
   }
 
-  function prompt(t: Thread, text: string, ts: string) {
+  function prompt(t: Thread, text: string, title?: string) {
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
-      // 👀 marks a running turn; the relay turns it into its working notice.
-      await slack.reactions.add({ channel: t.channel, timestamp: ts, name: "eyes" }).catch(() => {});
+      const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
+      outputs.set(t.sessionId, out);
+      await out.begin();
       try {
         await open(t);
-        await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text }] });
-        await flush(t.sessionId);
+        const r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text }] });
+        if (r.stopReason === "cancelled") out.text("\n\n_Stopped._");
       } catch (err: any) {
         log("prompt_failed", { session: t.sessionId, error: err?.message ?? String(err) });
-        await flush(t.sessionId);
-        await say(t, `⚠️ ${err?.message ?? err}`);
+        out.text(`\n\n⚠️ ${err?.message ?? err}`);
       } finally {
-        await slack.reactions.remove({ channel: t.channel, timestamp: ts, name: "eyes" }).catch(() => {});
+        await out.end();
+        outputs.delete(t.sessionId);
       }
     });
     queues.set(t.sessionId, turn);
@@ -186,7 +173,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, t);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await prompt(t, text, thread);
+    await prompt(t, text, `${basename(cwd)}: ${text.split("\n")[0]}`);
   }
 
   // ---------- Slack ----------
@@ -213,7 +200,7 @@ export function createDaemon(cfg: DaemonConfig) {
     }
     const t = threads[m.thread_ts];
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void prompt(t, m.text, m.ts);
+    if (t) return void prompt(t, m.text);
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Pick a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");

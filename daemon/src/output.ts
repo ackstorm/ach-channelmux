@@ -45,7 +45,8 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let pending = "";
   let afterTool = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const tasks = new Map<string, Chunk>(); // open cards are replayed into a rolled-over stream
+  const tasks = new Map<string, Chunk>(); // last known status per id, for tool()'s prev lookup
+  const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
     (chain = chain.then(fn).catch((err) => log("output_failed", { error: String(err) })));
@@ -68,10 +69,11 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       if (stream) {
         await api("chat.appendStream", { channel, ts: stream.ts, chunks });
       } else {
-        const open = [...tasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
+        const open = [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
         const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...chunks] });
         stream = { ts: r.ts, started: Date.now() };
       }
+      for (const c of chunks) if (c.type === "task_update") sentTasks.set(c.id as string, c);
       return true;
     } catch (err) {
       log("stream_fallback", { error: String(err) });
@@ -111,10 +113,10 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
         title: String(title ?? prev?.title ?? "tool").slice(0, 256),
         status: TASK_STATUS[acpStatus ?? ""] ?? prev?.status ?? "in_progress",
       };
+      tasks.set(id, task);
       afterTool = true;
       return run(async () => {
         await flush();
-        tasks.set(id, task);
         await send([task]);
       });
     },

@@ -47,6 +47,7 @@ new acp.AgentSideConnection(
           await say(sessionId, "On it, ");
           await say(sessionId, "checking.");
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t0", title: "ls", kind: "execute", status: "pending" } });
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "t0", status: "completed" } });
           await say(sessionId, "Done.");
         }
         return { stopReason: "end_turn" };
