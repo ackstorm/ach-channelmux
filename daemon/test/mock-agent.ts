@@ -61,7 +61,14 @@ new acp.AgentSideConnection(
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };
         }
-        if (text === "silent") {
+        if (text === "big edit") {
+          const { cwd } = sessions.get(sessionId)!;
+          const oldText = Array.from({ length: 30 }, (_, i) => `old line ${i}`).join("\n");
+          const newText = Array.from({ length: 30 }, (_, i) => `new line ${i}`).join("\n");
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e1", title: "edit", kind: "edit", status: "pending" } });
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", content: [{ type: "diff", path: `${cwd}/big.py`, oldText, newText }] } });
+          await say(sessionId, "Edited.");
+        } else if (text === "silent") {
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed" } });
         } else if (text.includes("without replying")) {

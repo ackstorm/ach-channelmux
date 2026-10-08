@@ -34,6 +34,18 @@ const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(b
 const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) =>
   [...(oldText ? oldText.split("\n").map((l) => `-${l}`) : []), ...(newText ? newText.split("\n").map((l) => `+${l}`) : [])].join("\n");
 
+/** Turn diffs longer than this (what a card shows) also go to the thread as a changes.diff snippet. */
+export const DIFF_IN_CARD = 400;
+
+/** The full diff of a finished edit, or undefined: "--- path / +++ path" then -/+ lines per file. */
+export function fullDiff(u: any, cwd: string): string | undefined {
+  if (u.status !== "completed") return undefined;
+  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+  const diffs = (u.content ?? []).filter((c: any) => c.type === "diff");
+  if (!diffs.length) return undefined;
+  return diffs.map((d: any) => `--- ${rel(d.path)}\n+++ ${rel(d.path)}\n${diffLines(d.oldText, d.newText)}`).join("\n");
+}
+
 /** Describes an ACP tool_call / tool_call_update for a card. `input` is the tool's latest rawInput. */
 export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);

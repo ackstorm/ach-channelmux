@@ -228,6 +228,18 @@ test("a turn that ends after its tools with no reply gets one nudge, and the rep
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /Here is the result\./);
 });
 
+test("an edit too long for its card also comes as a changes.diff snippet at the end of the turn", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
+  const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
+  const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
+  assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
+  assert.equal(done.params.thread_ts, "100.000001");
+  const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
+  assert.match(body, /^--- big\.py\n\+\+\+ big\.py\n-old line 0/);
+  assert.match(body, /\+new line 29$/);
+});
+
 test("attached files are saved to a temp folder and the agent gets their paths, not their content", async () => {
   const file = (id: string, name: string, mimetype: string) =>
     ({ id, name, mimetype, size: 20, url_private_download: `${slack.url}/files/${id}/${name}` });

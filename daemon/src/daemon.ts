@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { Readable, Writable } from "node:stream";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { createOutput, describeTool, type Output } from "./output.ts";
+import { DIFF_IN_CARD, createOutput, describeTool, fullDiff, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -92,6 +92,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
+  const turnDiffs = new Map<string, string[]>(); // session -> full diffs of the running turn's edits
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
   function save() {
@@ -133,7 +134,10 @@ export function createDaemon(cfg: DaemonConfig) {
       if (!out) return;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-        void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), bySession.get(sessionId)?.cwd ?? ""));
+        const cwd = bySession.get(sessionId)?.cwd ?? "";
+        void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), cwd));
+        const diff = fullDiff(update, cwd);
+        if (diff) turnDiffs.set(sessionId, [...(turnDiffs.get(sessionId) ?? []), diff]);
       }
     },
     async requestPermission({ sessionId, toolCall, options }) {
@@ -221,22 +225,26 @@ export function createDaemon(cfg: DaemonConfig) {
     },
   };
 
-  async function sendFile(t: Thread, args: { path?: string; comment?: string }) {
-    const path = resolve(t.cwd, String(args.path ?? ""));
-    const { size } = statSync(path);
-    if (size > MAX_SEND) throw new Error(`the file is ${size} bytes; the limit is ${MAX_SEND}`);
-    const filename = basename(path);
-    const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: size })) as any;
+  // Uploads to the thread. A snippet_type (e.g. "diff") makes Slack show it as a code snippet.
+  async function upload(t: Thread, filename: string, data: Buffer, opts: { comment?: string; snippet?: string } = {}) {
+    const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: data.length, ...(opts.snippet && { snippet_type: opts.snippet }) })) as any;
     // Pre-signed URL on Slack's side: no token goes there (ours is the relay token).
-    const res = await fetch(up.upload_url, { method: "POST", body: readFileSync(path) });
+    const res = await fetch(up.upload_url, { method: "POST", body: new Uint8Array(data) });
     if (!res.ok) throw new Error(`upload failed: HTTP ${res.status}`);
     await slack.apiCall("files.completeUploadExternal", {
       files: JSON.stringify([{ id: up.file_id, title: filename }]),
       channel_id: t.channel,
       thread_ts: t.thread,
-      ...(args.comment && { initial_comment: args.comment }),
+      ...(opts.comment && { initial_comment: opts.comment }),
     });
-    return `Sent ${filename} to the user.`;
+  }
+
+  async function sendFile(t: Thread, args: { path?: string; comment?: string }) {
+    const path = resolve(t.cwd, String(args.path ?? ""));
+    const { size } = statSync(path);
+    if (size > MAX_SEND) throw new Error(`the file is ${size} bytes; the limit is ${MAX_SEND}`);
+    await upload(t, basename(path), readFileSync(path), { comment: args.comment });
+    return `Sent ${basename(path)} to the user.`;
   }
 
   const mcp = createServer(async (req, res) => {
@@ -322,6 +330,12 @@ export function createDaemon(cfg: DaemonConfig) {
         outcome = "failed";
       } finally {
         await out.end();
+        // Edits too long for their cards: the whole turn's changes as one diff snippet.
+        const diffs = turnDiffs.get(t.sessionId);
+        turnDiffs.delete(t.sessionId);
+        if (diffs && diffs.join("\n").length > DIFF_IN_CARD) {
+          await upload(t, "changes.diff", Buffer.from(diffs.join("\n")), { snippet: "diff" }).catch((err) => log("diff_upload_failed", { error: String(err) }));
+        }
         if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
         outputs.delete(t.sessionId);
       }
