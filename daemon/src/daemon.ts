@@ -378,7 +378,8 @@ export function createDaemon(cfg: DaemonConfig) {
         blocks.push({ type: "header", text: plain("Last used") });
         for (const [rel, r] of [...recent].slice(0, 5)) {
           const info = `${r.n} session${r.n > 1 ? "s" : ""}${r.when ? ` · last used ${r.when}` : ""}`;
-          blocks.push(section(`*${rel || nameOf("")}*\n${info}`, button("Choose", "picker_pick", rel)));
+          // Slack rejects an empty button value: the base folder ("") goes as ".".
+          blocks.push(section(`*${rel || nameOf("")}*\n${info}`, button("Choose", "picker_pick", rel || ".")));
         }
       }
     }
@@ -394,11 +395,10 @@ export function createDaemon(cfg: DaemonConfig) {
     const list = (await sessions()).filter((x) => x.rel === p.cwd).slice(0, 9); // radio buttons hold 10 options
     const options = [
       { text: plain("🆕 New session"), value: "new" },
-      ...list.map((x) => ({
-        text: plain((x.title || x.sessionId).slice(0, 75)),
-        description: plain([ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ") || " "),
-        value: x.sessionId,
-      })),
+      ...list.map((x) => {
+        const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
+        return { text: plain((x.title || x.sessionId).slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
+      }),
     ];
     return modal("picker_session", "Choose session", "Start", p, [
       section(`📁 \`${abs(p.cwd)}\``),
@@ -507,7 +507,8 @@ export function createDaemon(cfg: DaemonConfig) {
   });
   app.action("picker_pick", async ({ ack, body, action }) => {
     await ack();
-    const rel = (action as any).value as string;
+    const value = (action as any).value as string;
+    const rel = value === "." ? "" : value;
     if (rel.split("/").includes("..") || !isDir(abs(rel))) return;
     await redraw(body, sessionView({ ...pickOf(body), cwd: rel, back: "" }));
   });

@@ -81,7 +81,12 @@ export function createMockSlack(users: Record<string, string>) {
         const id = `F_UP${mock.uploads.size + 1}`;
         return send({ ok: true, upload_url: `http://127.0.0.1:${port}/upload/${id}`, file_id: id });
       }
+      case "views.update":
+        // Like Slack: an empty value fails the view schema (e.g. a button's value).
+        if (params.view?.includes('"value":""')) return send({ ok: false, error: "invalid_arguments" });
+        return send({ ok: true, view: { id: params.view_id } });
       case "views.open":
+        if (params.view?.includes('"value":""')) return send({ ok: false, error: "invalid_arguments" });
         return send({ ok: true, view: { id: "V_OPENED" } });
       default: {
         // Strictly increasing, like Slack's: a thread is ordered by ts.

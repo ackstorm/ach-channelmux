@@ -276,3 +276,18 @@ test("the picker offers last-used folders and continues an existing session, mov
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });
+
+test("a session in the base folder itself shows up in Last used and can be picked again", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "at the root", { ts: "400.000001" }));
+  let { view } = await openPicker("400.000001");
+  const next = await submit(view); // "Use <base>" on the first screen
+  await submit(next.view, sessionChoice("new"));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "at the root"));
+  assert.deepEqual(agentLog().filter((e) => e.m === "new").at(-1).cwd, base);
+
+  await slack.emit("events_api", slack.dm("UPEPE", "again at the root", { ts: "400.000002" }));
+  ({ view } = await openPicker("400.000002"));
+  assert.ok(actionValues(view, "picker_pick").includes("."), "the base folder is offered (as '.', never an empty value)");
+  view = await tap(view, "picker_pick", ".");
+  assert.equal(view.blocks.at(-1).element.options.length, 2); // New session + the root session
+});
