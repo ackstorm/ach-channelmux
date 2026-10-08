@@ -59,12 +59,14 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
   else if (i.url) details = String(i.url);
   let output: string | undefined;
+  let status: string | undefined = u.status ?? undefined;
   if (u.status === "completed" || u.status === "failed") {
     const content: any[] = u.content ?? [];
     const diffs = content.filter((c) => c.type === "diff");
     const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim();
     const exit = u.rawOutput?.metadata?.exit;
     const failed = typeof exit === "number" && exit !== 0 ? `exit ${exit}\n` : "";
+    if (failed) status = "failed"; // opencode reports a command that exits non-zero as completed
     const room = OUTPUT_MAX - 40; // headers and fences
     if (diffs.length) {
       const head = diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n");
@@ -74,7 +76,7 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   }
   return {
     ...(title && { title: clip(title, TITLE_MAX) }),
-    ...(u.status && { status: u.status }),
+    ...(status && { status }),
     ...(details && { details: clip(details, DETAILS_MAX) }),
     ...(output && { output: clip(output, OUTPUT_MAX) }),
   };

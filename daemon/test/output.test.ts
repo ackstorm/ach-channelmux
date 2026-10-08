@@ -101,7 +101,7 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   const edit = describeTool({ title: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Edited calc.py" } }, { type: "diff", path: "/w/proj/calc.py", oldText: "    return a - b", newText: "    return a + b\n" }] }, { path: "calc.py", oldString: "x", newString: "y" }, cwd);
   assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +2 −1\n```diff\n-    return a - b\n+    return a + b\n+\n```" });
   const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
-  assert.deepEqual(shell, { title: "python3 t.py", status: "completed", output: "exit 1\n```\nTraceback\n```" });
+  assert.deepEqual(shell, { title: "python3 t.py", status: "failed", output: "exit 1\n```\nTraceback\n```" }); // shown as an error card
   assert.equal(describeTool({ status: "completed" }, { command: "ls" }, cwd).title, "ls"); // the final update carries no title
   const pending = describeTool({ title: "shell", kind: "execute", status: "pending", locations: [{ path: cwd }] }, { cwd }, cwd);
   assert.deepEqual(pending, { title: "shell", status: "pending" }); // not "shell /w/proj"
