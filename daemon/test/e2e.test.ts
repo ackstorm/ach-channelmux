@@ -166,6 +166,14 @@ test("a permission request becomes buttons whose click answers the agent", async
   assert.ok(calls("chat.update").some((c) => c.params.ts === ask.ts && c.params.text.endsWith("Allow once")));
 });
 
+test("stopping a turn that waits for a permission answers the request as cancelled", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "perm again", { ts: "100.000021", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.postMessage" && c.params.blocks?.includes("perm_allow")));
+  await slack.emit("events_api", slack.dm("UPEPE", "$stop", { ts: "100.000022", thread_ts: "100.000001" }));
+  await waitFor(() => streamed(since(n)).some((c: any) => c.type === "markdown_text" && c.text.includes("chosen: cancelled")));
+});
+
 test("after a restart a thread reloads its session without re-posting its history", async () => {
   await daemon.stop();
   daemon = newDaemon();

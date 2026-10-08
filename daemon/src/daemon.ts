@@ -96,7 +96,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
   const outputs = new Map<string, Output>(); // session -> its running turn
-  const permissions = new Map<string, (optionId: string) => void>(); // request id -> resolver
+  const permissions = new Map<string, { sessionId: string; resolve: (optionId?: string) => void }>(); // request id -> its answer (none: cancelled)
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
   const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
@@ -167,7 +167,7 @@ export function createDaemon(cfg: DaemonConfig) {
       const shown = typeof i.command === "string" ? i.command : typeof i.filePath === "string" ? i.filePath : input ? JSON.stringify(input) : "";
       const what = `🔐 The agent wants to run *${toolCall.title ?? toolCall.kind ?? "a tool"}*${shown ? `\n\`\`\`\n${shown.slice(0, 500)}\n\`\`\`` : ""}`;
       permissionTexts.set(id, what);
-      const chosen = new Promise<string>((resolve) => permissions.set(id, resolve));
+      const chosen = new Promise<string | undefined>((resolve) => permissions.set(id, { sessionId, resolve }));
       await say(t, what, [
         { type: "section", text: { type: "mrkdwn", text: what } },
         {
@@ -184,7 +184,7 @@ export function createDaemon(cfg: DaemonConfig) {
       ]);
       const optionId = await chosen;
       await outputs.get(sessionId)?.resume();
-      return { outcome: { outcome: "selected", optionId } };
+      return { outcome: optionId ? { outcome: "selected", optionId } : { outcome: "cancelled" } };
     },
   };
   const agent = new acp.ClientSideConnection(
@@ -647,6 +647,12 @@ export function createDaemon(cfg: DaemonConfig) {
 
   const stop = async (t: Thread) => {
     await answer(t.thread, "(The user stopped the turn without answering.)");
+    // ACP: a cancelled turn's pending permission requests are answered "cancelled".
+    for (const [id, p] of permissions) {
+      if (p.sessionId !== t.sessionId) continue;
+      permissions.delete(id);
+      p.resolve();
+    }
     await agent.cancel({ sessionId: t.sessionId });
   };
 
@@ -923,7 +929,7 @@ export function createDaemon(cfg: DaemonConfig) {
     await ack();
     const b = body as any;
     const { id, optionId, name } = JSON.parse((action as any).value);
-    const resolve = permissions.get(id);
+    const resolve = permissions.get(id)?.resolve;
     permissions.delete(id);
     const what = permissionTexts.get(id) ?? "🔐 Permission request";
     permissionTexts.delete(id);
