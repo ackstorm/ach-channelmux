@@ -332,13 +332,14 @@ test("a picker still works after the daemon restarts", async () => {
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
 });
 
-test("$ commands: $help, $model changes a setting, $compact, ! runs a shell command the agent then sees, $clear starts over", async () => {
+test("$ commands: $help, $model changes a setting, $compact, the agent's $review, ! runs a shell command the agent then sees, $clear starts over", async () => {
   const T = "500.000001";
   const say = (text: string, ts: string) => slack.emit("events_api", slack.dm("UPEPE", text, { ts, thread_ts: T }));
   const before = agentLog().length;
 
   await say("$help", "500.000002");
-  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\$compact/.test(p.params.text ?? "")));
+  const help = await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\$compact/.test(p.params.text ?? "")));
+  assert.match(help.params.text, /The agent's commands:\*\n`\$review`: review changes/); // its compact is ours already
 
   await daemon.stop(); // so $model loads the session and gets opencode's provisional, then real, settings
   daemon = newDaemon();
@@ -359,6 +360,12 @@ test("$ commands: $help, $model changes a setting, $compact, ! runs a shell comm
 
   await say("$compact", "500.000004");
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/compact"));
+  await say("$model", "500.000012"); // after a turn the agent has reported its context use
+  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\*Context\* 24k \/ 200k \(12%\)/.test(p.params.text ?? "")));
+  await say("$review branch", "500.000010"); // the agent's own command, with arguments
+  await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/review branch"));
+  await say("$HOME is unset", "500.000011"); // not a command: goes to the agent as a message
+  await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "$HOME is unset"));
 
   await say("! echo shell-$((40+2))", "500.000005");
   const out = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.markdown_text?.includes("$ echo shell")));
@@ -406,5 +413,5 @@ test("each Slack message reaches the agent in a <slack> envelope with who wrote 
   const lines = readFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const first = lines.find((e) => e.body.startsWith("fix the bug"));
   assert.match(first.attrs, /^from="Real UPEPE" at="\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z+0-9:]+"$/);
-  assert.ok(!lines.some((e) => e.body.startsWith("$") || e.body.startsWith("!")), "commands are not sent to the agent");
+  assert.ok(!lines.some((e) => /^(\$\w+(\s|$)(?!is unset)|!)/.test(e.body)), "commands are not sent to the agent");
 });

@@ -21,10 +21,18 @@ const models = (currentValue: string): acp.SessionConfigOption[] => [
   { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "Build" }, { value: "plan", name: "Plan" }] },
 ];
 
+// Like opencode: its own commands, sent right after a session is created or loaded.
+const commands: acp.AvailableCommand[] = [
+  { name: "review", description: "review changes [commit|branch|pr]" },
+  { name: "compact", description: "Compact the session" },
+];
+
 new acp.AgentSideConnection(
   (conn) => {
     const say = (sessionId: string, text: string) =>
       conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
+    const announce = (sessionId: string) =>
+      setTimeout(() => void conn.sessionUpdate({ sessionId, update: { sessionUpdate: "available_commands_update", availableCommands: commands } }), 0);
     return {
       async initialize() {
         return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, mcpCapabilities: { http: true }, sessionCapabilities: { list: {} } } };
@@ -39,11 +47,13 @@ new acp.AgentSideConnection(
         const sessionId = `ses_${++n}`;
         sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "new", sessionId, cwd });
+        announce(sessionId);
         return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
         sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "load", sessionId, cwd });
+        announce(sessionId);
         await say(sessionId, "OLD HISTORY");
         // Like opencode: a provisional settings list now, the real one a moment later.
         setTimeout(() => void conn.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions: models("m1") } }), 200);
@@ -101,6 +111,7 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "t0", status: "completed" } });
           await say(sessionId, "Done.");
         }
+        await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 24_000, size: 200_000 } });
         return { stopReason: "end_turn" };
       },
       async setSessionConfigOption({ configId, value }) {

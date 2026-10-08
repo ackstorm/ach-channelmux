@@ -25,6 +25,7 @@ const HELP = [
   "`! <command>`: run a shell command in the session folder; the agent sees it with your next message",
   "`$help`: this list",
 ].join("\n");
+const BUILTIN = ["stop", "compact", "clear", "model", "mode", "effort", "settings", "help"];
 const SHELL_TIMEOUT_MS = 120_000;
 const SHELL_SHOWN = 3_000; // output characters shown in Slack (the tail)
 
@@ -92,6 +93,8 @@ export function createDaemon(cfg: DaemonConfig) {
   const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
+  const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
+  const usage = new Map<string, { used: number; size: number }>(); // session -> context window use
   const turnDiffs = new Map<string, string[]>(); // session -> full diffs of the running turn's edits
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
@@ -119,6 +122,8 @@ export function createDaemon(cfg: DaemonConfig) {
         configs.set(sessionId, update.configOptions);
         configWaiters.get(sessionId)?.();
       }
+      if (update.sessionUpdate === "available_commands_update") agentCommands.set(sessionId, update.availableCommands);
+      if (update.sessionUpdate === "usage_update") usage.set(sessionId, update);
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         const raw = (update as any).rawInput;
         if (raw && Object.keys(raw).length) inputs.set(update.toolCallId, raw); // opencode starts with {} and fills it later
@@ -560,13 +565,25 @@ export function createDaemon(cfg: DaemonConfig) {
       void shell(t, s.slice(1).trim());
       return true;
     }
-    const name = s === "/stop" ? "stop" : /^\$(\w+)$/.exec(s)?.[1]?.toLowerCase();
+    const m = /^\$([a-z][\w-]*)(?:\s+([\s\S]+))?$/i.exec(s);
+    const name = s === "/stop" ? "stop" : m?.[1].toLowerCase();
     if (!name) return false;
+    const args = m?.[2]?.trim();
+    if (!BUILTIN.includes(name) || args) {
+      // The agent's own commands ($review branch -> "/review branch"); known once its session is loaded.
+      await loadedWithSettings(t);
+      const own = agentCommands.get(t.sessionId)?.find((c) => c.name.toLowerCase() === name);
+      if (own) {
+        void prompt(t, [{ type: "text", text: `/${own.name}${args ? ` ${args}` : ""}` }]);
+        return true;
+      }
+      if (args) return false; // "$HOME is unset": a message, not a command
+    }
     if (name === "stop") await (outputs.has(t.sessionId) ? stop(t) : say(t, "Nothing is running."));
     else if (name === "compact") void prompt(t, [{ type: "text", text: "/compact" }]); // the agent's own command
     else if (name === "clear") await clear(t);
     else if (["model", "mode", "effort", "settings"].includes(name)) await settings(t);
-    else await say(t, name === "help" ? HELP : `Unknown command \`$${name}\`.\n${HELP}`);
+    else await loadedWithSettings(t).then(() => say(t, `${name === "help" ? "" : `Unknown command \`$${name}\`.\n`}${HELP}${agentHelp(t)}`));
     return true;
   }
 
@@ -575,12 +592,21 @@ export function createDaemon(cfg: DaemonConfig) {
   const selects = (t: Thread) => (configs.get(t.sessionId) ?? []).filter((o) => o.type === "select" && o.category !== "mode") as any[];
   const choicesOf = (o: any) => (o.options as any[]).flatMap((x) => x.options ?? [x]) as { value: string; name: string; description?: string }[];
   const currentName = (o: any) => choicesOf(o).find((c) => c.value === o.currentValue)?.name ?? String(o.currentValue);
-  const summary = (t: Thread) =>
-    `⚙️ ${selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``).join("   ·   ")}`;
+  const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
+  const summary = (t: Thread) => {
+    const u = usage.get(t.sessionId);
+    const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${Math.round((100 * u.used) / u.size)}%)`] : [];
+    return `⚙️ ${[...selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``), ...context].join("   ·   ")}`;
+  };
 
-  async function settings(t: Thread) {
-    // A session loaded just now: opencode answers with a provisional list and sends the full one
-    // (its providers' models) a moment later, as a config_option_update.
+  const agentHelp = (t: Thread) => {
+    const own = (agentCommands.get(t.sessionId) ?? []).filter((c) => !BUILTIN.includes(c.name.toLowerCase()));
+    return own.length ? `\n\n*The agent's commands:*\n${own.map((c) => `\`$${c.name}\`: ${c.description}`).join("\n")}` : "";
+  };
+
+  // Loads a thread's session if needed. A session loaded just now: opencode answers with a provisional
+  // settings list and sends the full one (its providers' models) a moment later, as a config_option_update.
+  async function loadedWithSettings(t: Thread) {
     if (!loaded.has(t.sessionId)) {
       const update = new Promise<void>((r) => {
         configWaiters.set(t.sessionId, r);
@@ -590,6 +616,10 @@ export function createDaemon(cfg: DaemonConfig) {
       await update;
       configWaiters.delete(t.sessionId);
     }
+  }
+
+  async function settings(t: Thread) {
+    await loadedWithSettings(t);
     if (!selects(t).length) return void (await say(t, "This agent has no settings to change."));
     await say(t, summary(t), [
       section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" }),

@@ -66,6 +66,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Thread replies | Prompts to the thread's session, one turn at a time; queued if a turn is already running. |
 | Replies | Native stream (`chat.startStream`/`appendStream`/`stopStream`) with tool calls as task cards; falls back to one plain message per finished text segment (cut at tool calls) when streaming is off or refused. |
 | Status/Stop | `agents.sessions.setStatus` brackets each turn (Slack's "Working…" and native stop button); Slack's stop button and `/stop` in the thread both cancel the running turn. |
+| Commands | In a thread: `$model` (model and effort, with the context window use; **Change** opens a modal), `$compact`, `$clear` (new session, same folder), `$stop`, `$help`, `! <cmd>` (runs in the session folder; the agent sees it with the next message). The agent's own commands (`session/available_commands`, e.g. opencode's `$review branch`) are sent to it as `/<name> <args>`. Slack swallows unregistered `/` commands, hence `$`. |
 | Edits | Editing the first message before the picker is done changes the first prompt; editing a message in a session sends the new text as a correction (`edited="true"` in its `<slack>` envelope). Edited `$`/`!` commands do not run again. |
 | Queued | A message sent while a turn is running gets a "📬 Queued" notice and runs after. |
 | Files in | Fetched through the relay's proxy and saved to a temp folder; the prompt gets their paths, so the agent opens a file (image or not) only when it needs it. |
