@@ -225,9 +225,17 @@ test("Send now on a queued notice stops the running turn and the queued message 
   const before = waits();
   await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000015", thread_ts: "100.000001" }));
   await waitFor(() => waits() > before);
+  const notices = () => posts.filter((p) => p.params.thread_ts === "100.000001" && p.params.blocks?.includes("queue_now"));
+  const earlier = notices().length; // an earlier turn's notice no longer stops anything
   await slack.emit("events_api", slack.dm("UPEPE", "do this instead", { ts: "100.000016", thread_ts: "100.000001" }));
-  const notice = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && p.params.blocks?.includes("queue_now")));
-  await click({ ts: notice.ts, thread_ts: "100.000001" }, { type: "button", action_id: "queue_now", value: "100.000001" });
+  const notice = await waitFor(() => notices()[earlier]);
+  const stale = notices()[0]; // queued behind a turn that has ended: tapping it now must not stop this one
+  const cancels = agentLog().filter((e) => e.m === "cancel").length;
+  await click({ ts: stale.ts, thread_ts: "100.000001" }, { type: "button", action_id: "queue_now", value: JSON.parse(stale.params.blocks)[0].accessory.value });
+  await sleep(200);
+  assert.equal(agentLog().filter((e) => e.m === "cancel").length, cancels);
+  const sendNow = JSON.parse(notice.params.blocks)[0].accessory;
+  await click({ ts: notice.ts, thread_ts: "100.000001" }, { type: "button", action_id: "queue_now", value: sendNow.value });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "do this instead"));
   await waitFor(() => calls("chat.update").some((c) => c.params.ts === notice.ts && /Sent now/.test(c.params.text)));
 });
@@ -346,6 +354,18 @@ test("the agent's ask_user question is answered with a button or a reply in the 
   await slack.emit("events_api", slack.dm("UPEPE", "green, actually", { ts: "100.000020", thread_ts: "100.000001" }));
   await waitFor(() => replied(n).includes("answer: green, actually"));
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text.includes("green, actually")), false); // an answer, not a new prompt
+});
+
+test("a second question while one waits is refused; a voice reply answers the first", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "ask twice", { ts: "100.000024", thread_ts: "100.000001" }));
+  const q = await waitFor(() => since(n).find((c) => c.method === "chat.postMessage" && c.params.text === "❓ First?"));
+  assert.deepEqual(JSON.parse(q.params.blocks)[1].elements.map((e: any) => e.value), ["Yes"]); // a blank option is dropped
+  await waitFor(() => agentLog().some((e) => e.m === "asked" && /already waiting/.test(e.second)));
+  const clip = { id: "FV2", name: "audio_message.m4a", subtype: "slack_audio", size: 20, url_private_download: `${slack.url}/files/FV2/audio_message.m4a`, transcription: { status: "complete", preview: { content: "the second one", has_more: false } } };
+  await slack.emit("events_api", slack.dm("UPEPE", "", { ts: "100.000025", thread_ts: "100.000001", subtype: "file_share", files: [clip] }));
+  await waitFor(() => streamed(since(n)).some((c: any) => c.type === "markdown_text" && c.text.includes("answer: [Voice message, transcribed by Slack]\nthe second one")));
+  await turnEnded("100.000024");
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {
@@ -541,4 +561,21 @@ test("the picker message offers a one-tap new session in the last used folder", 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "quick one"));
   assert.equal(agentLog().filter((e) => e.m === "new").at(-1).cwd, last);
   await turnEnded("910.000001");
+});
+
+test("a new message starting with $ and words is a message, not a command", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "$HOME is empty, why?", { ts: "800.000003" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "800.000003" && p.params.blocks?.includes("picker_open_modal")));
+});
+
+test("editing the first message keeps the relay's context block", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "lsit\n\n[Context from the Slack relay. Do not mention or quote this block.]\nUser: x.\n[End of relay context]", { ts: "800.000004" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "800.000004" && p.params.blocks?.includes("picker_open_modal")));
+  await slack.emit("events_api", slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts: "800.000004", text: "list" }, previous_message: { text: "lsit" } }));
+  const { view } = await openPicker("800.000004");
+  const next = await submit(view);
+  await submit(next.view, sessionChoice("new"));
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("list\n\n[Context from the Slack relay")));
+  assert.match(p.text, /User: x\./);
+  await turnEnded("800.000004");
 });

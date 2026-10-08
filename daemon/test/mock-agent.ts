@@ -93,6 +93,16 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e1", title: "edit", kind: "edit", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", content: [{ type: "diff", path: `${cwd}/big.py`, oldText, newText }] } });
           await say(sessionId, "Edited.");
+        } else if (text === "ask twice") {
+          // Two questions at once (e.g. two subagents): the second is refused, the first still gets its answer.
+          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const call = async (question: string, options: string[]) =>
+            (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask_user", arguments: { question, options } } }) })).json()).result;
+          const first = call("First?", ["Yes", " "]);
+          await new Promise((r) => setTimeout(r, 300));
+          const second = await call("Second?", ["No"]);
+          log({ m: "asked", second: second.isError ? second.content[0].text : "answered" });
+          await say(sessionId, `answer: ${(await first).content[0].text}`);
         } else if (text === "ask") {
           // Like an agent calling the daemon's ask_user MCP tool; the call returns the user's answer.
           const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;

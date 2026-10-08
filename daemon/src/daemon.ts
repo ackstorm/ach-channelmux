@@ -97,7 +97,9 @@ export function createDaemon(cfg: DaemonConfig) {
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
   const outputs = new Map<string, Output>(); // session -> its running turn
-  const retries = new Map<string, { thread: string; blocks: acp.ContentBlock[]; ts?: string }>(); // Retry button -> the failed prompt
+  const turnOf = new Map<string, number>(); // session -> its running (or last) turn's number
+  let turns = 0;
+  const retries = new Map<string, { thread: string; content: acp.ContentBlock[] | Promise<acp.ContentBlock[]>; ts?: string }>(); // Retry button -> the failed prompt
   const permissions = new Map<string, { sessionId: string; resolve: (optionId?: string) => void }>(); // request id -> its answer (none: cancelled)
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
@@ -285,16 +287,25 @@ export function createDaemon(cfg: DaemonConfig) {
   // ask_user: the question waits per thread; a button or the user's next message in the thread answers it.
   const questions = new Map<string, { text: string; ts?: string; resolve: (answer: string) => void }>();
   async function ask(t: Thread, args: { question?: string; options?: unknown }) {
+    // One question per thread: a second one (two subagents asking at once) would leave the first unanswered.
+    if (questions.has(t.thread)) throw new Error("another question is already waiting for the user's answer; ask again after it");
     const out = outputs.get(t.sessionId);
     await out?.pause();
     const text = `❓ ${String(args.question ?? "").slice(0, 2900)}`;
-    const options = (Array.isArray(args.options) ? args.options : []).slice(0, 5).map((o) => String(o).slice(0, 2000));
+    const options = (Array.isArray(args.options) ? args.options : []).map((o) => String(o).trim().slice(0, 2000)).filter(Boolean).slice(0, 5);
     const answered = new Promise<string>((resolve) => questions.set(t.thread, { text, resolve }));
-    const posted: any = await say(t, text, [
-      section(text),
-      ...(options.length ? [{ type: "actions", elements: options.map((o, i) => button(o, `ask_${i}`, o)) }] : []),
-      { type: "context", elements: [{ type: "mrkdwn", text: options.length ? "Tap an answer or reply in this thread." : "Reply in this thread." }] },
-    ]);
+    let posted: any;
+    try {
+      posted = await say(t, text, [
+        section(text),
+        ...(options.length ? [{ type: "actions", elements: options.map((o, i) => button(o, `ask_${i}`, o)) }] : []),
+        { type: "context", elements: [{ type: "mrkdwn", text: options.length ? "Tap an answer or reply in this thread." : "Reply in this thread." }] },
+      ]);
+    } catch (err) {
+      questions.delete(t.thread);
+      await out?.resume();
+      throw err;
+    }
     const q = questions.get(t.thread);
     if (q) q.ts = posted.ts;
     const answer = await answered;
@@ -358,7 +369,12 @@ export function createDaemon(cfg: DaemonConfig) {
     if (msg.method === "ping") return reply({ result: {} });
     if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE, ASK_USER] } });
     if (msg.method === "tools/call" && p.name === "ask_user") {
-      return reply({ result: { content: [{ type: "text", text: await ask(t, p.arguments ?? {}) }] } });
+      try {
+        return reply({ result: { content: [{ type: "text", text: await ask(t, p.arguments ?? {}) }] } });
+      } catch (err: any) {
+        log("ask_user_failed", { error: err?.message ?? String(err) });
+        return reply({ result: { content: [{ type: "text", text: `Could not ask: ${err?.message ?? err}` }], isError: true } });
+      }
     }
     if (msg.method === "tools/call" && p.name === "send_file") {
       try {
@@ -394,24 +410,27 @@ export function createDaemon(cfg: DaemonConfig) {
   const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
   const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
-  function prompt(t: Thread, blocks: acp.ContentBlock[], opts: { title?: string; ts?: string } = {}) {
+  // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
+  function prompt(t: Thread, content: acp.ContentBlock[] | Promise<acp.ContentBlock[]>, opts: { title?: string; ts?: string } = {}) {
     const { title, ts } = opts;
     if (outputs.has(t.sessionId)) {
       const queued = "📬 Queued: I'll start on this when the current turn ends.";
-      void say(t, queued, [section(queued, button("Send now", "queue_now", t.thread))]);
+      // The button stops only the turn running now, not whichever runs when it is tapped.
+      void say(t, queued, [section(queued, button("Send now", "queue_now", JSON.stringify({ thread: t.thread, turn: turnOf.get(t.sessionId) })))]);
     }
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
       const started = Date.now();
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
       outputs.set(t.sessionId, out);
+      turnOf.set(t.sessionId, ++turns);
       await out.begin();
       try {
         await open(t);
         const ran = shellNotes.get(t.sessionId);
         shellNotes.delete(t.sessionId);
         const context: acp.ContentBlock[] = ran ? [{ type: "text", text: `[Shell commands the user ran in this folder since your last turn]\n${ran.join("\n\n")}` }] : [];
-        let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...blocks] });
+        let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...(await content)] });
         // Some models end a turn right after their tool calls, with no reply: ask once for one.
         if (r.stopReason === "end_turn" && out.quiet) {
           log("nudged", { session: t.sessionId });
@@ -435,7 +454,7 @@ export function createDaemon(cfg: DaemonConfig) {
         if (outcome === "failed") {
           // The error is in the reply; a button sends the same message again.
           const id = randomUUID();
-          retries.set(id, { thread: t.thread, blocks, ts });
+          retries.set(id, { thread: t.thread, content, ts });
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
         }
         const took = Date.now() - started;
@@ -809,7 +828,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const m = message as any;
     if (m.subtype === "message_changed") return edited(m.message);
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
-    if (!m.thread_ts && /^\s*\$\w/.test(m.text ?? "")) {
+    if (!m.thread_ts && /^\s*\$[a-z][\w-]*\s*(\n|$)/i.test(m.text ?? "")) {
       // A command outside a thread: there is no session to run it on.
       const help = /^\s*\$help\s*(\n|$)/i.test(m.text) ? HELP : `Commands work inside a thread with a session.\n${HELP}`;
       return void (await say({ channel: m.channel, thread: m.ts }, help));
@@ -817,9 +836,13 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!m.thread_ts) return void (await offerPicker({ channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts }));
     const t = threads[m.thread_ts];
     if (t && m.text && (await command(t, m.text))) return;
-    if (m.text && (await answer(m.thread_ts, m.text))) return; // the reply to an ask_user question
+    if (questions.has(m.thread_ts)) {
+      // The reply to an ask_user question, including a voice clip's transcript or a file's path.
+      const notes = await attachments(m.files, m);
+      if (await answer(m.thread_ts, [m.text, ...notes].filter(Boolean).join("\n\n"))) return;
+    }
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void blocksFor(m).then((blocks) => prompt(t, blocks, { ts: m.ts }));
+    if (t) return void prompt(t, blocksFor(m), { ts: m.ts });
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
@@ -830,12 +853,14 @@ export function createDaemon(cfg: DaemonConfig) {
   async function edited(m: any) {
     const p = pending.get(m.ts);
     if (p) {
-      p.text = m.text;
+      // Keep the context block the relay appended to the original (it does not add it to edits).
+      const context = p.text.indexOf("\n\n[Context from the Slack relay");
+      p.text = m.text + (context >= 0 ? p.text.slice(context) : "");
       return save();
     }
     const t = threads[m.thread_ts ?? m.ts];
     if (!t || !m.text || /^\s*[$!]/.test(m.text)) return;
-    void blocksFor({ ...m, files: undefined }, true).then((blocks) => prompt(t, blocks, { ts: m.ts }));
+    void prompt(t, blocksFor({ ...m, files: undefined }, true), { ts: m.ts });
   }
 
   // A new thread's first message waits for the picker; its button (re)opens the modal.
@@ -974,8 +999,9 @@ export function createDaemon(cfg: DaemonConfig) {
   // "Send now" on a queued notice: stop the running turn, so the queue moves on.
   app.action("queue_now", async ({ ack, body, action }) => {
     await ack();
-    const t = threads[(action as any).value];
-    if (!t || !outputs.has(t.sessionId)) return;
+    const { thread, turn } = JSON.parse((action as any).value);
+    const t = threads[thread];
+    if (!t || !outputs.has(t.sessionId) || turnOf.get(t.sessionId) !== turn) return;
     await stop(t);
     const b = body as any;
     await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
@@ -988,7 +1014,7 @@ export function createDaemon(cfg: DaemonConfig) {
     retries.delete((action as any).value);
     const t = r && threads[r.thread];
     await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text: t ? "⚠️ The turn failed. Retrying…" : "⚠️ The turn failed. (Retry expired: send the message again.)", blocks: [] });
-    if (t) void prompt(t, r.blocks, { ts: r.ts });
+    if (t) void prompt(t, r.content, { ts: r.ts });
   });
 
   app.action(/^ask_/, async ({ ack, body, action }) => {
