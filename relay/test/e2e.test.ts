@@ -166,8 +166,10 @@ test("working notice: shown in the thread while 👀 is on a message, removed wi
   await c.reactions.remove({ channel: "D_UPEPE", timestamp: "60.0", name: "eyes" });
   await waitFor(() => slack.calls.filter((x) => x.method === "chat.delete").length > dels);
 
-  // The progress reactions themselves never reach Slack.
+  // The progress reactions themselves never reach Slack; any other reaction does.
   assert.equal(slack.calls.some((x) => x.method.startsWith("reactions.")), false);
+  await c.reactions.add({ channel: "D_UPEPE", timestamp: "60.0", name: "white_check_mark" });
+  assert.ok(slack.calls.some((x) => x.method === "reactions.add" && x.params.name === "white_check_mark"));
 });
 
 test("files: URLs are rewritten and only the owner can fetch them", async () => {

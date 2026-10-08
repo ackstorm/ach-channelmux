@@ -100,6 +100,11 @@ const CHANNEL_SCOPED: Record<string, string[]> = {
   "agents.sessions.rename": ["channel_id"],
 };
 const PASSTHROUGH = new Set(["auth.test", "team.info", "files.getUploadURLExternal"]);
+// cc-connect's progress reactions (👀 plus its heartbeat emoji), replaced by the working notice.
+const PROGRESS_REACTIONS = new Set([
+  "eyes", "clock1", "hourglass_flowing_sand", "hourglass", "gear", "hammer_and_wrench", "mag", "bulb", "rocket",
+  "zap", "fire", "sparkles", "brain", "crystal_ball", "jigsaw", "microscope", "satellite",
+]);
 
 /** Lines the working notice rotates through while an agent turn runs (Claude Code-style). */
 export const WORKING_MESSAGES = [
@@ -642,9 +647,9 @@ export function createGateway(cfg: GatewayConfig) {
       if (method === "chat.postEphemeral" && params.user !== owner.slackUserId) {
         return { ok: false, error: "restricted_action" };
       }
-      // The working notice replaces cc-connect's progress reactions (👀, 🕐, …):
-      // they stay off Slack, and 👀 marks the start and end of a turn.
-      if (noticeMs && method.startsWith("reactions.") && params.channel === owner.dm) {
+      // The working notice replaces cc-connect's progress reactions (👀, 🕐, …): they stay off
+      // Slack, and 👀 marks the start and end of a turn. Other reactions (e.g. ✅ when a turn ends) go through.
+      if (noticeMs && method.startsWith("reactions.") && params.channel === owner.dm && PROGRESS_REACTIONS.has(params.name)) {
         if (params.name === "eyes") {
           if (method === "reactions.add") startWorking(owner, params.timestamp);
           else stopWorking(owner, params.timestamp);
