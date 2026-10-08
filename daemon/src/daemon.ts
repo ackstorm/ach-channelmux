@@ -89,6 +89,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
   const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
+  const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
   function save() {
@@ -111,7 +112,10 @@ export function createDaemon(cfg: DaemonConfig) {
   });
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
-      if (update.sessionUpdate === "config_option_update") configs.set(sessionId, update.configOptions);
+      if (update.sessionUpdate === "config_option_update") {
+        configs.set(sessionId, update.configOptions);
+        configWaiters.get(sessionId)?.();
+      }
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         if ((update as any).rawInput !== undefined) inputs.set(update.toolCallId, (update as any).rawInput);
       }
@@ -278,7 +282,7 @@ export function createDaemon(cfg: DaemonConfig) {
       lastReply.delete(t.sessionId);
       p = tools(t.thread)
         .then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
-        .then((r) => r?.configOptions && configs.set(t.sessionId, r.configOptions));
+        .then((r) => r?.configOptions && !configs.has(t.sessionId) && configs.set(t.sessionId, r.configOptions));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
     }
@@ -511,17 +515,47 @@ export function createDaemon(cfg: DaemonConfig) {
     return true;
   }
 
+  // $model: a one-line summary in the thread; "Change" opens a modal with each setting as a full-width menu.
+  // The agent's mode (opencode: build/plan) is left out: it is not a setting users change from Slack.
+  const selects = (t: Thread) => (configs.get(t.sessionId) ?? []).filter((o) => o.type === "select" && o.category !== "mode") as any[];
+  const choicesOf = (o: any) => (o.options as any[]).flatMap((x) => x.options ?? [x]) as { value: string; name: string; description?: string }[];
+  const currentName = (o: any) => choicesOf(o).find((c) => c.value === o.currentValue)?.name ?? String(o.currentValue);
+  const summary = (t: Thread) =>
+    `⚙️ ${selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``).join("   ·   ")}`;
+
   async function settings(t: Thread) {
-    await open(t);
-    const opts = (configs.get(t.sessionId) ?? []).filter((o) => o.type === "select");
-    if (!opts.length) return void (await say(t, "This agent has no settings to change."));
-    const blocks = opts.slice(0, 10).map((o: any) => {
-      const choices = (o.options as any[]).flatMap((x) => x.options ?? [x]).slice(0, 100); // options may come in groups
-      const options = choices.map((c) => ({ text: plain(String(c.name).slice(0, 75)), value: String(c.value) }));
-      const current = options.find((c) => c.value === o.currentValue);
-      return section(`*${o.name}*`, { type: "static_select", action_id: `cfg_${o.id}`, options, ...(current && { initial_option: current }) });
-    });
-    await say(t, "⚙️ Session settings", blocks);
+    // A session loaded just now: opencode answers with a provisional list and sends the full one
+    // (its providers' models) a moment later, as a config_option_update.
+    if (!loaded.has(t.sessionId)) {
+      const update = new Promise<void>((r) => {
+        configWaiters.set(t.sessionId, r);
+        setTimeout(r, 2_000);
+      });
+      await open(t);
+      await update;
+      configWaiters.delete(t.sessionId);
+    }
+    if (!selects(t).length) return void (await say(t, "This agent has no settings to change."));
+    await say(t, summary(t), [
+      section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" }),
+    ]);
+  }
+
+  // A setting as a menu: provider-prefixed values ("ackstorm/claude-fable-5") are grouped by provider.
+  function settingMenu(o: any) {
+    const choices = choicesOf(o).slice(0, 100);
+    const option = (c: { value: string; name: string }) => ({ text: plain(c.name.replace(/^[^/]+\//, "").slice(0, 75)), value: String(c.value) });
+    const providers = [...new Set(choices.map((c) => (c.name.includes("/") ? c.name.split("/")[0] : "")))];
+    const grouped = providers.length > 1 && providers.every(Boolean);
+    const current = choices.find((c) => c.value === o.currentValue);
+    return {
+      type: "static_select",
+      action_id: "value",
+      ...(grouped
+        ? { option_groups: providers.map((g) => ({ label: plain(g.slice(0, 75)), options: choices.filter((c) => c.name.startsWith(`${g}/`)).map(option) })) }
+        : { options: choices.map(option) }),
+      ...(current && { initial_option: option(current) }),
+    };
   }
 
   async function clear(t: Thread) {
@@ -629,19 +663,50 @@ export function createDaemon(cfg: DaemonConfig) {
     void start(JSON.parse(view.private_metadata), choice);
   });
 
-  app.action(/^cfg_/, async ({ ack, body, action }) => {
+  app.action("cfg_open", async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
-    const t = threads[b.message?.thread_ts];
+    const t = threads[(action as any).value];
     if (!t) return;
-    const configId = (action as any).action_id.slice(4);
-    const value = (action as any).selected_option.value;
-    try {
-      const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId, value });
-      configs.set(t.sessionId, r.configOptions);
-    } catch (err: any) {
-      await say(t, `⚠️ Could not change ${configId}: ${err?.message ?? err}`);
+    await slack.views.open({
+      trigger_id: b.trigger_id,
+      view: {
+        type: "modal",
+        callback_id: "cfg_save",
+        title: plain("Session settings"),
+        submit: plain("Save"),
+        close: plain("Cancel"),
+        private_metadata: JSON.stringify({ thread: t.thread, summary: b.message.ts }),
+        blocks: [
+          { type: "context", elements: [{ type: "mrkdwn", text: `📁 \`${t.cwd}\`` }] },
+          ...selects(t).map((o) => ({
+            type: "input",
+            block_id: `cfg_${o.id}`,
+            label: plain(o.name),
+            ...(o.description && { hint: plain(String(o.description).slice(0, 2000)) }),
+            element: settingMenu(o),
+          })),
+        ] as any[],
+      },
+    });
+  });
+  app.view("cfg_save", async ({ ack, view }) => {
+    await ack({ response_action: "clear" });
+    const { thread, summary: ts } = JSON.parse(view.private_metadata);
+    const t = threads[thread];
+    if (!t) return;
+    for (const [block, v] of Object.entries(view.state.values as any)) {
+      const value = (v as any).value?.selected_option?.value;
+      const o = selects(t).find((x) => `cfg_${x.id}` === block);
+      if (!o || value === undefined || value === o.currentValue) continue;
+      try {
+        const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value });
+        configs.set(t.sessionId, r.configOptions);
+      } catch (err: any) {
+        await say(t, `⚠️ Could not change ${o.name}: ${err?.message ?? err}`);
+      }
     }
+    await slack.chat.update({ channel: t.channel, ts, text: summary(t), blocks: [section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" })] as any[] });
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {

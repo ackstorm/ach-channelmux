@@ -6,17 +6,19 @@
 //     daemon's send_file MCP tool
 //   any other prompt: "On it, " "checking." <tool call> "Done."
 
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
 const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON.stringify(entry) + "\n");
-let n = 0;
+// Session ids keep counting across restarts of the agent process, like real ones never repeat.
+let n = existsSync(process.env.MOCK_AGENT_LOG!) ? readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter((l) => l.includes('"m":"new"')).length : 0;
 const cancels = new Map<string, () => void>();
 const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[] }>();
 const models = (currentValue: string): acp.SessionConfigOption[] => [
-  { id: "model", name: "Model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
+  { id: "model", name: "Model", category: "model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
+  { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "Build" }, { value: "plan", name: "Plan" }] },
 ];
 
 new acp.AgentSideConnection(
@@ -43,7 +45,9 @@ new acp.AgentSideConnection(
         sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "load", sessionId, cwd });
         await say(sessionId, "OLD HISTORY");
-        return {};
+        // Like opencode: a provisional settings list now, the real one a moment later.
+        setTimeout(() => void conn.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions: models("m1") } }), 200);
+        return { configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "m0", options: [{ value: "m0", name: "Model zero" }] }] };
       },
       async prompt({ sessionId, prompt }) {
         const text = prompt.map((p) => (p.type === "text" ? p.text : "")).join("");
