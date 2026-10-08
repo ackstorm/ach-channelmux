@@ -137,6 +137,7 @@ test("a new DM opens the picker; browsing to a folder and starting a new session
   const head = header.params.text;
   assert.match(head, /beta` · new session/);
   assert.match(head, /opencode -s ses_1/);
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000001" && c.params.name === "white_check_mark"));
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
   assert.equal(firstStatus.params.thread_ts, "100.000001");
@@ -204,9 +205,10 @@ test("Slack's stop button cancels the running turn; a message meanwhile is queue
   await slack.emit("events_api", stopEvent("100.000001"));
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
 });
 
-test("/stop in the thread cancels too", async () => {
+test("$stop (or /stop) in the thread cancels too", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000007", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "wait").length === 2);
   const cancels = agentLog().filter((e) => e.m === "cancel").length;

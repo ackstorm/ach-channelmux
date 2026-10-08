@@ -292,10 +292,15 @@ export function createDaemon(cfg: DaemonConfig) {
     return p;
   }
 
-  function prompt(t: Thread, blocks: acp.ContentBlock[], title?: string) {
+  // How a turn ended, as a reaction on the message that asked for it.
+  const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
+
+  function prompt(t: Thread, blocks: acp.ContentBlock[], opts: { title?: string; ts?: string } = {}) {
+    const { title, ts } = opts;
     if (outputs.has(t.sessionId)) void say(t, "📬 Queued: I'll start on this when the current turn ends.");
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
+      let outcome: keyof typeof OUTCOME = "failed";
       outputs.set(t.sessionId, out);
       await out.begin();
       try {
@@ -310,11 +315,14 @@ export function createDaemon(cfg: DaemonConfig) {
           r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
         }
         if (r.stopReason === "cancelled") out.text("\n\n_Stopped._");
+        outcome = r.stopReason === "cancelled" ? "stopped" : "done";
       } catch (err: any) {
         log("prompt_failed", { session: t.sessionId, error: err?.message ?? String(err) });
         out.text(`\n\n⚠️ ${err?.message ?? err}`);
+        outcome = "failed";
       } finally {
         await out.end();
+        if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
         outputs.delete(t.sessionId);
       }
     });
@@ -524,7 +532,7 @@ export function createDaemon(cfg: DaemonConfig) {
     // thread's folder and session can be found there.
     await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
     await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true });
-    await prompt(t, await blocksFor(first), `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`);
+    await prompt(t, await blocksFor(first), { title: `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`, ts: first.ts });
   }
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
@@ -637,7 +645,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const t = threads[m.thread_ts];
     if (t && m.text && (await command(t, m.text))) return;
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void blocksFor(m).then((blocks) => prompt(t, blocks));
+    if (t) return void blocksFor(m).then((blocks) => prompt(t, blocks, { ts: m.ts }));
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
