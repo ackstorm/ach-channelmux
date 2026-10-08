@@ -20,10 +20,13 @@ new acp.AgentSideConnection(
       conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
     return {
       async initialize() {
-        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, mcpCapabilities: { http: true } } };
+        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, mcpCapabilities: { http: true }, sessionCapabilities: { list: {} } } };
       },
       async authenticate() {
         return {};
+      },
+      async listSessions() {
+        return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: `Session ${sessionId}`, updatedAt: new Date().toISOString() })) };
       },
       async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;

@@ -1,14 +1,14 @@
 // Agent daemon: a Bolt app that connects to the relay as if it were Slack and runs each
-// DM thread as an ACP session (e.g. `opencode acp`), in a folder the user picks when the
-// thread starts.
+// DM thread as an ACP session (e.g. `opencode acp`). A new thread opens a picker (a Slack modal)
+// for the folder, then for a new or existing session in it.
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
@@ -23,7 +23,7 @@ export interface DaemonConfig {
   token: string;
   /** ACP agent command and arguments, e.g. ["opencode", "acp"]. */
   agentCmd: string[];
-  /** The folder picker offers this folder and its direct subfolders. */
+  /** The picker browses this folder and everything below it. */
   baseDir: string;
   /** Thread -> session map, so threads resume after a restart. */
   stateFile: string;
@@ -55,7 +55,7 @@ export function createDaemon(cfg: DaemonConfig) {
     threads = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
-  const pending = new Map<string, { channel: string; text: string; files?: any[] }>(); // thread ts -> first message, until a folder is picked
+  const pending = new Map<string, { channel: string; text: string; files?: any[] }>(); // thread ts -> first message, until the picker starts a session
   const loaded = new Map<string, Promise<unknown>>(); // sessions open in this agent process
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
@@ -63,18 +63,11 @@ export function createDaemon(cfg: DaemonConfig) {
   const permissions = new Map<string, (optionId: string) => void>(); // request id -> resolver
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
+  const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
 
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
     writeFileSync(cfg.stateFile, JSON.stringify(threads));
-  }
-
-  function folders() {
-    const subs = readdirSync(cfg.baseDir, { withFileTypes: true })
-      .filter((d) => d.isDirectory() && !d.name.startsWith("."))
-      .map((d) => d.name)
-      .sort();
-    return [".", ...subs].slice(0, 100); // static_select holds 100 options
   }
 
   const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
@@ -94,8 +87,15 @@ export function createDaemon(cfg: DaemonConfig) {
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         if ((update as any).rawInput !== undefined) inputs.set(update.toolCallId, (update as any).rawInput);
       }
+      if (replaying.has(sessionId)) {
+        if (update.sessionUpdate === "user_message_chunk") lastReply.set(sessionId, "");
+        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
+          lastReply.set(sessionId, (lastReply.get(sessionId) ?? "") + update.content.text);
+        }
+        return;
+      }
       const out = outputs.get(sessionId);
-      if (!out || replaying.has(sessionId)) return;
+      if (!out) return;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         void out.tool(update.toolCallId, update.title ?? undefined, update.status ?? undefined);
@@ -246,6 +246,7 @@ export function createDaemon(cfg: DaemonConfig) {
     let p = loaded.get(t.sessionId);
     if (!p) {
       replaying.add(t.sessionId);
+      lastReply.delete(t.sessionId);
       p = tools(t.thread).then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
@@ -280,21 +281,170 @@ export function createDaemon(cfg: DaemonConfig) {
     return [{ type: "text", text: [text, ...notes].filter(Boolean).join("\n\n") }];
   }
 
-  async function start(channel: string, thread: string, folder: string, text: string, files?: any[]) {
-    const cwd = folder === "." ? cfg.baseDir : join(cfg.baseDir, folder);
-    let sessionId: string;
+  // ---------- picker: folder, then a new or existing session (one Slack modal) ----------
+
+  interface Pick {
+    channel: string;
+    thread: string;
+    picker: string; // ts of the "Where should I work?" message
+    cwd: string; // relative to baseDir; "" is baseDir
+    back?: string; // folder screen that "Other folder" returns to
+  }
+  const canList = ready.then((r) => Boolean(r.agentCapabilities?.sessionCapabilities?.list));
+  const abs = (rel: string) => (rel ? join(cfg.baseDir, rel) : cfg.baseDir);
+  const isDir = (p: string) => {
     try {
-      ({ sessionId } = await agent.newSession({ cwd, mcpServers: await tools(thread) }));
-    } catch (err: any) {
-      log("session_create_failed", { cwd, error: err?.message ?? String(err) });
-      return void (await say({ channel, thread }, `⚠️ Could not start a session in \`${cwd}\`: ${err?.message ?? err}`));
+      return statSync(p).isDirectory(); // follows symlinks
+    } catch {
+      return false;
     }
-    const t: Thread = { channel, thread, sessionId, cwd };
-    threads[thread] = t;
-    bySession.set(sessionId, t);
-    loaded.set(sessionId, Promise.resolve());
+  };
+  const real = (p: string) => {
+    try {
+      return realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const inside = (root: string, p: string) => {
+    const r = relative(root, p);
+    return r.startsWith("..") || isAbsolute(r) ? null : r;
+  };
+  const ago = (iso?: string | null) => {
+    const min = iso ? Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 60_000)) : NaN;
+    if (Number.isNaN(min)) return "";
+    return min < 60 ? `${min} min ago` : min < 48 * 60 ? `${Math.round(min / 60)} h ago` : `${Math.round(min / 1440)} days ago`;
+  };
+
+  function subfolders(rel: string) {
+    const dir = abs(rel);
+    return readdirSync(dir, { withFileTypes: true })
+      .filter((d) => !d.name.startsWith(".") && d.name !== "node_modules" && isDir(join(dir, d.name)))
+      .map((d) => d.name)
+      .sort();
+  }
+
+  // The agent's sessions under baseDir, newest first. The agent may store a session's real path,
+  // so paths are mapped back through baseDir's own real path and its top-level symlinks.
+  async function sessions() {
+    if (!(await canList)) return [];
+    // ponytail: first page only (opencode: the 100 most recent sessions).
+    const { sessions: all } = await agent.listSessions({});
+    const roots: [string, string][] = [[cfg.baseDir, ""]];
+    const realBase = real(cfg.baseDir);
+    if (realBase) roots.push([realBase, ""]);
+    for (const d of readdirSync(cfg.baseDir, { withFileTypes: true })) {
+      const target = d.isSymbolicLink() ? real(join(cfg.baseDir, d.name)) : null;
+      if (target) roots.push([target, d.name]);
+    }
+    const relOf = (cwd: string) => {
+      for (const [root, prefix] of roots) {
+        const r = inside(root, cwd);
+        if (r !== null) return prefix ? join(prefix, r) : r;
+      }
+      return null;
+    };
+    return all
+      .map((x) => ({ ...x, rel: relOf(x.cwd) }))
+      .filter((x): x is typeof x & { rel: string } => x.rel !== null && isDir(abs(x.rel)))
+      .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
+  }
+
+  const plain = (text: string) => ({ type: "plain_text" as const, text, emoji: true });
+  const section = (text: string, accessory?: unknown) => ({ type: "section", text: { type: "mrkdwn", text }, ...(accessory ? { accessory } : {}) });
+  const button = (text: string, action_id: string, value: string) => ({ type: "button", text: plain(text.slice(0, 75)), action_id, value });
+  const nameOf = (rel: string) => basename(abs(rel));
+  const parentOf = (rel: string) => (rel.includes("/") ? dirname(rel) : "");
+  const modal = (callback_id: string, title: string, submit: string, p: Pick, blocks: unknown[]) => ({
+    type: "modal" as const,
+    callback_id,
+    title: plain(title),
+    submit: plain(submit.slice(0, 24)),
+    close: plain("Close"),
+    private_metadata: JSON.stringify(p),
+    blocks: blocks as any[],
+  });
+
+  async function folderView(p: Pick) {
+    const blocks: unknown[] = [section(`📁 \`${abs(p.cwd)}\``)];
+    if (p.cwd) blocks.push({ type: "actions", elements: [button(`⬅️ Back to ${nameOf(parentOf(p.cwd))}`, "picker_up", "up")] });
+    else {
+      const recent = new Map<string, { n: number; when: string }>();
+      for (const x of await sessions()) {
+        const r = recent.get(x.rel) ?? { n: 0, when: ago(x.updatedAt) };
+        recent.set(x.rel, { ...r, n: r.n + 1 });
+      }
+      if (recent.size) {
+        blocks.push({ type: "header", text: plain("Last used") });
+        for (const [rel, r] of [...recent].slice(0, 5)) {
+          const info = `${r.n} session${r.n > 1 ? "s" : ""}${r.when ? ` · last used ${r.when}` : ""}`;
+          blocks.push(section(`*${rel || nameOf("")}*\n${info}`, button("Choose", "picker_pick", rel)));
+        }
+      }
+    }
+    blocks.push({ type: "header", text: plain(p.cwd ? "Subfolders" : "Folders") });
+    const subs = subfolders(p.cwd);
+    // ponytail: a modal holds 100 blocks; folders past the first 80 are not offered.
+    for (const n of subs.slice(0, 80)) blocks.push(section(`📁 ${n}`, button("Open ›", "picker_open", n)));
+    if (!subs.length) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: "No subfolders here." }] });
+    return modal("picker_folder", "Choose folder", `Use ${nameOf(p.cwd)}`, p, blocks);
+  }
+
+  async function sessionView(p: Pick) {
+    const list = (await sessions()).filter((x) => x.rel === p.cwd).slice(0, 9); // radio buttons hold 10 options
+    const options = [
+      { text: plain("🆕 New session"), value: "new" },
+      ...list.map((x) => ({
+        text: plain((x.title || x.sessionId).slice(0, 75)),
+        description: plain([ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ") || " "),
+        value: x.sessionId,
+      })),
+    ];
+    return modal("picker_session", "Choose session", "Start", p, [
+      section(`📁 \`${abs(p.cwd)}\``),
+      { type: "actions", elements: [button("⬅️ Other folder", "picker_other", "other")] },
+      { type: "input", block_id: "session", label: plain("Session"), element: { type: "radio_buttons", action_id: "session", options, initial_option: options[0] } },
+    ]);
+  }
+
+  // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
+  async function start(p: Pick, choice: string) {
+    const first = pending.get(p.thread);
+    if (!first) return;
+    pending.delete(p.thread);
+    const where = { channel: p.channel, thread: p.thread };
+    const cwd = abs(p.cwd);
+    let t: Thread;
+    let head: string;
+    try {
+      if (choice === "new") {
+        const { sessionId } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
+        t = { ...where, sessionId, cwd };
+        loaded.set(sessionId, Promise.resolve());
+        head = `📁 \`${cwd}\` · new session`;
+      } else {
+        const title = (await sessions()).find((x) => x.sessionId === choice)?.title ?? choice;
+        const old = bySession.get(choice);
+        if (old) delete threads[old.thread];
+        loaded.delete(choice); // reload: its tools are bound to the thread
+        t = { ...where, sessionId: choice, cwd };
+        threads[p.thread] = t;
+        bySession.set(choice, t);
+        await open(t);
+        const last = (lastReply.get(choice) ?? "").trim();
+        const quote = last ? `\n${(last.length > 500 ? `${last.slice(0, 500)}…` : last).replace(/^/gm, "> ")}` : "";
+        head = `📁 \`${cwd}\` · continuing *${title}*${quote}`;
+      }
+    } catch (err: any) {
+      log("session_start_failed", { cwd, error: err?.message ?? String(err) });
+      return void (await say(where, `⚠️ Could not start a session in \`${cwd}\`: ${err?.message ?? err}`));
+    }
+    threads[p.thread] = t;
+    bySession.set(t.sessionId, t);
     save();
-    await prompt(t, await blocksFor(text, files), `${basename(cwd)}: ${(text || files?.[0]?.name || "").split("\n")[0]}`);
+    head += `\nResume it in a terminal: \`opencode -s ${t.sessionId}\``;
+    await slack.chat.update({ channel: p.channel, ts: p.picker, text: head, blocks: [] });
+    await prompt(t, await blocksFor(first.text, first.files), `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`);
   }
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
@@ -305,19 +455,10 @@ export function createDaemon(cfg: DaemonConfig) {
     const m = message as any;
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts) {
-      const names = folders();
-      if (names.length === 1) return void start(m.channel, m.ts, ".", m.text, m.files);
       pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files });
-      const options = names.map((n) => ({
-        text: { type: "plain_text", text: (n === "." ? `${basename(cfg.baseDir)} (base folder)` : n).slice(0, 75) },
-        value: n,
-      }));
       await say({ channel: m.channel, thread: m.ts }, "Where should I work?", [
-        {
-          type: "section",
-          text: { type: "mrkdwn", text: "Where should I work?" },
-          accessory: { type: "static_select", action_id: "folder", placeholder: { type: "plain_text", text: "Pick a folder" }, options },
-        },
+        section("Where should I work?"),
+        { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", m.ts), style: "primary" }] },
       ]);
       return;
     }
@@ -330,7 +471,7 @@ export function createDaemon(cfg: DaemonConfig) {
     // Not awaited: the turn can outlive Bolt's handler.
     if (t) return void blocksFor(m.text, m.files).then((blocks) => prompt(t, blocks));
     const where = { channel: m.channel, thread: m.thread_ts };
-    if (pending.has(m.thread_ts)) return void (await say(where, "Pick a folder above first."));
+    if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
 
@@ -339,17 +480,50 @@ export function createDaemon(cfg: DaemonConfig) {
     if (t && outputs.has(t.sessionId)) await stop(t);
   });
 
-  app.action("folder", async ({ ack, body, action }) => {
+  // The picker: block actions redraw the modal in place; its submits move to the next screen.
+  const pickOf = (body: any): Pick => JSON.parse(body.view.private_metadata);
+  const redraw = async (body: any, view: Promise<ReturnType<typeof modal>>) =>
+    slack.views.update({ view_id: body.view.id, view: await view });
+
+  app.action("picker_open_modal", async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
-    const thread = b.message?.thread_ts;
+    const thread = (action as any).value as string;
     const first = pending.get(thread);
-    if (!first) return;
-    pending.delete(thread);
-    const folder = (action as any).selected_option.value as string;
-    const cwd = folder === "." ? cfg.baseDir : join(cfg.baseDir, folder);
-    await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text: `📁 \`${cwd}\``, blocks: [] });
-    void start(first.channel, thread, folder, first.text, first.files);
+    if (!first) return void (await say({ channel: b.channel.id, thread }, "This picker has expired. Send a new message to start a thread."));
+    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, picker: b.message.ts, cwd: "" }) });
+  });
+  app.action("picker_open", async ({ ack, body, action }) => {
+    await ack();
+    const p = pickOf(body);
+    const name = (action as any).value as string;
+    if (name.includes("/") || name.startsWith(".") || !isDir(join(abs(p.cwd), name))) return;
+    await redraw(body, folderView({ ...p, cwd: join(p.cwd, name) }));
+  });
+  app.action("picker_up", async ({ ack, body }) => {
+    await ack();
+    const p = pickOf(body);
+    await redraw(body, folderView({ ...p, cwd: parentOf(p.cwd) }));
+  });
+  app.action("picker_pick", async ({ ack, body, action }) => {
+    await ack();
+    const rel = (action as any).value as string;
+    if (rel.split("/").includes("..") || !isDir(abs(rel))) return;
+    await redraw(body, sessionView({ ...pickOf(body), cwd: rel, back: "" }));
+  });
+  app.action("picker_other", async ({ ack, body }) => {
+    await ack();
+    const p = pickOf(body);
+    await redraw(body, folderView({ ...p, cwd: p.back ?? "" }));
+  });
+  app.view("picker_folder", async ({ ack, view }) => {
+    const p: Pick = JSON.parse(view.private_metadata);
+    await ack({ response_action: "update", view: await sessionView({ ...p, back: p.cwd }) });
+  });
+  app.view("picker_session", async ({ ack, view }) => {
+    await ack({ response_action: "clear" });
+    const choice = (view.state.values as any).session?.session?.selected_option?.value ?? "new";
+    void start(JSON.parse(view.private_metadata), choice);
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {

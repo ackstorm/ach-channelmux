@@ -62,7 +62,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 
 | | |
 |---|---|
-| New DM | Replies in its thread with a folder picker (`BASE_DIR` and its subfolders); the pick starts a session there with the message as its first prompt. A `BASE_DIR` without subfolders starts at once. |
+| New DM | Replies in its thread with **📂 Choose folder**, which opens a picker modal. Folder screen: the last-used folders (from the agent's `session/list`) and `BASE_DIR`'s folders, browsed in place (Open ›, Back; hidden folders and `node_modules` skipped, symlinks followed), then **Use**. Session screen: a new session or an existing one in that folder (one open in another thread moves here), then **Start**. The message becomes the session's first prompt; a continued session's last reply is quoted, not its history, and the thread shows `opencode -s <id>` to resume it in a terminal. |
 | Thread replies | Prompts to the thread's session, one turn at a time; queued if a turn is already running. |
 | Replies | Native stream (`chat.startStream`/`appendStream`/`stopStream`) with tool calls as task cards; falls back to one plain message per finished text segment (cut at tool calls) when streaming is off or refused. |
 | Status/Stop | `agents.sessions.setStatus` brackets each turn (Slack's "Working…" and native stop button); Slack's stop button and `/stop` in the thread both cancel the running turn. |
@@ -75,7 +75,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Env | |
 |---|---|
 | `RELAY_URL`, `RELAY_TOKEN` | The relay and the token it resolves to this daemon's owner. |
-| `BASE_DIR` | Folder offered by the picker. Default: current directory. |
+| `BASE_DIR` | Root of the picker; folders below it can be chosen. Default: current directory. |
 | `AGENT_CMD` | ACP agent command. Default `opencode acp`. |
 | `STATE_FILE` | Default `~/.local/state/ach-channelmux/threads.json`. |
 

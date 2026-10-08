@@ -28,7 +28,7 @@ resource "coder_script" "slack_agent" {
 }
 ```
 
-Optional env: `AGENT_BASE_DIR` (the folder picker offers it and its subfolders, default `/workspace`).
+Optional env: `AGENT_BASE_DIR` (root of the folder picker, default `/workspace`).
 
 ## Resolving the agent token
 

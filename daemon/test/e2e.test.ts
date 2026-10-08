@@ -3,7 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
@@ -13,7 +13,11 @@ import { createDaemon } from "../src/daemon.ts";
 const DM = "D_UPEPE";
 const slack = createMockSlack({ UPEPE: "pepe@example.com" });
 const base = mkdtempSync(join(tmpdir(), "daemon-test-"));
-for (const d of ["alpha", "beta", ".hidden"]) mkdirSync(join(base, d));
+for (const d of ["alpha", "beta", ".hidden", "node_modules"]) mkdirSync(join(base, d));
+// A symlinked folder, browsed like any other.
+const elsewhere = mkdtempSync(join(tmpdir(), "daemon-linked-"));
+mkdirSync(join(elsewhere, "deep"));
+symlinkSync(elsewhere, join(base, "gamma"));
 process.env.MOCK_AGENT_LOG = join(base, ".agent.log");
 const agentLog = () =>
   readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
@@ -55,6 +59,28 @@ const replies = (thread: string) => posts.filter((p) => p.params.thread_ts === t
 const click = (message: { ts: string; thread_ts: string }, action: Record<string, unknown>) =>
   slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, channel: { id: DM }, message, actions: [action] }, true);
 const mark = () => slack.calls.length;
+
+// The picker modal: the latest view the daemon opened or redrew, and the user's taps on it.
+const views = () => slack.calls.filter((c) => c.method === "views.open" || c.method === "views.update");
+const lastView = () => JSON.parse(views().at(-1)!.params.view);
+const actionValues = (view: any, actionId: string) =>
+  view.blocks.flatMap((b: any) => [b.accessory, ...(b.elements ?? [])]).filter((e: any) => e?.action_id === actionId).map((e: any) => e.value);
+async function tap(view: any, action_id: string, value: string) {
+  const n = views().length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_tap", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata }, actions: [{ type: "button", action_id, value }] }, true);
+  await waitFor(() => views().length > n);
+  return lastView();
+}
+const submit = (view: any, values: Record<string, unknown> = {}) =>
+  slack.emit("interactive", { type: "view_submission", user: { id: "UPEPE" }, trigger_id: "T_submit", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata, state: { values } } }, true) as Promise<any>;
+const sessionChoice = (value: string) => ({ session: { session: { type: "radio_buttons", selected_option: { value } } } });
+async function openPicker(thread: string) {
+  const msg = await waitFor(() => posts.find((p) => p.params.thread_ts === thread && p.params.blocks?.includes("picker_open_modal")));
+  const n = views().length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts, thread_ts: thread }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
+  await waitFor(() => views().length > n);
+  return { msg, view: lastView() };
+}
 const since = (n: number) => slack.calls.slice(n);
 const streamed = (calls: typeof slack.calls) =>
   calls.flatMap((c) => (c.params.chunks ? JSON.parse(c.params.chunks) : []));
@@ -84,20 +110,31 @@ after(async () => {
   await slack.stop();
 });
 
-test("a new DM asks for a folder, then runs the thread as an agent session there", async () => {
+test("a new DM opens the picker; browsing to a folder and starting a new session runs the thread there", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "fix the bug", { ts: "100.000001" }));
-  const picker = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && p.params.blocks));
-  const select = JSON.parse(picker.params.blocks)[0].accessory;
-  assert.deepEqual(select.options.map((o: any) => o.value), [".", "alpha", "beta"]);
+  let { msg, view } = await openPicker("100.000001");
+  assert.deepEqual(actionValues(view, "picker_open"), ["alpha", "beta", "gamma"]); // no hidden folders or node_modules; symlinks count
+  assert.deepEqual(actionValues(view, "picker_pick"), []); // no sessions yet: no "Last used"
+  view = await tap(view, "picker_open", "gamma");
+  assert.deepEqual(actionValues(view, "picker_open"), ["deep"]);
+  view = await tap(view, "picker_up", "up");
+  view = await tap(view, "picker_open", "beta");
+  assert.equal(view.submit.text, "Use beta");
+  const next = await submit(view);
+  assert.equal(next.response_action, "update");
+  view = next.view;
+  assert.deepEqual(view.blocks.at(-1).element.options.map((o: any) => o.value), ["new"]);
 
   const n = mark();
-  await click({ ts: picker.ts, thread_ts: "100.000001" }, { type: "static_select", action_id: "folder", selected_option: { value: "beta" } });
+  assert.deepEqual(await submit(view, sessionChoice("new")), { response_action: "clear" });
   await waitFor(() => calls("chat.stopStream").length > 0);
   assert.deepEqual(agentLog().slice(0, 2), [
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  assert.ok(calls("chat.update").some((c) => c.params.ts === picker.ts && c.params.text.includes("beta")));
+  const head = calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text;
+  assert.match(head, /beta` · new session/);
+  assert.match(head, /opencode -s ses_1/);
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
   assert.equal(firstStatus.params.thread_ts, "100.000001");
@@ -215,4 +252,27 @@ test("a file-only message (no text) still reaches the agent", async () => {
 test("a reply in a thread the daemon does not know says so", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "200.000002", thread_ts: "200.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "200.000001" && /no agent session/.test(p.params.text)));
+});
+
+test("the picker offers last-used folders and continues an existing session, moving it to the new thread", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "carry on", { ts: "300.000001" }));
+  let { msg, view } = await openPicker("300.000001");
+  assert.deepEqual(actionValues(view, "picker_pick"), ["beta"]);
+  view = await tap(view, "picker_pick", "beta");
+  const options = view.blocks.at(-1).element.options;
+  assert.deepEqual(options.map((o: any) => o.value), ["new", "ses_1"]);
+  assert.match(options[1].description.text, /another thread/);
+  view = await tap(view, "picker_other", "other"); // back to the first screen
+  assert.deepEqual(actionValues(view, "picker_pick"), ["beta"]);
+  view = await tap(view, "picker_pick", "beta");
+  await submit(view, sessionChoice("ses_1"));
+
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "carry on"));
+  assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
+  const head = await waitFor(() => calls("chat.update").find((c) => c.params.ts === msg.ts)?.params.text);
+  assert.match(head, /continuing \*Session ses_1\*/);
+  assert.match(head, /^> OLD HISTORY$/m); // its last reply, quoted; the history itself is not re-posted
+  assert.match(head, /opencode -s ses_1/);
+  await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });
