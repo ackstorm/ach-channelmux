@@ -16,6 +16,10 @@ import { createOutput, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
+const NUDGE =
+  "You ended your turn without replying to the user. Reply now with the result of what you just did " +
+  "(what you found or changed, and anything they need to decide). Do not run the same tools again.";
+
 export interface DaemonConfig {
   /** Relay base URL; its Web API facade is at /api/. */
   relayUrl: string;
@@ -272,7 +276,12 @@ export function createDaemon(cfg: DaemonConfig) {
       await out.begin();
       try {
         await open(t);
-        const r = await agent.prompt({ sessionId: t.sessionId, prompt: blocks });
+        let r = await agent.prompt({ sessionId: t.sessionId, prompt: blocks });
+        // Some models end a turn right after their tool calls, with no reply: ask once for one.
+        if (r.stopReason === "end_turn" && out.quiet) {
+          log("nudged", { session: t.sessionId });
+          r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
+        }
         if (r.stopReason === "cancelled") out.text("\n\n_Stopped._");
       } catch (err: any) {
         log("prompt_failed", { session: t.sessionId, error: err?.message ?? String(err) });

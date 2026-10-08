@@ -213,6 +213,17 @@ test("/stop in the thread cancels too", async () => {
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
 });
 
+test("a turn that ends after its tools with no reply gets one nudge, and the reply reaches the thread", async () => {
+  const n = mark();
+  const before = agentLog().length;
+  await slack.emit("events_api", slack.dm("UPEPE", "silent", { ts: "100.000012", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  const prompts = agentLog().slice(before).filter((e) => e.m === "prompt").map((e) => e.text);
+  assert.equal(prompts.length, 2);
+  assert.match(prompts[1], /without replying/);
+  assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /Here is the result\./);
+});
+
 test("attached files are saved to a temp folder and the agent gets their paths, not their content", async () => {
   const file = (id: string, name: string, mimetype: string) =>
     ({ id, name, mimetype, size: 20, url_private_download: `${slack.url}/files/${id}/${name}` });

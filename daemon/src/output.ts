@@ -44,6 +44,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let stream: { ts: string; started: number } | null = null;
   let pending = "";
   let afterTool = false;
+  let quiet = false; // a tool ran and no text has come since
   let timer: ReturnType<typeof setTimeout> | undefined;
   const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
   const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
@@ -98,6 +99,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   return {
     begin: () => run(() => status("processing", opts.title ? { title: opts.title.slice(0, 200) } : {})),
     text(s: string) {
+      if (s.trim()) quiet = false;
       if (afterTool) {
         s = `\n\n${s}`;
         afterTool = false;
@@ -118,10 +120,15 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       if (prev && prev.title === task.title && prev.status === task.status) return chain;
       tasks.set(id, task);
       afterTool = true;
+      quiet = true;
       return run(async () => {
         await flush();
         await send([task]);
       });
+    },
+    /** True when the turn's last output was a tool call, with no reply after it. */
+    get quiet() {
+      return quiet;
     },
     /** Before posting buttons (blocks only go out when a stream stops). */
     pause: () =>

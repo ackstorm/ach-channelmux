@@ -1,5 +1,7 @@
 // Minimal ACP agent for the tests. Logs what it receives as JSON lines to $MOCK_AGENT_LOG.
 //   prompt containing "perm": asks for permission, then reports the chosen option
+//   prompt "silent": runs a tool and ends the turn without replying; the daemon's nudge
+//     ("...without replying...") gets "Here is the result."
 //   prompt containing "upload": writes report.txt in the session folder and sends it with the
 //     daemon's send_file MCP tool
 //   any other prompt: "On it, " "checking." <tool call> "Done."
@@ -48,7 +50,12 @@ new acp.AgentSideConnection(
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };
         }
-        if (text.includes("upload")) {
+        if (text === "silent") {
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed" } });
+        } else if (text.includes("without replying")) {
+          await say(sessionId, "Here is the result.");
+        } else if (text.includes("upload")) {
           const { cwd, mcpServers } = sessions.get(sessionId)!;
           writeFileSync(join(cwd, "report.txt"), "report body");
           const url = (mcpServers[0] as any).url;
