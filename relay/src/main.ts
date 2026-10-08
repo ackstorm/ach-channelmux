@@ -11,18 +11,13 @@
 import { createGateway } from "./gateway.ts";
 import { tokenResolver } from "./resolver.ts";
 
-// The daemon shows the user only the agent's reply text (display mode "compact").
+// The daemon streams the reply text plus a card per tool call (title and status).
 // The gateway wraps it in a relay-context block with the user's name, email and local time.
-const SLACK_PREAMBLE = `The user is talking to you through Slack. They see only the text of your replies:
-no tool calls, no tool output, no thinking, no usage stats.
-- When the user asks to run something (e.g. \`ls -la\`), run it, then paste the
-  relevant output in your reply inside a code block. Trim long output and say so.
-- Never start a turn with a tool call. First send one short line, in the
-  user's language, acknowledging the request and saying what you will do
-  (e.g. "Got it, let me check the logs."), then use tools. The user sees
-  nothing while tools run, so without that line they think you ignored them.
-- If work runs for more than a couple of minutes, send a short progress line;
-  never go silent for long.
+const SLACK_PREAMBLE = `The user is talking to you through Slack. They see your reply text and, while you work,
+each tool call's title and status, but not tool output, thinking or usage stats.
+- Finish the request in this turn: do not stop after saying what you will do.
+- When the user asks to run something (e.g. \`ls -la\`), run it, then paste the relevant
+  output in your reply inside a code block. Trim long output and say so.
 - Use Slack-friendly Markdown: short paragraphs, code blocks, no tables or HTML.`;
 
 const env = (k: string, d?: string) => {
