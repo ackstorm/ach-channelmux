@@ -371,11 +371,12 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // A Slack message for the agent, wrapped so the session shows what came from Slack, from whom
   // and when (the relay preamble explains the envelope). Attachment notes go inside.
-  async function blocksFor(m: { text?: string; files?: any[]; user?: string; ts?: string }): Promise<acp.ContentBlock[]> {
+  async function blocksFor(m: { text?: string; files?: any[]; user?: string; ts?: string }, edited = false): Promise<acp.ContentBlock[]> {
     const [notes, who] = await Promise.all([attachments(m.files), person(m.user)]);
     const body = [m.text, ...notes].filter(Boolean).join("\n\n").replaceAll("</slack>", "<\\/slack>");
     const from = who.name ? ` from="${attr(who.name)}"` : "";
-    return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}">\n${body}\n</slack>` }];
+    const edit = edited ? ` edited="true"` : "";
+    return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}"${edit}>\n${body}\n</slack>` }];
   }
 
   // ---------- picker: folder, then a new or existing session (one Slack modal) ----------
@@ -646,6 +647,7 @@ export function createDaemon(cfg: DaemonConfig) {
 
   app.message(async ({ message }) => {
     const m = message as any;
+    if (m.subtype === "message_changed") return edited(m.message);
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts) {
       pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts });
@@ -664,6 +666,19 @@ export function createDaemon(cfg: DaemonConfig) {
     if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
+
+  // An edited message: before the picker it just changes the first prompt; in a session it goes to
+  // the agent as a correction. Edited commands do not run again.
+  async function edited(m: any) {
+    const p = pending.get(m.ts);
+    if (p) {
+      p.text = m.text;
+      return save();
+    }
+    const t = threads[m.thread_ts ?? m.ts];
+    if (!t || !m.text || /^\s*[$!]/.test(m.text)) return;
+    void blocksFor({ ...m, files: undefined }, true).then((blocks) => prompt(t, blocks, { ts: m.ts }));
+  }
 
   app.event("agent_session_stopped", async ({ event }) => {
     const t = threads[(event as any).thread_ts];

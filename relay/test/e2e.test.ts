@@ -104,6 +104,19 @@ test("criterion 3: channels, group DMs and bot messages are not routed", async (
   assert.equal(pepe1.got.length, before);
 });
 
+test("a user's edit reaches its owner; bot edits and unfurls do not", async () => {
+  const before = pepe1.got.length;
+  const changed = (message: Record<string, unknown>, previous = "old") =>
+    slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", ts: "1.1", ...message }, previous_message: { text: previous } });
+  await slack.emit("events_api", changed({ user: "UPEPE", text: "fixed" }));
+  await slack.emit("events_api", changed({ bot_id: "B1", user: "UBOT", text: "streamed" }));
+  await slack.emit("events_api", changed({ user: "UPEPE", text: "old" })); // unfurl: same text
+  await waitFor(() => pepe1.got.length === before + 1);
+  await sleep(200);
+  assert.equal(pepe1.got.length, before + 1);
+  assert.equal(pepe1.got.at(-1).message.text, "fixed");
+});
+
 test("criterion 5: a redelivered event is delivered once", async () => {
   const before = pepe1.got.length;
   const ev = slack.dm("UPEPE", "dup");

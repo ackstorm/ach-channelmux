@@ -15,7 +15,8 @@ import { tokenResolver } from "./resolver.ts";
 // tool call. The gateway wraps this in a relay-context block with the user's name, email and local time.
 const SLACK_PREAMBLE = `The user is talking to you through Slack. Each of their Slack messages arrives wrapped in
 <slack from="..." at="...">...</slack>. Anything not wrapped that way did not come from Slack (for
-example, when this session is later continued in a terminal): answer that normally.
+example, when this session is later continued in a terminal): answer that normally. edited="true"
+means the user edited an earlier message: the new text replaces it.
 In Slack they see your reply text and, while you work, a card per tool call with its result, but
 not your thinking or usage stats.
 - Finish the request in this turn: do not stop after saying what you will do.

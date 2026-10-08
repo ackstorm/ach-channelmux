@@ -16,7 +16,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 
 | Concern | Behaviour |
 |---|---|
-| Inbound | Routes only 1:1 DMs from humans (`channel_type=im`, no `bot_id`, no subtype except `file_share`), interactive payloads and `agent_session_stopped` events, by Slack user id. Channels, group DMs and bot messages are dropped. |
+| Inbound | Routes only 1:1 DMs from humans (`channel_type=im`, no `bot_id`, no subtype except `file_share`, plus their own edits as `message_changed` when the text changed), interactive payloads and `agent_session_stopped` events, by Slack user id. Channels, group DMs and bot messages are dropped. |
 | Identity | A daemon presents a token as its Slack token. The relay resolves it with a configurable endpoint: `GET $AUTH_RESOLVER_URL` with the token in header `$AUTH_RESOLVER_HEADER`; the owner's email is read from the JSON reply at `$AUTH_RESOLVER_EMAIL_FIELD` (dotted path). 401/403 or no email: rejected; other errors: HTTP 500, the daemon retries. Cached 5 min, keyed by a hash; tokens are never logged. Email → Slack user (`users.lookupByEmail`) → DM (`conversations.open`). |
 | Exclusivity | First connection per user is primary. Further connections are parked as hot standby; the oldest is promoted when the primary drops. |
 | Outbound | Web API facade at `/api/<method>`. `auth.test`, `team.info`, `files.getUploadURLExternal` pass through; `chat.*`, `chat.startStream`/`appendStream`/`stopStream`, `reactions.*`, `conversations.replies/info`, `assistant.threads.setStatus`, `agents.sessions.setStatus`/`rename`, `files.completeUploadExternal` must target the owner's DM; `users.info` only the owner; `views.open` needs a `trigger_id` delivered to that owner; `views.update` a known `view_id`; `conversations.list` returns empty. Everything else: `restricted_action`. |
@@ -66,6 +66,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Thread replies | Prompts to the thread's session, one turn at a time; queued if a turn is already running. |
 | Replies | Native stream (`chat.startStream`/`appendStream`/`stopStream`) with tool calls as task cards; falls back to one plain message per finished text segment (cut at tool calls) when streaming is off or refused. |
 | Status/Stop | `agents.sessions.setStatus` brackets each turn (Slack's "Working…" and native stop button); Slack's stop button and `/stop` in the thread both cancel the running turn. |
+| Edits | Editing the first message before the picker is done changes the first prompt; editing a message in a session sends the new text as a correction (`edited="true"` in its `<slack>` envelope). Edited `$`/`!` commands do not run again. |
 | Queued | A message sent while a turn is running gets a "📬 Queued" notice and runs after. |
 | Files in | Fetched through the relay's proxy and saved to a temp folder; the prompt gets their paths, so the agent opens a file (image or not) only when it needs it. |
 | Files out | Each session gets a `send_file(path, comment?)` tool from a small MCP server the daemon runs on `127.0.0.1` (per-process secret in the URL); it uploads the file (≤ 50 MB) to the thread. Needs an agent with HTTP MCP support (`opencode acp` has it). |

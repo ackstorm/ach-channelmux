@@ -454,7 +454,7 @@ export function createGateway(cfg: GatewayConfig) {
   // Nothing is held while offline: every message gets the notice, in its thread.
   async function goOffline(env: Envelope, channel: string) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
-    const ev = (env.payload as any).event;
+    const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
     await slack("chat.postMessage", {
       channel,
       thread_ts: ev.thread_ts ?? ev.ts,
@@ -469,6 +469,12 @@ export function createGateway(cfg: GatewayConfig) {
       const ev = body?.event;
       if (ev?.type === "agent_session_stopped") return ev.user ? { userId: ev.user, channel: ev.channel } : null;
       if (!ev || ev.type !== "message" || ev.channel_type !== "im") return null;
+      // A user's edit: the author is inside. Bot edits (every chat.update) and unfurls (same text) stay out.
+      if (ev.subtype === "message_changed") {
+        const m = ev.message;
+        if (!m?.user || m.bot_id || m.text === ev.previous_message?.text) return null;
+        return { userId: m.user, channel: ev.channel };
+      }
       if (ev.bot_id || !ev.user) return null;
       if (ev.subtype && ev.subtype !== "file_share") return null;
       return { userId: ev.user, channel: ev.channel };

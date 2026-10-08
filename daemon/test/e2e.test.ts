@@ -381,6 +381,27 @@ test("$ commands: $help, $model changes a setting, $compact, ! runs a shell comm
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && /Unknown command/.test(p.params.text ?? "")));
 });
 
+test("an edit before the picker changes the first prompt; an edit in a session reaches the agent as a correction", async () => {
+  const edit = (ts: string, text: string, thread_ts?: string) =>
+    slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts, thread_ts, text }, previous_message: { text: "old" } });
+  await slack.emit("events_api", slack.dm("UPEPE", "lsit files", { ts: "700.000001" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "700.000001" && p.params.blocks?.includes("picker_open_modal")));
+  await slack.emit("events_api", edit("700.000001", "list files"));
+  const { view } = await openPicker("700.000001");
+  const next = await submit(view);
+  await submit(next.view, sessionChoice("new"));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "list files"));
+  assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "lsit files"), false);
+
+  await slack.emit("events_api", edit("700.000001", "list all files"));
+  await slack.emit("events_api", edit("700.000002", "$help", "700.000001")); // edited commands do not run again
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "list all files"));
+  const envelope = readFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).find((e) => e.body === "list all files");
+  assert.match(envelope.attrs, / edited="true"$/);
+  await sleep(200);
+  assert.equal(agentLog().some((e) => e.m === "prompt" && /help/.test(e.text)), false);
+});
+
 test("each Slack message reaches the agent in a <slack> envelope with who wrote it and when", async () => {
   const lines = readFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
   const first = lines.find((e) => e.body.startsWith("fix the bug"));
