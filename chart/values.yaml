@@ -1,6 +1,6 @@
 image:
   repo: ghcr.io/ackstorm/ach-channelmux
-  tag: v0.2.13
+  tag: v0.2.14
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []
