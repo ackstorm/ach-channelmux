@@ -204,13 +204,17 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
         ...(sources ? { sources } : {}),
       };
       // Agents repeat unchanged updates; each would cost an append from the shared budget.
-      if (prev && (["title", "status", "details", "output", "sources"] as const).every((k) => JSON.stringify(prev[k]) === JSON.stringify(task[k]))) return chain;
+      const same = (k: string) => JSON.stringify(prev?.[k]) === JSON.stringify(task[k]);
+      if (prev && ["title", "status", "details", "output", "sources"].every(same)) return chain;
       tasks.set(id, task);
       afterTool = true;
       quiet = true;
+      // Slack adds a card's sources to those it already shows: send them only when they change.
+      const { sources: _, ...withoutSources } = task;
+      const chunk = same("sources") ? withoutSources : task;
       return run(async () => {
         await flush();
-        await send([task]);
+        await send([chunk]);
       });
     },
     /** True when the turn's last output was a tool call, with no reply after it. */
