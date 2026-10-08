@@ -176,6 +176,29 @@ test("/stop in the thread cancels too", async () => {
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
 });
 
+test("images go to the agent as images; other files are saved in the session folder", async () => {
+  const file = (id: string, name: string, mimetype: string) =>
+    ({ id, name, mimetype, size: 20, url_private_download: `${slack.url}/files/${id}/${name}` });
+  await slack.emit("events_api", slack.dm("UPEPE", "look", {
+    ts: "100.000009", thread_ts: "100.000001", subtype: "file_share",
+    files: [file("F1", "shot.png", "image/png"), file("F2", "notes.txt", "text/plain")],
+  }));
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.images));
+  assert.deepEqual(p.images, ["image/png"]);
+  assert.match(p.text, /notes\.txt/);
+  assert.equal(readFileSync(join(base, "beta", ".slack-files", "F2-notes.txt"), "utf8"), "content of F2");
+});
+
+test("a file-only message (no text) still reaches the agent", async () => {
+  const file = (id: string, name: string, mimetype: string) =>
+    ({ id, name, mimetype, size: 20, url_private_download: `${slack.url}/files/${id}/${name}` });
+  await slack.emit("events_api", slack.dm("UPEPE", "", {
+    ts: "100.000010", thread_ts: "100.000001", subtype: "file_share",
+    files: [file("F3", "data.csv", "text/csv")],
+  }));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text?.includes("data.csv")));
+});
+
 test("a reply in a thread the daemon does not know says so", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "200.000002", thread_ts: "200.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "200.000001" && /no agent session/.test(p.params.text)));

@@ -16,7 +16,7 @@ new acp.AgentSideConnection(
       conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
     return {
       async initialize() {
-        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true } };
+        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } } };
       },
       async authenticate() {
         return {};
@@ -33,7 +33,8 @@ new acp.AgentSideConnection(
       },
       async prompt({ sessionId, prompt }) {
         const text = prompt.map((p) => (p.type === "text" ? p.text : "")).join("");
-        log({ m: "prompt", sessionId, text });
+        const images = prompt.filter((p) => p.type === "image").map((p: any) => p.mimeType);
+        log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
         if (text === "wait") {
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };

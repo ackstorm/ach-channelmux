@@ -52,7 +52,7 @@ export function createDaemon(cfg: DaemonConfig) {
     threads = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
-  const pending = new Map<string, { channel: string; text: string }>(); // thread ts -> first message, until a folder is picked
+  const pending = new Map<string, { channel: string; text: string; files?: any[] }>(); // thread ts -> first message, until a folder is picked
   const loaded = new Map<string, Promise<unknown>>(); // sessions open in this agent process
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
@@ -133,6 +133,37 @@ export function createDaemon(cfg: DaemonConfig) {
     acp.ndJsonStream(Writable.toWeb(proc.stdin!), Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>),
   );
   const ready = agent.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+  const images = ready.then((r) => Boolean(r.agentCapabilities?.promptCapabilities?.image));
+
+  const MAX_FILE = 20 * 1024 * 1024;
+
+  // Slack files, fetched through the relay's file proxy with this daemon's token.
+  async function attachments(files: any[] = [], cwd: string): Promise<acp.ContentBlock[]> {
+    const blocks: acp.ContentBlock[] = [];
+    for (const f of files) {
+      const url = f.url_private_download ?? f.url_private;
+      if (!url || f.size > MAX_FILE) {
+        blocks.push({ type: "text", text: `[Attachment ${f.name} skipped: too large or unavailable]` });
+        continue;
+      }
+      const res = await fetch(url, { headers: { authorization: `Bearer ${cfg.token}` } });
+      if (!res.ok) {
+        log("file_fetch_failed", { file: f.id, status: res.status });
+        continue;
+      }
+      const data = Buffer.from(await res.arrayBuffer());
+      if ((await images) && /^image\/(png|jpeg|gif|webp)$/.test(f.mimetype)) {
+        blocks.push({ type: "image", mimeType: f.mimetype, data: data.toString("base64") });
+      } else {
+        const dir = join(cwd, ".slack-files");
+        mkdirSync(dir, { recursive: true });
+        const path = join(dir, `${f.id}-${basename(f.name)}`);
+        writeFileSync(path, data);
+        blocks.push({ type: "text", text: `[Attached file saved at ${path}]` });
+      }
+    }
+    return blocks;
+  }
 
   // Opens a session from an earlier process; the history it replays is not re-posted.
   function open(t: Thread) {
@@ -146,7 +177,7 @@ export function createDaemon(cfg: DaemonConfig) {
     return p;
   }
 
-  function prompt(t: Thread, text: string, title?: string) {
+  function prompt(t: Thread, blocks: acp.ContentBlock[], title?: string) {
     if (outputs.has(t.sessionId)) void say(t, "📬 Queued: I'll start on this when the current turn ends.");
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
@@ -154,7 +185,7 @@ export function createDaemon(cfg: DaemonConfig) {
       await out.begin();
       try {
         await open(t);
-        const r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text }] });
+        const r = await agent.prompt({ sessionId: t.sessionId, prompt: blocks });
         if (r.stopReason === "cancelled") out.text("\n\n_Stopped._");
       } catch (err: any) {
         log("prompt_failed", { session: t.sessionId, error: err?.message ?? String(err) });
@@ -168,7 +199,13 @@ export function createDaemon(cfg: DaemonConfig) {
     return turn;
   }
 
-  async function start(channel: string, thread: string, folder: string, text: string) {
+  // Leading text block dropped when there is no text (a file-only message).
+  async function blocksFor(text: string, files: any[] | undefined, cwd: string): Promise<acp.ContentBlock[]> {
+    const atts = await attachments(files, cwd);
+    return text ? [{ type: "text", text }, ...atts] : atts;
+  }
+
+  async function start(channel: string, thread: string, folder: string, text: string, files?: any[]) {
     const cwd = folder === "." ? cfg.baseDir : join(cfg.baseDir, folder);
     let sessionId: string;
     try {
@@ -183,7 +220,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, t);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await prompt(t, text, `${basename(cwd)}: ${text.split("\n")[0]}`);
+    await prompt(t, await blocksFor(text, files, cwd), `${basename(cwd)}: ${(text || files?.[0]?.name || "").split("\n")[0]}`);
   }
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
@@ -192,11 +229,11 @@ export function createDaemon(cfg: DaemonConfig) {
 
   app.message(async ({ message }) => {
     const m = message as any;
-    if ((m.subtype && m.subtype !== "file_share") || !m.text) return;
+    if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts) {
       const names = folders();
-      if (names.length === 1) return void start(m.channel, m.ts, ".", m.text);
-      pending.set(m.ts, { channel: m.channel, text: m.text });
+      if (names.length === 1) return void start(m.channel, m.ts, ".", m.text, m.files);
+      pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files });
       const options = names.map((n) => ({
         text: { type: "plain_text", text: (n === "." ? `${basename(cfg.baseDir)} (base folder)` : n).slice(0, 75) },
         value: n,
@@ -211,13 +248,13 @@ export function createDaemon(cfg: DaemonConfig) {
       return;
     }
     const t = threads[m.thread_ts];
-    if (t && m.text.trim() === "/stop") {
+    if (t && m.text?.trim() === "/stop") {
       if (outputs.has(t.sessionId)) await stop(t);
       else await say(t, "Nothing is running.");
       return;
     }
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void prompt(t, m.text);
+    if (t) return void blocksFor(m.text, m.files, t.cwd).then((blocks) => prompt(t, blocks));
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Pick a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
@@ -238,7 +275,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const folder = (action as any).selected_option.value as string;
     const cwd = folder === "." ? cfg.baseDir : join(cfg.baseDir, folder);
     await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text: `📁 \`${cwd}\``, blocks: [] });
-    void start(first.channel, thread, folder, first.text);
+    void start(first.channel, thread, folder, first.text, first.files);
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {
