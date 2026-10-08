@@ -28,6 +28,11 @@ export interface ToolInfo {
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 const lineCount = (s?: string | null) => (s ? s.split("\n").length : 0);
+// A card's output renders Markdown when expanded (```diff in colour, verified on Slack); fences
+// are closed after clipping so a cut never leaves one open.
+const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(body.replaceAll("\`\`\`", "ˋˋˋ"), max)}\n\`\`\``;
+const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) =>
+  [...(oldText ? oldText.split("\n").map((l) => `-${l}`) : []), ...(newText ? newText.split("\n").map((l) => `+${l}`) : [])].join("\n");
 
 /** Describes an ACP tool_call / tool_call_update for a card. `input` is the tool's latest rawInput. */
 export function describeTool(u: any, input: any, cwd: string): ToolInfo {
@@ -46,9 +51,14 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
     const content: any[] = u.content ?? [];
     const diffs = content.filter((c) => c.type === "diff");
     const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim();
-    output = diffs.length ? diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n") : text || undefined;
     const exit = u.rawOutput?.metadata?.exit;
-    if (typeof exit === "number" && exit !== 0) output = `exit ${exit}${output ? `\n${output}` : ""}`;
+    const failed = typeof exit === "number" && exit !== 0 ? `exit ${exit}\n` : "";
+    const room = OUTPUT_MAX - 40; // headers and fences
+    if (diffs.length) {
+      const head = diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n");
+      output = `${head}\n${fence(diffs.map((d) => diffLines(d.oldText, d.newText)).join("\n"), room - head.length, "diff")}`;
+    } else if (text) output = `${failed}${fence(text, room)}`;
+    else if (failed) output = failed.trim();
   }
   return {
     ...(title && { title: clip(title, TITLE_MAX) }),

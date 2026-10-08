@@ -50,7 +50,11 @@ new acp.AgentSideConnection(
         return { configOptions: [{ id: "model", name: "Model", type: "select", currentValue: "m0", options: [{ value: "m0", name: "Model zero" }] }] };
       },
       async prompt({ sessionId, prompt }) {
-        const text = prompt.map((p) => (p.type === "text" ? p.text : "")).join("");
+        const raw = prompt.map((p) => (p.type === "text" ? p.text : "")).join("");
+        // A Slack message comes in a <slack from=".." at=".."> envelope: note it, then act on its body.
+        const envelope = /^([\s\S]*?)<slack([^>]*)>\n([\s\S]*)\n<\/slack>$/.exec(raw);
+        if (envelope) appendFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, JSON.stringify({ sessionId, attrs: envelope[2].trim(), body: envelope[3] }) + "\n");
+        const text = envelope ? envelope[1] + envelope[3] : raw;
         const images = prompt.filter((p) => p.type === "image").map((p: any) => p.mimeType);
         log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
         if (text === "wait") {

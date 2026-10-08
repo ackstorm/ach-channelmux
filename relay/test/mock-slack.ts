@@ -73,7 +73,7 @@ export function createMockSlack(users: Record<string, string>) {
       }
       case "users.info":
         return send(users[params.user]
-          ? { ok: true, user: { id: params.user, profile: { email: users[params.user] } } }
+          ? { ok: true, user: { id: params.user, tz: "Europe/Madrid", profile: { email: users[params.user], real_name: `Real ${params.user}` } } }
           : { ok: false, error: "user_not_found" });
       case "conversations.open":
         return send({ ok: true, channel: { id: `D_${params.users}` } });

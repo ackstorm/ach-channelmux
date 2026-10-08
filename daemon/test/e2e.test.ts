@@ -364,3 +364,10 @@ test("$ commands: $help, $model changes a setting, $compact, ! runs a shell comm
   await say("$nope", "500.000009");
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && /Unknown command/.test(p.params.text ?? "")));
 });
+
+test("each Slack message reaches the agent in a <slack> envelope with who wrote it and when", async () => {
+  const lines = readFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+  const first = lines.find((e) => e.body.startsWith("fix the bug"));
+  assert.match(first.attrs, /^from="Real UPEPE" at="\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z+0-9:]+"$/);
+  assert.ok(!lines.some((e) => e.body.startsWith("$") || e.body.startsWith("!")), "commands are not sent to the agent");
+});

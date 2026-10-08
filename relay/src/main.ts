@@ -11,14 +11,19 @@
 import { createGateway } from "./gateway.ts";
 import { tokenResolver } from "./resolver.ts";
 
-// The daemon streams the reply text plus a card per tool call (title and status).
-// The gateway wraps it in a relay-context block with the user's name, email and local time.
-const SLACK_PREAMBLE = `The user is talking to you through Slack. They see your reply text and, while you work,
-each tool call's title and status, but not tool output, thinking or usage stats.
+// The daemon wraps each Slack message in <slack ...> and streams the reply text plus a card per
+// tool call. The gateway wraps this in a relay-context block with the user's name, email and local time.
+const SLACK_PREAMBLE = `The user is talking to you through Slack. Each of their Slack messages arrives wrapped in
+<slack from="..." at="...">...</slack>. Anything not wrapped that way did not come from Slack (for
+example, when this session is later continued in a terminal): answer that normally.
+In Slack they see your reply text and, while you work, a card per tool call with its result, but
+not your thinking or usage stats.
 - Finish the request in this turn: do not stop after saying what you will do.
 - When the user asks to run something (e.g. \`ls -la\`), run it, then paste the relevant
-  output in your reply inside a code block. Trim long output and say so.
-- Use Slack-friendly Markdown: short paragraphs, code blocks, no tables or HTML.`;
+  output in a code block. Trim long output and say so.
+- Write GitHub-style Markdown: short paragraphs, lists, tables, and code blocks with a language
+  (\`\`\`diff for changes). No HTML.
+- To send the user a file (an image, a report, a log), use the send_file tool.`;
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;

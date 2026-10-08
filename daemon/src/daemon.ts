@@ -52,6 +52,8 @@ interface Pending {
   channel: string;
   text: string;
   files?: any[];
+  user?: string;
+  ts?: string;
 }
 
 interface Thread {
@@ -320,9 +322,38 @@ export function createDaemon(cfg: DaemonConfig) {
     return turn;
   }
 
-  async function blocksFor(text: string, files: any[] | undefined): Promise<acp.ContentBlock[]> {
-    const notes = await attachments(files);
-    return [{ type: "text", text: [text, ...notes].filter(Boolean).join("\n\n") }];
+  // Who wrote a message, for the <slack> envelope: name and time zone, fetched once per user.
+  type Person = { name?: string; tz?: string };
+  const people = new Map<string, Promise<Person>>();
+  const person = (user?: string): Promise<Person> => {
+    if (!user) return Promise.resolve({});
+    if (!people.has(user)) {
+      const info = slack.users
+        .info({ user })
+        .then((r: any): Person => ({ name: r.user?.profile?.real_name || r.user?.real_name || r.user?.name, tz: r.user?.tz }))
+        .catch((): Person => ({}));
+      people.set(user, info);
+    }
+    return people.get(user)!;
+  };
+  const attr = (s: string) => s.replace(/[&"<>]/g, (c) => ({ "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" })[c]!);
+  const when = (ts: string | undefined, tz?: string) => {
+    const date = new Date(Number(ts) * 1000 || Date.now());
+    try {
+      // "2026-10-08 23:55 CEST" (sv-SE gives ISO-like dates; dateStyle cannot be combined with timeZoneName)
+      return new Intl.DateTimeFormat("sv-SE", { timeZone: tz, year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", timeZoneName: "short" }).format(date);
+    } catch {
+      return date.toISOString();
+    }
+  };
+
+  // A Slack message for the agent, wrapped so the session shows what came from Slack, from whom
+  // and when (the relay preamble explains the envelope). Attachment notes go inside.
+  async function blocksFor(m: { text?: string; files?: any[]; user?: string; ts?: string }): Promise<acp.ContentBlock[]> {
+    const [notes, who] = await Promise.all([attachments(m.files), person(m.user)]);
+    const body = [m.text, ...notes].filter(Boolean).join("\n\n").replaceAll("</slack>", "<\\/slack>");
+    const from = who.name ? ` from="${attr(who.name)}"` : "";
+    return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}">\n${body}\n</slack>` }];
   }
 
   // ---------- picker: folder, then a new or existing session (one Slack modal) ----------
@@ -493,7 +524,7 @@ export function createDaemon(cfg: DaemonConfig) {
     // thread's folder and session can be found there.
     await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
     await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true });
-    await prompt(t, await blocksFor(first.text, first.files), `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`);
+    await prompt(t, await blocksFor(first), `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`);
   }
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
@@ -595,7 +626,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const m = message as any;
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts) {
-      pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files });
+      pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts });
       save();
       await say({ channel: m.channel, thread: m.ts }, "Where should I work?", [
         section("Where should I work?"),
@@ -606,7 +637,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const t = threads[m.thread_ts];
     if (t && m.text && (await command(t, m.text))) return;
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void blocksFor(m.text, m.files).then((blocks) => prompt(t, blocks));
+    if (t) return void blocksFor(m).then((blocks) => prompt(t, blocks));
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
