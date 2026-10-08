@@ -15,6 +15,9 @@ const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON
 let n = 0;
 const cancels = new Map<string, () => void>();
 const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[] }>();
+const models = (currentValue: string): acp.SessionConfigOption[] => [
+  { id: "model", name: "Model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
+];
 
 new acp.AgentSideConnection(
   (conn) => {
@@ -34,7 +37,7 @@ new acp.AgentSideConnection(
         const sessionId = `ses_${++n}`;
         sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "new", sessionId, cwd });
-        return { sessionId };
+        return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
         sessions.set(sessionId, { cwd, mcpServers });
@@ -84,6 +87,10 @@ new acp.AgentSideConnection(
           await say(sessionId, "Done.");
         }
         return { stopReason: "end_turn" };
+      },
+      async setSessionConfigOption({ configId, value }) {
+        log({ m: "config", configId, value });
+        return { configOptions: models(String(value)) };
       },
       async cancel({ sessionId }) {
         log({ m: "cancel", sessionId });

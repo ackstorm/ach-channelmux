@@ -16,6 +16,18 @@ import { createOutput, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
+const HELP = [
+  "*Commands* (in a thread):",
+  "`$model`: model, effort and mode for this session",
+  "`$compact`: summarize the conversation to free context",
+  "`$clear`: start a new session in this folder",
+  "`$stop`: stop the running turn (also Slack's stop button)",
+  "`! <command>`: run a shell command in the session folder; the agent sees it with your next message",
+  "`$help`: this list",
+].join("\n");
+const SHELL_TIMEOUT_MS = 120_000;
+const SHELL_SHOWN = 3_000; // output characters shown in Slack (the tail)
+
 const NUDGE =
   "You ended your turn without replying to the user. Reply now with the result of what you just did " +
   "(what you found or changed, and anything they need to decide). Do not run the same tools again.";
@@ -76,6 +88,8 @@ export function createDaemon(cfg: DaemonConfig) {
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
   const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
+  const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
+  const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
@@ -97,6 +111,7 @@ export function createDaemon(cfg: DaemonConfig) {
   });
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
+      if (update.sessionUpdate === "config_option_update") configs.set(sessionId, update.configOptions);
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         if ((update as any).rawInput !== undefined) inputs.set(update.toolCallId, (update as any).rawInput);
       }
@@ -261,7 +276,9 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!p) {
       replaying.add(t.sessionId);
       lastReply.delete(t.sessionId);
-      p = tools(t.thread).then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
+      p = tools(t.thread)
+        .then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
+        .then((r) => r?.configOptions && configs.set(t.sessionId, r.configOptions));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
     }
@@ -276,7 +293,10 @@ export function createDaemon(cfg: DaemonConfig) {
       await out.begin();
       try {
         await open(t);
-        let r = await agent.prompt({ sessionId: t.sessionId, prompt: blocks });
+        const ran = shellNotes.get(t.sessionId);
+        shellNotes.delete(t.sessionId);
+        const context: acp.ContentBlock[] = ran ? [{ type: "text", text: `[Shell commands the user ran in this folder since your last turn]\n${ran.join("\n\n")}` }] : [];
+        let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...blocks] });
         // Some models end a turn right after their tool calls, with no reply: ask once for one.
         if (r.stopReason === "end_turn" && out.quiet) {
           log("nudged", { session: t.sessionId });
@@ -438,7 +458,8 @@ export function createDaemon(cfg: DaemonConfig) {
     let head: string;
     try {
       if (choice === "new") {
-        const { sessionId } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
+        const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
+        if (configOptions) configs.set(sessionId, configOptions);
         t = { ...where, sessionId, cwd };
         loaded.set(sessionId, Promise.resolve());
         head = `📁 \`${cwd}\` · new session`;
@@ -469,6 +490,67 @@ export function createDaemon(cfg: DaemonConfig) {
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
 
+  // ---------- commands: $model, $compact, $clear, $stop, $help, ! shell ----------
+
+  async function command(t: Thread, text: string) {
+    const s = text.trim();
+    if (s.startsWith("!")) {
+      void shell(t, s.slice(1).trim());
+      return true;
+    }
+    const name = s === "/stop" ? "stop" : /^\$(\w+)$/.exec(s)?.[1]?.toLowerCase();
+    if (!name) return false;
+    if (name === "stop") await (outputs.has(t.sessionId) ? stop(t) : say(t, "Nothing is running."));
+    else if (name === "compact") void prompt(t, [{ type: "text", text: "/compact" }]); // the agent's own command
+    else if (name === "clear") await clear(t);
+    else if (["model", "mode", "effort", "settings"].includes(name)) await settings(t);
+    else await say(t, name === "help" ? HELP : `Unknown command \`$${name}\`.\n${HELP}`);
+    return true;
+  }
+
+  async function settings(t: Thread) {
+    await open(t);
+    const opts = (configs.get(t.sessionId) ?? []).filter((o) => o.type === "select");
+    if (!opts.length) return void (await say(t, "This agent has no settings to change."));
+    const blocks = opts.slice(0, 10).map((o: any) => {
+      const choices = (o.options as any[]).flatMap((x) => x.options ?? [x]).slice(0, 100); // options may come in groups
+      const options = choices.map((c) => ({ text: plain(String(c.name).slice(0, 75)), value: String(c.value) }));
+      const current = options.find((c) => c.value === o.currentValue);
+      return section(`*${o.name}*`, { type: "static_select", action_id: `cfg_${o.id}`, options, ...(current && { initial_option: current }) });
+    });
+    await say(t, "⚙️ Session settings", blocks);
+  }
+
+  async function clear(t: Thread) {
+    if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
+    const { sessionId, configOptions } = await agent.newSession({ cwd: t.cwd, mcpServers: await tools(t.thread) });
+    if (configOptions) configs.set(sessionId, configOptions);
+    bySession.delete(t.sessionId);
+    const fresh = { ...t, sessionId };
+    threads[t.thread] = fresh;
+    bySession.set(sessionId, fresh);
+    loaded.set(sessionId, Promise.resolve());
+    save();
+    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal: \`opencode -s ${sessionId}\``);
+  }
+
+  async function shell(t: Thread, cmd: string) {
+    if (!cmd) return void (await say(t, "Usage: `! <command>`, e.g. `! git status`"));
+    const { out, code } = await new Promise<{ out: string; code: number | null }>((done) => {
+      let out = "";
+      const p = spawn("bash", ["-lc", cmd], { cwd: t.cwd, timeout: SHELL_TIMEOUT_MS });
+      p.stdout.on("data", (d) => (out += d));
+      p.stderr.on("data", (d) => (out += d));
+      p.on("error", (err) => done({ out: String(err), code: null }));
+      p.on("close", (code) => done({ out, code }));
+    });
+    const tail = out.length > SHELL_SHOWN ? `…\n${out.slice(-SHELL_SHOWN)}` : out;
+    const status = code === 0 ? "" : `\n${code === null ? "timed out or failed to start" : `exit ${code}`}`;
+    const fenced = `\`\`\`\n$ ${cmd}\n${tail.replaceAll("\`\`\`", "ˋˋˋ")}\n\`\`\`${status}`;
+    await slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, text: `$ ${cmd}`, markdown_text: fenced } as any);
+    shellNotes.set(t.sessionId, [...(shellNotes.get(t.sessionId) ?? []), fenced]);
+  }
+
   // ---------- Slack ----------
 
   app.message(async ({ message }) => {
@@ -484,11 +566,7 @@ export function createDaemon(cfg: DaemonConfig) {
       return;
     }
     const t = threads[m.thread_ts];
-    if (t && m.text?.trim() === "/stop") {
-      if (outputs.has(t.sessionId)) await stop(t);
-      else await say(t, "Nothing is running.");
-      return;
-    }
+    if (t && m.text && (await command(t, m.text))) return;
     // Not awaited: the turn can outlive Bolt's handler.
     if (t) return void blocksFor(m.text, m.files).then((blocks) => prompt(t, blocks));
     const where = { channel: m.channel, thread: m.thread_ts };
@@ -546,6 +624,21 @@ export function createDaemon(cfg: DaemonConfig) {
     await ack({ response_action: "clear" });
     const choice = (view.state.values as any).session?.session?.selected_option?.value ?? "new";
     void start(JSON.parse(view.private_metadata), choice);
+  });
+
+  app.action(/^cfg_/, async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const t = threads[b.message?.thread_ts];
+    if (!t) return;
+    const configId = (action as any).action_id.slice(4);
+    const value = (action as any).selected_option.value;
+    try {
+      const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId, value });
+      configs.set(t.sessionId, r.configOptions);
+    } catch (err: any) {
+      await say(t, `⚠️ Could not change ${configId}: ${err?.message ?? err}`);
+    }
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {

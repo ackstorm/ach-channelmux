@@ -314,3 +314,40 @@ test("a picker still works after the daemon restarts", async () => {
   await submit(next.view, sessionChoice("new"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
 });
+
+test("$ commands: $help, $model changes a setting, $compact, ! runs a shell command the agent then sees, $clear starts over", async () => {
+  const T = "500.000001";
+  const say = (text: string, ts: string) => slack.emit("events_api", slack.dm("UPEPE", text, { ts, thread_ts: T }));
+  const before = agentLog().length;
+
+  await say("$help", "500.000002");
+  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\$compact/.test(p.params.text ?? "")));
+
+  await say("$model", "500.000003");
+  const panel = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.blocks?.includes("cfg_model")));
+  const select = JSON.parse(panel.params.blocks)[0].accessory;
+  assert.equal(select.initial_option.value, "m1");
+  await click({ ts: panel.ts, thread_ts: T }, { type: "static_select", action_id: "cfg_model", selected_option: { value: "m2" } });
+  await waitFor(() => agentLog().some((e) => e.m === "config" && e.configId === "model" && e.value === "m2"));
+
+  await say("$compact", "500.000004");
+  await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/compact"));
+
+  await say("! echo shell-$((40+2))", "500.000005");
+  const out = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.markdown_text?.includes("$ echo shell")));
+  assert.match(out.params.markdown_text, /shell-42/);
+  await say("what did I run?", "500.000006");
+  const next = await waitFor(() => agentLog().slice(before).find((e) => e.m === "prompt" && e.text.includes("what did I run?")));
+  assert.match(next.text, /shell-42/); // the command and its output reach the agent with the next message
+  assert.equal(agentLog().slice(before).some((e) => e.m === "prompt" && e.text.startsWith("! echo")), false);
+
+  const session = agentLog().filter((e) => e.m === "prompt" && e.text.includes("what did I run?")).at(-1).sessionId;
+  await say("$clear", "500.000007");
+  const fresh = await waitFor(() => agentLog().slice(before).find((e) => e.m === "new"));
+  assert.notEqual(fresh.sessionId, session);
+  await say("hello again", "500.000008");
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "hello again" && e.sessionId === fresh.sessionId));
+
+  await say("$nope", "500.000009");
+  await waitFor(() => posts.find((p) => p.params.thread_ts === T && /Unknown command/.test(p.params.text ?? "")));
+});
