@@ -342,7 +342,10 @@ export function createDaemon(cfg: DaemonConfig) {
 
   function prompt(t: Thread, blocks: acp.ContentBlock[], opts: { title?: string; ts?: string } = {}) {
     const { title, ts } = opts;
-    if (outputs.has(t.sessionId)) void say(t, "📬 Queued: I'll start on this when the current turn ends.");
+    if (outputs.has(t.sessionId)) {
+      const queued = "📬 Queued: I'll start on this when the current turn ends.";
+      void say(t, queued, [section(queued, button("Send now", "queue_now", t.thread))]);
+    }
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
@@ -838,6 +841,16 @@ export function createDaemon(cfg: DaemonConfig) {
       }
     }
     await slack.chat.update({ channel: t.channel, ts, text: summary(t), blocks: [section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" })] as any[] });
+  });
+
+  // "Send now" on a queued notice: stop the running turn, so the queue moves on.
+  app.action("queue_now", async ({ ack, body, action }) => {
+    await ack();
+    const t = threads[(action as any).value];
+    if (!t || !outputs.has(t.sessionId)) return;
+    await stop(t);
+    const b = body as any;
+    await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {

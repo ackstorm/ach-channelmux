@@ -208,9 +208,23 @@ test("Slack's stop button cancels the running turn; a message meanwhile is queue
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
 });
 
+test("Send now on a queued notice stops the running turn and the queued message runs", async () => {
+  const waits = () => agentLog().filter((e) => e.m === "prompt" && e.text === "wait").length;
+  const before = waits();
+  await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000015", thread_ts: "100.000001" }));
+  await waitFor(() => waits() > before);
+  await slack.emit("events_api", slack.dm("UPEPE", "do this instead", { ts: "100.000016", thread_ts: "100.000001" }));
+  const notice = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && p.params.blocks?.includes("queue_now")));
+  await click({ ts: notice.ts, thread_ts: "100.000001" }, { type: "button", action_id: "queue_now", value: "100.000001" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "do this instead"));
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === notice.ts && /Sent now/.test(c.params.text)));
+});
+
 test("$stop (or /stop) in the thread cancels too", async () => {
+  const waits = () => agentLog().filter((e) => e.m === "prompt" && e.text === "wait").length;
+  const before = waits();
   await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000007", thread_ts: "100.000001" }));
-  await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "wait").length === 2);
+  await waitFor(() => waits() > before);
   const cancels = agentLog().filter((e) => e.m === "cancel").length;
   await slack.emit("events_api", slack.dm("UPEPE", "/stop", { ts: "100.000008", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().filter((e) => e.m === "cancel").length > cancels);
