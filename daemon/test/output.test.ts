@@ -80,3 +80,15 @@ test("pause ends the stream and suspends the session; later text opens a new str
     "agents.sessions.setStatus:processing", "chat.startStream", "chat.stopStream",
   ]);
 });
+
+test("task cards get short ids and repeated identical updates are not sent", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  const long = "call_239715__thought__" + "AY89a1+PJ/".repeat(15);
+  await out.tool(long, "ls -la", "in_progress");
+  await out.tool(long, "ls -la", "in_progress");
+  await out.tool(long, undefined, "completed");
+  await out.end();
+  const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
+  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["t1", "in_progress"], ["t1", "complete"]]);
+});

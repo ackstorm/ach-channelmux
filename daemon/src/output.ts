@@ -45,7 +45,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let pending = "";
   let afterTool = false;
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const tasks = new Map<string, Chunk>(); // last known status per id, for tool()'s prev lookup
+  const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
   const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
@@ -109,10 +109,13 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       const prev = tasks.get(id);
       const task: Chunk = {
         type: "task_update",
-        id,
+        // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
+        id: prev?.id ?? `t${tasks.size + 1}`,
         title: String(title ?? prev?.title ?? "tool").slice(0, 256),
         status: TASK_STATUS[acpStatus ?? ""] ?? prev?.status ?? "in_progress",
       };
+      // Agents repeat unchanged updates; each would cost an append from the shared budget.
+      if (prev && prev.title === task.title && prev.status === task.status) return chain;
       tasks.set(id, task);
       afterTool = true;
       return run(async () => {
