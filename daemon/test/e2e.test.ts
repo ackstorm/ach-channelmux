@@ -141,7 +141,7 @@ test("a new DM opens the picker; browsing to a folder and starting a new session
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
   assert.equal(firstStatus.params.thread_ts, "100.000001");
-  assert.match(firstStatus.params.title, /beta/);
+  assert.equal(firstStatus.params.title, "beta · fix the bug");
   const chunks = streamed(since(n));
   assert.equal(chunks.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
   assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"]]);
