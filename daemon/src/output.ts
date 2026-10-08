@@ -24,6 +24,7 @@ export interface ToolInfo {
   status?: string; // ACP: pending, in_progress, completed, failed
   details?: string; // what ran: command, path, pattern
   output?: string; // what came back: start of the result, edit sizes, exit code
+  sources?: { type: "url"; text: string; url: string }[]; // a fetched page, as a link
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
@@ -60,9 +61,10 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   if (command) title = command; // a shell card is its command
   else if (title && subject && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${subject}`; // "read" -> "read calc.py"
   if (child && title) title = `↳ ${title}`;
+  const sources = typeof i.url === "string" && /^https?:\/\//.test(i.url) ? [{ type: "url" as const, text: clip(i.url, DETAILS_MAX), url: i.url }] : undefined;
   let details: string | undefined;
   if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
-  else if (i.url) details = String(i.url);
+  else if (i.url && !sources) details = String(i.url); // a link says it otherwise
   else if (typeof i.code === "string") details = i.code;
   let output: string | undefined;
   let status: string | undefined = u.status ?? undefined;
@@ -87,6 +89,7 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
     ...(status && { status }),
     ...(details && { details: clip(details, DETAILS_MAX) }),
     ...(output && { output: clip(output, OUTPUT_MAX) }),
+    ...(sources && { sources }),
   };
 }
 
@@ -189,6 +192,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       const prev = tasks.get(id);
       const details = info.details ?? (prev?.details as string | undefined);
       const output = info.output ?? (prev?.output as string | undefined);
+      const sources = info.sources ?? prev?.sources;
       const task: Chunk = {
         type: "task_update",
         // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
@@ -197,9 +201,10 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
         status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
         ...(details && { details }),
         ...(output && { output }),
+        ...(sources ? { sources } : {}),
       };
       // Agents repeat unchanged updates; each would cost an append from the shared budget.
-      if (prev && (["title", "status", "details", "output"] as const).every((k) => prev[k] === task[k])) return chain;
+      if (prev && (["title", "status", "details", "output", "sources"] as const).every((k) => JSON.stringify(prev[k]) === JSON.stringify(task[k]))) return chain;
       tasks.set(id, task);
       afterTool = true;
       quiet = true;

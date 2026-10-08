@@ -116,6 +116,8 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
   const code = describeTool({ title: "execute", kind: "other", status: "completed", rawOutput: { metadata: { error: true } }, content: [{ type: "content", content: { type: "text", text: "Unknown tool" } }] }, { code: "await x()" }, cwd);
   assert.deepEqual(code, { title: "execute", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" });
+  const fetch = describeTool({ title: "webfetch", kind: "fetch", status: "pending" }, { url: "https://example.com/a", format: "markdown" }, cwd);
+  assert.deepEqual(fetch, { title: "webfetch", status: "pending", sources: [{ type: "url", text: "https://example.com/a", url: "https://example.com/a" }] });
   const long = describeTool({ title: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "z".repeat(2000) } }] }, {}, cwd).output!;
   assert.ok(long.length <= 500 && long.endsWith("…\n```"), "clipped inside a closed fence");
 });
