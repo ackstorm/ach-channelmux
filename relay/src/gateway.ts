@@ -313,7 +313,7 @@ export function localTime(at: Date, tz?: string) {
 
 /**
  * Appends the preamble to a new top-level message, which starts a thread and an agent
- * session. Thread replies, edits and other events, and cc-connect commands ("/cmd", "!shell",
+ * session. Thread replies, edits and other events, and commands ("/cmd", "$cmd", "!shell",
  * also with leading spaces) pass untouched: cc-connect would read the preamble as arguments.
  */
 export function addPreamble(
@@ -323,7 +323,7 @@ export function addPreamble(
 ) {
   if (!preamble || ev.type !== "message" || ev.thread_ts) return;
   if (ev.subtype && ev.subtype !== "file_share") return;
-  if (/^\s*[/!]/.test(ev.text ?? "")) return;
+  if (/^\s*[/!$]/.test(ev.text ?? "")) return;
   const who = user.name ? `${user.name} <${user.email}>` : user.email;
   const at = localTime(new Date(Number(ev.ts ?? 0) * 1000 || Date.now()), user.tz);
   ev.text = [

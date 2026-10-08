@@ -296,6 +296,7 @@ test("session preamble: only a new top-level message, never commands, edits or o
     { type: "message", text: "/dir /tmp", ts },
     { type: "message", text: " /dir /tmp", ts }, // Slack DM workaround for unregistered commands
     { type: "message", text: "!ls", ts }, // cc-connect shell shortcut: the rest would run
+    { type: "message", text: "$help", ts }, // the daemon's commands
     { type: "message", subtype: "message_changed", ts },
     { type: "reaction_added", ts },
   ];

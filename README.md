@@ -24,7 +24,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | Interactivity | Interactive envelopes wait up to 2.5 s for the daemon's ack and relay its payload. Message events are acked to Slack at once. |
 | Files | `url_private*` (and a voice clip's `vtt` transcript) in delivered events and `conversations.replies` are rewritten to `/files/<id>/<name>`; only the owner's daemon can fetch them. Uploads go straight to Slack's presigned URL (daemons need egress to `files.slack.com`). |
 | Working notice | While 👀 is on a message (the daemon's "turn running" reaction), posts a rotating status line (`🥧 *Baking…*`) in its thread, then "taking a while" lines with the elapsed time; deletes it when 👀 goes. |
-| Session preamble | A top-level DM starts a thread and a new agent session; the relay appends a context block with the user's name, email and local time, plus `SESSION_PREAMBLE` (default in `relay/src/main.ts`: the user sees only reply text, so acknowledge before using tools and quote tool output). Thread replies, edits and daemon commands (`/cmd`, `!shell`) pass untouched. |
+| Session preamble | A top-level DM starts a thread and a new agent session; the relay appends a context block with the user's name, email and local time, plus `SESSION_PREAMBLE` (default in `relay/src/main.ts`: the user sees only reply text, so acknowledge before using tools and quote tool output). Thread replies, edits and daemon commands (`/cmd`, `$cmd`, `!shell`) pass untouched. |
 | Offline | No daemon connected: every message gets a "not connected" notice in its thread. Nothing is held or replayed. |
 | State | In memory. One replica. Slack redelivers unacked envelopes (deduplicated by `event_id`); daemons reconnect on their own. |
 

@@ -802,6 +802,11 @@ export function createDaemon(cfg: DaemonConfig) {
     const m = message as any;
     if (m.subtype === "message_changed") return edited(m.message);
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
+    if (!m.thread_ts && /^\s*\$\w/.test(m.text ?? "")) {
+      // A command outside a thread: there is no session to run it on.
+      const help = /^\s*\$help\s*(\n|$)/i.test(m.text) ? HELP : `Commands work inside a thread with a session.\n${HELP}`;
+      return void (await say({ channel: m.channel, thread: m.ts }, help));
+    }
     if (!m.thread_ts) {
       pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts });
       save();

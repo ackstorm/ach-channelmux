@@ -347,6 +347,16 @@ test("a file-only message (no text) still reaches the agent", async () => {
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text?.includes("data.csv")));
 });
 
+test("a $command as a new message gets help, not the folder picker", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "$help", { ts: "800.000001" }));
+  const help = await waitFor(() => posts.find((p) => p.params.thread_ts === "800.000001"));
+  assert.match(help.params.text, /^\*Commands\*/);
+  await slack.emit("events_api", slack.dm("UPEPE", "$model", { ts: "800.000002" }));
+  const other = await waitFor(() => posts.find((p) => p.params.thread_ts === "800.000002"));
+  assert.match(other.params.text, /^Commands work inside a thread/);
+  assert.equal(posts.some((p) => ["800.000001", "800.000002"].includes(p.params.thread_ts) && p.params.blocks?.includes("picker_open_modal")), false);
+});
+
 test("a reply in a thread the daemon does not know says so", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "200.000002", thread_ts: "200.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "200.000001" && /no agent session/.test(p.params.text)));
