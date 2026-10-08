@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { mkdirSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-slack.ts";
 import { createDaemon } from "../src/daemon.ts";
@@ -176,17 +176,30 @@ test("/stop in the thread cancels too", async () => {
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
 });
 
-test("images go to the agent as images; other files are saved in the session folder", async () => {
+test("attached files are saved to a temp folder and the agent gets their paths, not their content", async () => {
   const file = (id: string, name: string, mimetype: string) =>
     ({ id, name, mimetype, size: 20, url_private_download: `${slack.url}/files/${id}/${name}` });
   await slack.emit("events_api", slack.dm("UPEPE", "look", {
     ts: "100.000009", thread_ts: "100.000001", subtype: "file_share",
     files: [file("F1", "shot.png", "image/png"), file("F2", "notes.txt", "text/plain")],
   }));
-  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.images));
-  assert.deepEqual(p.images, ["image/png"]);
-  assert.match(p.text, /notes\.txt/);
-  assert.equal(readFileSync(join(base, "beta", ".slack-files", "F2-notes.txt"), "utf8"), "content of F2");
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("look")));
+  assert.equal(p.images, undefined); // the agent supports images, but opens them only if it needs to
+  const paths = [...p.text.matchAll(/saved at (\S+)\]/g)].map((m) => m[1]);
+  assert.deepEqual(paths.map((x) => basename(x)), ["shot.png", "notes.txt"]);
+  assert.ok(paths.every((x) => x.startsWith(tmpdir())), paths.join());
+  assert.equal(readFileSync(paths[1], "utf8"), "content of F2");
+});
+
+test("the agent sends a file to the thread with the send_file tool, without our token reaching the upload URL", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000011", thread_ts: "100.000001" }));
+  const sent = await waitFor(() => agentLog().find((e) => e.m === "sent"));
+  assert.deepEqual(sent.tools, ["send_file"]);
+  assert.equal(sent.result, "Sent report.txt to the user.");
+  const done = calls("files.completeUploadExternal").at(-1)!;
+  assert.deepEqual([done.params.channel_id, done.params.thread_ts, done.params.initial_comment], [DM, "100.000001", "here it is"]);
+  const [{ id }] = JSON.parse(done.params.files);
+  assert.deepEqual(slack.uploads.get(id), { body: "report body", auth: undefined });
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {

@@ -4,8 +4,11 @@
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, statSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
@@ -133,17 +136,18 @@ export function createDaemon(cfg: DaemonConfig) {
     acp.ndJsonStream(Writable.toWeb(proc.stdin!), Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>),
   );
   const ready = agent.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
-  const images = ready.then((r) => Boolean(r.agentCapabilities?.promptCapabilities?.image));
 
   const MAX_FILE = 20 * 1024 * 1024;
 
-  // Slack files, fetched through the relay's file proxy with this daemon's token.
-  async function attachments(files: any[] = [], cwd: string): Promise<acp.ContentBlock[]> {
-    const blocks: acp.ContentBlock[] = [];
+  // Slack files, fetched through the relay's file proxy with this daemon's token and saved to a
+  // temp folder. The agent only gets their paths: it opens a file when it needs to, so images
+  // do not fill its context unasked.
+  async function attachments(files: any[] = []): Promise<string[]> {
+    const notes: string[] = [];
     for (const f of files) {
       const url = f.url_private_download ?? f.url_private;
       if (!url || f.size > MAX_FILE) {
-        blocks.push({ type: "text", text: `[Attachment ${f.name} skipped: too large or unavailable]` });
+        notes.push(`[Attachment ${f.name} skipped: too large or unavailable]`);
         continue;
       }
       const res = await fetch(url, { headers: { authorization: `Bearer ${cfg.token}` } });
@@ -151,26 +155,98 @@ export function createDaemon(cfg: DaemonConfig) {
         log("file_fetch_failed", { file: f.id, status: res.status });
         continue;
       }
-      const data = Buffer.from(await res.arrayBuffer());
-      if ((await images) && /^image\/(png|jpeg|gif|webp)$/.test(f.mimetype)) {
-        blocks.push({ type: "image", mimeType: f.mimetype, data: data.toString("base64") });
-      } else {
-        const dir = join(cwd, ".slack-files");
-        mkdirSync(dir, { recursive: true });
-        const path = join(dir, `${f.id}-${basename(f.name)}`);
-        writeFileSync(path, data);
-        blocks.push({ type: "text", text: `[Attached file saved at ${path}]` });
+      const path = join(mkdtempSync(join(tmpdir(), "ach-channelmux-")), basename(f.name));
+      writeFileSync(path, Buffer.from(await res.arrayBuffer()));
+      notes.push(`[Attached file saved at ${path}]`);
+    }
+    return notes;
+  }
+
+  // ---------- MCP: the agent's Slack tools ----------
+  // A minimal MCP server (Streamable HTTP, JSON responses only) on 127.0.0.1. Each session's URL
+  // carries its thread and a per-process secret, so only our agent can post, and only there.
+
+  const MAX_SEND = 50 * 1024 * 1024;
+  const secret = randomUUID();
+  const mcpHttp = ready.then((r) => Boolean(r.agentCapabilities?.mcpCapabilities?.http));
+  let mcpPort = 0;
+  const SEND_FILE = {
+    name: "send_file",
+    description:
+      "Send a local file (image, document, archive...) to the user in this Slack thread. " +
+      "Your text replies reach the user without it: use it only to deliver files.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        path: { type: "string", description: "File path, absolute or relative to the session folder" },
+        comment: { type: "string", description: "Optional message shown with the file" },
+      },
+      required: ["path"],
+    },
+  };
+
+  async function sendFile(t: Thread, args: { path?: string; comment?: string }) {
+    const path = resolve(t.cwd, String(args.path ?? ""));
+    const { size } = statSync(path);
+    if (size > MAX_SEND) throw new Error(`the file is ${size} bytes; the limit is ${MAX_SEND}`);
+    const filename = basename(path);
+    const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: size })) as any;
+    // Pre-signed URL on Slack's side: no token goes there (ours is the relay token).
+    const res = await fetch(up.upload_url, { method: "POST", body: readFileSync(path) });
+    if (!res.ok) throw new Error(`upload failed: HTTP ${res.status}`);
+    await slack.apiCall("files.completeUploadExternal", {
+      files: JSON.stringify([{ id: up.file_id, title: filename }]),
+      channel_id: t.channel,
+      thread_ts: t.thread,
+      ...(args.comment && { initial_comment: args.comment }),
+    });
+    return `Sent ${filename} to the user.`;
+  }
+
+  const mcp = createServer(async (req, res) => {
+    const [, root, key, thread] = (req.url ?? "").split("/");
+    const t = threads[thread];
+    if (root !== "mcp" || key !== secret || !t) return void res.writeHead(404).end();
+    if (req.method !== "POST") return void res.writeHead(405).end(); // no server-initiated stream
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    let msg: any;
+    try {
+      msg = JSON.parse(Buffer.concat(chunks).toString());
+    } catch {
+      return void res.writeHead(400).end();
+    }
+    if (msg.id === undefined) return void res.writeHead(202).end(); // a notification
+    const reply = (body: object) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, ...body }));
+    };
+    const p = msg.params ?? {};
+    if (msg.method === "initialize") {
+      return reply({ result: { protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "slack", version: "1" } } });
+    }
+    if (msg.method === "ping") return reply({ result: {} });
+    if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE] } });
+    if (msg.method === "tools/call" && p.name === "send_file") {
+      try {
+        return reply({ result: { content: [{ type: "text", text: await sendFile(t, p.arguments ?? {}) }] } });
+      } catch (err: any) {
+        log("send_file_failed", { error: err?.message ?? String(err) });
+        return reply({ result: { content: [{ type: "text", text: `Could not send the file: ${err?.message ?? err}` }], isError: true } });
       }
     }
-    return blocks;
-  }
+    reply({ error: { code: -32601, message: `unknown method ${msg.method}` } });
+  });
+
+  const tools = async (thread: string): Promise<acp.McpServer[]> =>
+    (await mcpHttp) ? [{ type: "http", name: "slack", url: `http://127.0.0.1:${mcpPort}/mcp/${secret}/${thread}`, headers: [] }] : [];
 
   // Opens a session from an earlier process; the history it replays is not re-posted.
   function open(t: Thread) {
     let p = loaded.get(t.sessionId);
     if (!p) {
       replaying.add(t.sessionId);
-      p = ready.then(() => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers: [] }));
+      p = tools(t.thread).then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
     }
@@ -199,18 +275,16 @@ export function createDaemon(cfg: DaemonConfig) {
     return turn;
   }
 
-  // Leading text block dropped when there is no text (a file-only message).
-  async function blocksFor(text: string, files: any[] | undefined, cwd: string): Promise<acp.ContentBlock[]> {
-    const atts = await attachments(files, cwd);
-    return text ? [{ type: "text", text }, ...atts] : atts;
+  async function blocksFor(text: string, files: any[] | undefined): Promise<acp.ContentBlock[]> {
+    const notes = await attachments(files);
+    return [{ type: "text", text: [text, ...notes].filter(Boolean).join("\n\n") }];
   }
 
   async function start(channel: string, thread: string, folder: string, text: string, files?: any[]) {
     const cwd = folder === "." ? cfg.baseDir : join(cfg.baseDir, folder);
     let sessionId: string;
     try {
-      await ready;
-      ({ sessionId } = await agent.newSession({ cwd, mcpServers: [] }));
+      ({ sessionId } = await agent.newSession({ cwd, mcpServers: await tools(thread) }));
     } catch (err: any) {
       log("session_create_failed", { cwd, error: err?.message ?? String(err) });
       return void (await say({ channel, thread }, `⚠️ Could not start a session in \`${cwd}\`: ${err?.message ?? err}`));
@@ -220,7 +294,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, t);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await prompt(t, await blocksFor(text, files, cwd), `${basename(cwd)}: ${(text || files?.[0]?.name || "").split("\n")[0]}`);
+    await prompt(t, await blocksFor(text, files), `${basename(cwd)}: ${(text || files?.[0]?.name || "").split("\n")[0]}`);
   }
 
   const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
@@ -254,7 +328,7 @@ export function createDaemon(cfg: DaemonConfig) {
       return;
     }
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void blocksFor(m.text, m.files, t.cwd).then((blocks) => prompt(t, blocks));
+    if (t) return void blocksFor(m.text, m.files).then((blocks) => prompt(t, blocks));
     const where = { channel: m.channel, thread: m.thread_ts };
     if (pending.has(m.thread_ts)) return void (await say(where, "Pick a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
@@ -294,12 +368,15 @@ export function createDaemon(cfg: DaemonConfig) {
   return {
     async start() {
       await ready;
+      await new Promise<void>((r) => mcp.listen(0, "127.0.0.1", r));
+      mcpPort = (mcp.address() as AddressInfo).port;
       await app.start();
       log("started", { baseDir: cfg.baseDir, threads: bySession.size });
     },
     async stop() {
       stopping = true;
       await app.stop();
+      mcp.close();
       proc.kill();
     },
   };

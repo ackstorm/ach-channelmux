@@ -33,6 +33,13 @@ export function createMockSlack(users: Record<string, string>) {
       res.writeHead(200, { "content-type": "text/plain" });
       return res.end(`content of ${url.pathname.split("/")[2]}`);
     }
+    if (url.pathname.startsWith("/upload/")) {
+      const body: Buffer[] = [];
+      for await (const c of req) body.push(c as Buffer);
+      mock.uploads.set(url.pathname.split("/")[2], { body: Buffer.concat(body).toString(), auth: req.headers.authorization });
+      res.writeHead(200, { "content-type": "text/plain" });
+      return res.end("OK");
+    }
     const method = url.pathname.replace(/^\/api\//, "");
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -70,6 +77,10 @@ export function createMockSlack(users: Record<string, string>) {
           : { ok: false, error: "user_not_found" });
       case "conversations.open":
         return send({ ok: true, channel: { id: `D_${params.users}` } });
+      case "files.getUploadURLExternal": {
+        const id = `F_UP${mock.uploads.size + 1}`;
+        return send({ ok: true, upload_url: `http://127.0.0.1:${port}/upload/${id}`, file_id: id });
+      }
       case "views.open":
         return send({ ok: true, view: { id: "V_OPENED" } });
       default: {
@@ -101,6 +112,8 @@ export function createMockSlack(users: Record<string, string>) {
     limits: {} as Record<string, { max: number; windowMs: number }>,
     /** Methods that answer ok:false with this error. */
     fail: new Map<string, string>(),
+    /** Bodies posted to the upload URLs from files.getUploadURLExternal, by file id. */
+    uploads: new Map<string, { body: string; auth?: string }>(),
     /** How many 429s were answered. */
     rateLimited: 0,
     get url() {

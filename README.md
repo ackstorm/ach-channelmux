@@ -67,7 +67,8 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Replies | Native stream (`chat.startStream`/`appendStream`/`stopStream`) with tool calls as task cards; falls back to one plain message per finished text segment (cut at tool calls) when streaming is off or refused. |
 | Status/Stop | `agents.sessions.setStatus` brackets each turn (Slack's "Working…" and native stop button); Slack's stop button and `/stop` in the thread both cancel the running turn. |
 | Queued | A message sent while a turn is running gets a "📬 Queued" notice and runs after. |
-| Files | Images go to the agent as ACP image blocks (when it supports them); other files are fetched through the relay's proxy and saved to `<cwd>/.slack-files/`. |
+| Files in | Fetched through the relay's proxy and saved to a temp folder; the prompt gets their paths, so the agent opens a file (image or not) only when it needs it. |
+| Files out | Each session gets a `send_file(path, comment?)` tool from a small MCP server the daemon runs on `127.0.0.1` (per-process secret in the URL); it uploads the file (≤ 50 MB) to the thread. Needs an agent with HTTP MCP support (`opencode acp` has it). |
 | Permissions | The agent's permission requests become buttons with its options, showing the command or path it wants to run. |
 | Restarts | Thread → session map in `STATE_FILE`; after a restart a thread reloads its session (`session/load`) without re-posting the history. |
 

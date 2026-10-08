@@ -1,14 +1,18 @@
 // Minimal ACP agent for the tests. Logs what it receives as JSON lines to $MOCK_AGENT_LOG.
 //   prompt containing "perm": asks for permission, then reports the chosen option
+//   prompt containing "upload": writes report.txt in the session folder and sends it with the
+//     daemon's send_file MCP tool
 //   any other prompt: "On it, " "checking." <tool call> "Done."
 
-import { appendFileSync } from "node:fs";
+import { appendFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import * as acp from "@agentclientprotocol/sdk";
 
 const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON.stringify(entry) + "\n");
 let n = 0;
 const cancels = new Map<string, () => void>();
+const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[] }>();
 
 new acp.AgentSideConnection(
   (conn) => {
@@ -16,17 +20,19 @@ new acp.AgentSideConnection(
       conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } } });
     return {
       async initialize() {
-        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true } } };
+        return { protocolVersion: acp.PROTOCOL_VERSION, agentCapabilities: { loadSession: true, promptCapabilities: { image: true }, mcpCapabilities: { http: true } } };
       },
       async authenticate() {
         return {};
       },
-      async newSession({ cwd }) {
+      async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
+        sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "new", sessionId, cwd });
         return { sessionId };
       },
-      async loadSession({ sessionId, cwd }) {
+      async loadSession({ sessionId, cwd, mcpServers }) {
+        sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "load", sessionId, cwd });
         await say(sessionId, "OLD HISTORY");
         return {};
@@ -39,7 +45,17 @@ new acp.AgentSideConnection(
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };
         }
-        if (text.includes("perm")) {
+        if (text.includes("upload")) {
+          const { cwd, mcpServers } = sessions.get(sessionId)!;
+          writeFileSync(join(cwd, "report.txt"), "report body");
+          const url = (mcpServers[0] as any).url;
+          const rpc = async (method: string, params: unknown) =>
+            (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()).result;
+          const tools = (await rpc("tools/list", {})).tools.map((t: any) => t.name);
+          const sent = await rpc("tools/call", { name: "send_file", arguments: { path: "report.txt", comment: "here it is" } });
+          log({ m: "sent", tools, result: sent.content[0].text });
+          await say(sessionId, "Sent.");
+        } else if (text.includes("perm")) {
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "bash", kind: "execute", status: "pending", rawInput: { command: "rm -rf build" } } });
           const r = await conn.requestPermission({
             sessionId,
