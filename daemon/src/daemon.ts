@@ -58,6 +58,8 @@ export function createDaemon(cfg: DaemonConfig) {
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
   const outputs = new Map<string, Output>(); // session -> its running turn
   const permissions = new Map<string, (optionId: string) => void>(); // request id -> resolver
+  const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
+  const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
 
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
@@ -86,6 +88,9 @@ export function createDaemon(cfg: DaemonConfig) {
   });
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
+      if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
+        if ((update as any).rawInput !== undefined) inputs.set(update.toolCallId, (update as any).rawInput);
+      }
       const out = outputs.get(sessionId);
       if (!out || replaying.has(sessionId)) return;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
@@ -98,7 +103,11 @@ export function createDaemon(cfg: DaemonConfig) {
       if (!t) return { outcome: { outcome: "cancelled" } };
       await outputs.get(sessionId)?.pause();
       const id = randomUUID();
-      const what = `🔐 The agent wants to run *${toolCall.title ?? toolCall.kind ?? "a tool"}*`;
+      const input = toolCall.rawInput ?? inputs.get(toolCall.toolCallId);
+      const i = (input ?? {}) as Record<string, unknown>;
+      const shown = typeof i.command === "string" ? i.command : typeof i.filePath === "string" ? i.filePath : input ? JSON.stringify(input) : "";
+      const what = `🔐 The agent wants to run *${toolCall.title ?? toolCall.kind ?? "a tool"}*${shown ? `\n\`\`\`\n${shown.slice(0, 500)}\n\`\`\`` : ""}`;
+      permissionTexts.set(id, what);
       const chosen = new Promise<string>((resolve) => permissions.set(id, resolve));
       await say(t, what, [
         { type: "section", text: { type: "mrkdwn", text: what } },
@@ -108,7 +117,7 @@ export function createDaemon(cfg: DaemonConfig) {
             type: "button",
             action_id: `perm_${o.optionId}`,
             text: { type: "plain_text", text: o.name.slice(0, 75) },
-            value: JSON.stringify({ id, optionId: o.optionId, what, name: o.name }),
+            value: JSON.stringify({ id, optionId: o.optionId, name: o.name }),
             ...(o.kind === "allow_once" && { style: "primary" }),
             ...(o.kind.startsWith("reject") && { style: "danger" }),
           })),
@@ -235,9 +244,11 @@ export function createDaemon(cfg: DaemonConfig) {
   app.action(/^perm_/, async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
-    const { id, optionId, what, name } = JSON.parse((action as any).value);
+    const { id, optionId, name } = JSON.parse((action as any).value);
     const resolve = permissions.get(id);
     permissions.delete(id);
+    const what = permissionTexts.get(id) ?? "🔐 Permission request";
+    permissionTexts.delete(id);
     resolve?.(optionId);
     const text = resolve ? `${what}: ${name}` : `${what}: expired`;
     await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text, blocks: [] });

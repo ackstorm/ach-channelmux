@@ -39,9 +39,10 @@ new acp.AgentSideConnection(
           return { stopReason: "cancelled" };
         }
         if (text.includes("perm")) {
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "t1", title: "bash", kind: "execute", status: "pending", rawInput: { command: "rm -rf build" } } });
           const r = await conn.requestPermission({
             sessionId,
-            toolCall: { toolCallId: "t1", title: "rm -rf build", kind: "execute" },
+            toolCall: { toolCallId: "t1", title: "bash", kind: "execute" },
             options: [
               { optionId: "allow", name: "Allow once", kind: "allow_once" },
               { optionId: "reject", name: "Reject", kind: "reject_once" },

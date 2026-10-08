@@ -112,6 +112,7 @@ test("a permission request becomes buttons whose click answers the agent", async
   await slack.emit("events_api", slack.dm("UPEPE", "perm please", { ts: "100.000002", thread_ts: "100.000001" }));
   const ask = await waitFor(() => posts.find((p) => p.params.blocks?.includes("perm_allow")));
   assert.match(ask.params.text, /rm -rf build/);
+  assert.match(ask.params.text, /bash/);
   const allow = JSON.parse(ask.params.blocks)[1].elements[0];
   await click({ ts: ask.ts, thread_ts: "100.000001" }, { type: "button", action_id: allow.action_id, value: allow.value });
   await waitFor(() =>
