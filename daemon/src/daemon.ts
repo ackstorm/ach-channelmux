@@ -32,6 +32,12 @@ export interface DaemonConfig {
   log?: (msg: string, extra?: unknown) => void;
 }
 
+interface Pending {
+  channel: string;
+  text: string;
+  files?: any[];
+}
+
 interface Thread {
   channel: string;
   thread: string;
@@ -51,11 +57,13 @@ export function createDaemon(cfg: DaemonConfig) {
   const slack = app.client;
 
   let threads: Record<string, Thread> = {}; // thread ts -> session
+  let waiting: [string, Pending][] = [];
   try {
-    threads = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
+    const state = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
+    ({ threads, pending: waiting = [] } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
-  const pending = new Map<string, { channel: string; text: string; files?: any[] }>(); // thread ts -> first message, until the picker starts a session
+  const pending = new Map<string, Pending>(waiting); // thread ts -> first message, until the picker starts a session
   const loaded = new Map<string, Promise<unknown>>(); // sessions open in this agent process
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
@@ -67,7 +75,8 @@ export function createDaemon(cfg: DaemonConfig) {
 
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
-    writeFileSync(cfg.stateFile, JSON.stringify(threads));
+    // ponytail: only the 50 newest unanswered pickers survive a restart.
+    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50) }));
   }
 
   const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
@@ -146,7 +155,8 @@ export function createDaemon(cfg: DaemonConfig) {
     const notes: string[] = [];
     for (const f of files) {
       const url = f.url_private_download ?? f.url_private;
-      if (!url || f.size > MAX_FILE) {
+      // Our token is the relay token: it goes to the relay's file proxy and nowhere else.
+      if (!url?.startsWith(`${cfg.relayUrl.replace(/\/$/, "")}/`) || f.size > MAX_FILE) {
         notes.push(`[Attachment ${f.name} skipped: too large or unavailable]`);
         continue;
       }
@@ -412,6 +422,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const first = pending.get(p.thread);
     if (!first) return;
     pending.delete(p.thread);
+    save();
     const where = { channel: p.channel, thread: p.thread };
     const cwd = abs(p.cwd);
     let t: Thread;
@@ -456,6 +467,7 @@ export function createDaemon(cfg: DaemonConfig) {
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts) {
       pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files });
+      save();
       await say({ channel: m.channel, thread: m.ts }, "Where should I work?", [
         section("Where should I work?"),
         { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", m.ts), style: "primary" }] },

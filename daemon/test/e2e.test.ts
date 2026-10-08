@@ -291,3 +291,15 @@ test("a session in the base folder itself shows up in Last used and can be picke
   view = await tap(view, "picker_pick", ".");
   assert.equal(view.blocks.at(-1).element.options.length, 2); // New session + the root session
 });
+
+test("a picker still works after the daemon restarts", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "before the restart", { ts: "500.000001" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "500.000001" && p.params.blocks?.includes("picker_open_modal")));
+  await daemon.stop();
+  daemon = newDaemon();
+  await daemon.start();
+  const { view } = await openPicker("500.000001");
+  const next = await submit(view);
+  await submit(next.view, sessionChoice("new"));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
+});
