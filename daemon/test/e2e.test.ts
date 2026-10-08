@@ -403,7 +403,7 @@ test("a picker still works after the daemon restarts", async () => {
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
 });
 
-test("$ commands: $help, $model changes a setting, $compact, the agent's $review, ! runs a shell command the agent then sees, $clear starts over", async () => {
+test("$ commands: $help, $model changes a setting, $compact, the agent's $review, ! runs a shell command the agent then sees, $clear starts over, $fork copies", async () => {
   const T = "500.000001";
   const say = (text: string, ts: string) => slack.emit("events_api", slack.dm("UPEPE", text, { ts, thread_ts: T }));
   const before = agentLog().length;
@@ -454,6 +454,12 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   assert.notEqual(fresh.sessionId, session);
   await say("hello again", "500.000008");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "hello again" && e.sessionId === fresh.sessionId));
+
+  await say("$fork", "500.000013"); // a copy of the session in a new thread, rooted at our message
+  const root = await waitFor(() => posts.find((p) => !p.params.thread_ts && /Fork of a session/.test(p.params.text ?? "")));
+  const forked = await waitFor(() => agentLog().find((e) => e.m === "new" && e.from === fresh.sessionId));
+  await slack.emit("events_api", slack.dm("UPEPE", "in the fork", { ts: "600.000001", thread_ts: root.ts }));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in the fork" && e.sessionId === forked.sessionId));
 
   await say("$nope", "500.000009");
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && /Unknown command/.test(p.params.text ?? "")));

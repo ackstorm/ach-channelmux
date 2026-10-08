@@ -22,11 +22,12 @@ const HELP = [
   "`$model`: model, effort and mode for this session",
   "`$compact`: summarize the conversation to free context",
   "`$clear`: start a new session in this folder",
+  "`$fork`: copy this session into a new thread, to try something else",
   "`$stop`: stop the running turn (also Slack's stop button)",
   "`! <command>`: run a shell command in the session folder; the agent sees it with your next message",
   "`$help`: this list",
 ].join("\n");
-const BUILTIN = ["stop", "compact", "clear", "model", "mode", "effort", "settings", "help"];
+const BUILTIN = ["stop", "compact", "clear", "fork", "model", "mode", "effort", "settings", "help"];
 const SHELL_TIMEOUT_MS = 120_000;
 const VOICE_POLLS = 15; // seconds to wait for Slack to transcribe a voice clip
 type Where = { channel?: string; ts?: string; thread_ts?: string }; // a Slack message's place
@@ -681,6 +682,7 @@ export function createDaemon(cfg: DaemonConfig) {
     if (name === "stop") await (outputs.has(t.sessionId) ? stop(t) : say(t, "Nothing is running."));
     else if (name === "compact") void prompt(t, [{ type: "text", text: "/compact" }]); // the agent's own command
     else if (name === "clear") await clear(t);
+    else if (name === "fork") await fork(t);
     else if (["model", "mode", "effort", "settings"].includes(name)) await settings(t);
     else await loadedWithSettings(t).then(() => say(t, `${name === "help" ? "" : `Unknown command \`$${name}\`.\n`}${HELP}${agentHelp(t)}`));
     return true;
@@ -754,6 +756,25 @@ export function createDaemon(cfg: DaemonConfig) {
     loaded.set(sessionId, Promise.resolve());
     save();
     await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal: \`opencode -s ${sessionId}\``);
+  }
+
+  // $fork: a copy of the session in a new thread (its root is our message), to try something else.
+  async function fork(t: Thread) {
+    if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
+    await open(t);
+    const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of a session in \`${t.cwd}\`. Reply in this thread to continue it.` });
+    try {
+      const { sessionId, configOptions } = await agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers: await tools(root.ts) });
+      if (configOptions) configs.set(sessionId, configOptions);
+      const copy = { channel: t.channel, thread: root.ts, sessionId, cwd: t.cwd };
+      threads[root.ts] = copy;
+      bySession.set(sessionId, copy);
+      loaded.set(sessionId, Promise.resolve());
+      save();
+      await say(t, "🍴 Forked: the copy is a new thread in the main view.");
+    } catch (err: any) {
+      await slack.chat.update({ channel: t.channel, ts: root.ts, text: `Could not fork the session: ${err?.message ?? err}` });
+    }
   }
 
   async function shell(t: Thread, cmd: string) {

@@ -50,6 +50,12 @@ new acp.AgentSideConnection(
         announce(sessionId);
         return { sessionId, configOptions: models("m1") };
       },
+      async unstable_forkSession({ sessionId: from, cwd, mcpServers }) {
+        const sessionId = `ses_${++n}`;
+        sessions.set(sessionId, { cwd, mcpServers: mcpServers ?? [] });
+        log({ m: "new", sessionId, cwd, from });
+        return { sessionId, configOptions: models("m1") };
+      },
       async loadSession({ sessionId, cwd, mcpServers }) {
         sessions.set(sessionId, { cwd, mcpServers });
         log({ m: "load", sessionId, cwd });
