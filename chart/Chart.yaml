@@ -1,7 +1,7 @@
 apiVersion: v2
 name: ach-channelmux
-version: 0.2.25
-appVersion: v0.2.25
+version: 0.2.26
+appVersion: v0.2.26
 kubeVersion: ">= 1.27.0-0"
 description: >-
   ach-channelmux — one chat app shared by every user (Slack today); forwards each
