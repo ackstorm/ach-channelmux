@@ -669,7 +669,7 @@ export function createDaemon(cfg: DaemonConfig) {
     // thread's folder and session can be found there.
     await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
     await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true });
-    await prompt(t, await blocksFor(first), { title: `${basename(cwd)} · ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(":", "")}`, ts: first.ts }); // Slack shows ":" as "_" in titles
+    await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
 
   const stop = async (t: Thread) => {

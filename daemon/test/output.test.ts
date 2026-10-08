@@ -118,6 +118,9 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   assert.deepEqual(code, { title: "execute", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" });
   const fetch = describeTool({ title: "webfetch", kind: "fetch", status: "pending" }, { url: "https://example.com/a", format: "markdown" }, cwd);
   assert.deepEqual(fetch, { title: "webfetch", status: "pending", sources: [{ type: "url", text: "https://example.com/a", url: "https://example.com/a" }] });
+  const heredoc = "cat << 'EOF' > f.py\ndef f():\n    return 1\nEOF";
+  assert.deepEqual(describeTool({ title: "bash", kind: "execute", status: "pending" }, { command: heredoc, description: "Create f.py" }, cwd), { title: "Create f.py", status: "pending", details: heredoc });
+  assert.equal(describeTool({ title: "bash", kind: "execute", status: "pending" }, { command: heredoc }, cwd).title, "cat << 'EOF' > f.py …");
   const long = describeTool({ title: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "z".repeat(2000) } }] }, {}, cwd).output!;
   assert.ok(long.length <= 500 && long.endsWith("…\n```"), "clipped inside a closed fence");
 });

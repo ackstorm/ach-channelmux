@@ -60,7 +60,10 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   let title: string | undefined = u.title ?? undefined;
   if (child && title?.startsWith(`${child}: `)) title = title.slice(child.length + 2);
   const subject = path ? rel(path) : (i.description ?? i.id); // a subagent's task, a skill's name
-  if (command) title = command; // a shell card is its command
+  // A shell card is its command; a long or multi-line one (a heredoc) is titled by the agent's own
+  // description of it, or its first line, and shown whole in the details.
+  const short = command !== undefined && !command.includes("\n") && command.length <= 100;
+  if (command) title = short ? command : (typeof i.description === "string" && i.description) || `${command.split("\n")[0]} …`;
   else if (title && subject && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${subject}`; // "read" -> "read calc.py"
   if (child && title) title = `↳ ${title}`;
   const sources = typeof i.url === "string" && /^https?:\/\//.test(i.url) ? [{ type: "url" as const, text: clip(i.url, DETAILS_MAX), url: i.url }] : undefined;
@@ -68,6 +71,7 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
   else if (i.url && !sources) details = String(i.url); // a link says it otherwise
   else if (typeof i.code === "string") details = i.code;
+  else if (command && !short) details = command;
   let output: string | undefined;
   let status: string | undefined = u.status ?? undefined;
   if (u.status === "completed" || u.status === "failed") {
