@@ -132,7 +132,9 @@ test("a new DM opens the picker; browsing to a folder and starting a new session
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  const head = calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text;
+  assert.ok(calls("chat.delete").some((c) => c.params.ts === msg.ts)); // the picker gives way to the header
+  const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.reply_broadcast === "true")!;
+  const head = header.params.text;
   assert.match(head, /beta` · new session/);
   assert.match(head, /opencode -s ses_1/);
   const firstStatus = calls("agents.sessions.setStatus")[0];
@@ -280,7 +282,8 @@ test("the picker offers last-used folders and continues an existing session, mov
 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "carry on"));
   assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
-  const head = await waitFor(() => calls("chat.update").find((c) => c.params.ts === msg.ts)?.params.text);
+  const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.reply_broadcast === "true")?.params.text);
+  assert.ok(calls("chat.delete").some((c) => c.params.ts === msg.ts));
   assert.match(head, /continuing \*Session ses_1\*/);
   assert.match(head, /^> OLD HISTORY$/m); // its last reply, quoted; the history itself is not re-posted
   assert.match(head, /opencode -s ses_1/);

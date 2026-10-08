@@ -484,7 +484,10 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(t.sessionId, t);
     save();
     head += `\nResume it in a terminal: \`opencode -s ${t.sessionId}\``;
-    await slack.chat.update({ channel: p.channel, ts: p.picker, text: head, blocks: [] });
+    // The picker gives way to a header that is also broadcast to the DM's main view, so each
+    // thread's folder and session can be found there.
+    await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
+    await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true });
     await prompt(t, await blocksFor(first.text, first.files), `${basename(cwd)}: ${(first.text || first.files?.[0]?.name || "").split("\n")[0]}`);
   }
 
