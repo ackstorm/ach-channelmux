@@ -16,7 +16,12 @@ const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON
 let n = existsSync(process.env.MOCK_AGENT_LOG!) ? readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter((l) => l.includes('"m":"new"')).length : 0;
 const cancels = new Map<string, () => void>();
 let flaky = 0; // prompt "flaky" fails the first time
-const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[] }>();
+const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[]; updated?: number }>();
+let clock = Date.now(); // strictly increasing "last used" times
+const touch = (sessionId: string) => {
+  const x = sessions.get(sessionId);
+  if (x) x.updated = ++clock;
+};
 const models = (currentValue: string): acp.SessionConfigOption[] => [
   { id: "model", name: "Model", category: "model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
   { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "Build" }, { value: "plan", name: "Plan" }] },
@@ -42,11 +47,12 @@ new acp.AgentSideConnection(
         return {};
       },
       async listSessions() {
-        return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: `Session ${sessionId}`, updatedAt: new Date().toISOString() })) };
+        return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: `Session ${sessionId}`, updatedAt: new Date(x.updated ?? 0).toISOString() })) };
       },
       async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
         sessions.set(sessionId, { cwd, mcpServers });
+        touch(sessionId);
         log({ m: "new", sessionId, cwd });
         announce(sessionId);
         return { sessionId, configOptions: models("m1") };
@@ -73,6 +79,7 @@ new acp.AgentSideConnection(
         if (envelope) appendFileSync(`${process.env.MOCK_AGENT_LOG}.envelopes`, JSON.stringify({ sessionId, attrs: envelope[2].trim(), body: envelope[3] }) + "\n");
         const text = envelope ? envelope[1] + envelope[3] : raw;
         const images = prompt.filter((p) => p.type === "image").map((p: any) => p.mimeType);
+        touch(sessionId);
         log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
         if (text === "flaky" && !flaky++) throw new Error("gateway timeout");
         if (text === "wait") {

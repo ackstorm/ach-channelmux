@@ -528,3 +528,14 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("login fails on Safari")));
   assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]/);
 });
+
+test("the picker message offers a one-tap new session in the last used folder", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "quick one", { ts: "910.000001" }));
+  const msg = await waitFor(() => posts.find((p) => p.params.thread_ts === "910.000001" && p.params.blocks?.includes("picker_quick")));
+  const quick = JSON.parse(msg.params.blocks)[1].elements[1];
+  const last = agentLog().filter((e) => e.m === "new").at(-1).cwd;
+  assert.equal(quick.text.text, `▶ New session in ${last === base ? basename(base) : basename(last)}`);
+  await click({ ts: msg.ts, thread_ts: "910.000001" }, { type: "button", action_id: "picker_quick", value: quick.value });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "quick one"));
+  assert.equal(agentLog().filter((e) => e.m === "new").at(-1).cwd, last);
+});

@@ -839,12 +839,15 @@ export function createDaemon(cfg: DaemonConfig) {
   }
 
   // A new thread's first message waits for the picker; its button (re)opens the modal.
+  // A one-tap "new session in the last used folder" sits next to it.
   async function offerPicker(p: Pending & { ts: string }) {
     pending.set(p.ts, p);
     save();
+    const last = await sessions().then((all) => all[0]?.rel, () => undefined);
+    const quick = last === undefined ? [] : [button(`▶ New session in ${last || basename(cfg.baseDir)}`, "picker_quick", JSON.stringify({ thread: p.ts, cwd: last || "." }))];
     return (await say({ channel: p.channel, thread: p.ts }, "Where should I work?", [
       section("Where should I work?"),
-      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }] },
+      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }, ...quick] },
     ])) as any;
   }
 
@@ -871,6 +874,14 @@ export function createDaemon(cfg: DaemonConfig) {
   const pickOf = (body: any): Pick => JSON.parse(body.view.private_metadata);
   const redraw = async (body: any, view: Promise<ReturnType<typeof modal>>) =>
     slack.views.update({ view_id: body.view.id, view: await view });
+
+  app.action("picker_quick", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const { thread, cwd } = JSON.parse((action as any).value);
+    if (!pending.has(thread)) return void (await say({ channel: b.channel.id, thread }, "This picker has expired. Send a new message to start a thread."));
+    await start({ channel: b.channel.id, thread, picker: b.message.ts, cwd: cwd === "." ? "" : cwd }, "new");
+  });
 
   app.action("picker_open_modal", async ({ ack, body, action }) => {
     await ack();
