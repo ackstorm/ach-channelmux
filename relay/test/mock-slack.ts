@@ -82,6 +82,8 @@ export function createMockSlack(users: Record<string, string>) {
         const id = `F_UP${mock.uploads.size + 1}`;
         return send({ ok: true, upload_url: `http://127.0.0.1:${port}/upload/${id}`, file_id: id });
       }
+      case "chat.getPermalink":
+        return send({ ok: true, permalink: `https://example.slack.com/archives/${params.channel}/p${params.message_ts.replace(".", "")}` });
       case "conversations.replies":
         return send({ ok: true, messages: mock.replies?.(params) ?? [] });
       case "views.update":

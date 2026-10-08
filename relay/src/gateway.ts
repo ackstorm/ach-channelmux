@@ -86,6 +86,7 @@ const CHANNEL_SCOPED: Record<string, string[]> = {
   "chat.update": ["channel"],
   "chat.delete": ["channel"],
   "chat.postEphemeral": ["channel"],
+  "chat.getPermalink": ["channel"],
   "reactions.add": ["channel"],
   "reactions.remove": ["channel"],
   "conversations.replies": ["channel"],

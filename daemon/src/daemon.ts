@@ -762,7 +762,8 @@ export function createDaemon(cfg: DaemonConfig) {
   async function fork(t: Thread) {
     if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
     await open(t);
-    const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of a session in \`${t.cwd}\`. Reply in this thread to continue it.` });
+    const title = (await sessions()).find((x) => x.sessionId === t.sessionId)?.title;
+    const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of ${title ? `*${title}*` : "a session"} in \`${t.cwd}\`. Reply in this thread to continue it.` });
     try {
       const { sessionId, configOptions } = await agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers: await tools(root.ts) });
       if (configOptions) configs.set(sessionId, configOptions);
@@ -771,7 +772,8 @@ export function createDaemon(cfg: DaemonConfig) {
       bySession.set(sessionId, copy);
       loaded.set(sessionId, Promise.resolve());
       save();
-      await say(t, "🍴 Forked: the copy is a new thread in the main view.");
+      const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: root.ts }).then((r) => r.permalink, () => undefined);
+      await say(t, `🍴 Forked: ${link ? `<${link}|the copy>` : "the copy"} is a new thread in the main view.`);
     } catch (err: any) {
       await slack.chat.update({ channel: t.channel, ts: root.ts, text: `Could not fork the session: ${err?.message ?? err}` });
     }

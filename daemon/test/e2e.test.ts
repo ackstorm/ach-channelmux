@@ -456,8 +456,9 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "hello again" && e.sessionId === fresh.sessionId));
 
   await say("$fork", "500.000013"); // a copy of the session in a new thread, rooted at our message
-  const root = await waitFor(() => posts.find((p) => !p.params.thread_ts && /Fork of a session/.test(p.params.text ?? "")));
+  const root = await waitFor(() => posts.find((p) => !p.params.thread_ts && /^🍴 Fork of \*Session ses_\d+\* in /.test(p.params.text ?? "")));
   const forked = await waitFor(() => agentLog().find((e) => e.m === "new" && e.from === fresh.sessionId));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.text?.includes(`<https://example.slack.com/archives/${DM}/p${root.ts.replace(".", "")}|the copy>`)));
   await slack.emit("events_api", slack.dm("UPEPE", "in the fork", { ts: "600.000001", thread_ts: root.ts }));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in the fork" && e.sessionId === forked.sessionId));
 
