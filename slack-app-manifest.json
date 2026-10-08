@@ -13,6 +13,10 @@
     "bot_user": {
       "display_name": "ach-channelmux",
       "always_online": true
+    },
+    "agent_view": {
+      "agent_description": "Your coding agent, in your own workspace.",
+      "suggested_prompts": []
     }
   },
   "oauth_config": {
@@ -26,13 +30,14 @@
         "im:write",
         "reactions:write",
         "users:read",
-        "users:read.email"
+        "users:read.email",
+        "assistant:write"
       ]
     }
   },
   "settings": {
     "event_subscriptions": {
-      "bot_events": ["message.im"]
+      "bot_events": ["message.im", "agent_session_stopped"]
     },
     "interactivity": {
       "is_enabled": true

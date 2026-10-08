@@ -42,6 +42,9 @@ async function daemon(name: string, token: string): Promise<Daemon> {
   app.view("settings", async ({ ack }) => {
     await ack({ response_action: "errors", errors: { cwd: `rejected by ${name}` } });
   });
+  app.event("agent_session_stopped", async ({ event }) => {
+    d.got.push(event);
+  });
   await app.start();
   daemons.push(d);
   return d;
@@ -208,6 +211,25 @@ test("a 429 from Slack is retried by the relay, not returned to the daemon", asy
   } finally {
     delete slack.limits["chat.update"];
   }
+});
+
+test("agent sessions: streams and status are scoped to the owner's DM; stop events reach the owner", async () => {
+  const c = pepe1.app.client;
+  assert.ok((await c.apiCall("chat.startStream", { channel: "D_UPEPE", thread_ts: "80.0", markdown_text: "hi" })).ok);
+  assert.ok((await c.apiCall("agents.sessions.setStatus", { channel_id: "D_UPEPE", thread_ts: "80.0", status: "processing" })).ok);
+  await assert.rejects(c.apiCall("chat.startStream", { channel: "D_UXAVI", thread_ts: "80.0", markdown_text: "x" }), /restricted_action/);
+  await assert.rejects(c.apiCall("agents.sessions.setStatus", { thread_ts: "80.0", status: "processing" }), /restricted_action/);
+
+  const n = pepe1.got.length;
+  await slack.emit("events_api", {
+    type: "event_callback",
+    event_id: "EvStop1",
+    team_id: "T1",
+    api_app_id: "A1",
+    event: { type: "agent_session_stopped", channel: "D_UPEPE", thread_ts: "80.0", user: "UPEPE" },
+  });
+  await waitFor(() => pepe1.got.length > n);
+  assert.equal(pepe1.got.at(-1).type, "agent_session_stopped");
 });
 
 test("criterion 4: a second daemon parks as standby and takes over when the first dies", async () => {

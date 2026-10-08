@@ -93,6 +93,11 @@ const CHANNEL_SCOPED: Record<string, string[]> = {
   "users.info": ["user"],
   "assistant.threads.setStatus": ["channel_id"],
   "files.completeUploadExternal": ["channel_id", "channels"],
+  "chat.startStream": ["channel"],
+  "chat.appendStream": ["channel"],
+  "chat.stopStream": ["channel"],
+  "agents.sessions.setStatus": ["channel_id"],
+  "agents.sessions.rename": ["channel_id"],
 };
 const PASSTHROUGH = new Set(["auth.test", "team.info", "files.getUploadURLExternal"]);
 
@@ -457,6 +462,7 @@ export function createGateway(cfg: GatewayConfig) {
   function routeKey(type: string, body: any): { userId: string; channel?: string } | null {
     if (type === "events_api") {
       const ev = body?.event;
+      if (ev?.type === "agent_session_stopped") return ev.user ? { userId: ev.user, channel: ev.channel } : null;
       if (!ev || ev.type !== "message" || ev.channel_type !== "im") return null;
       if (ev.bot_id || !ev.user) return null;
       if (ev.subtype && ev.subtype !== "file_share") return null;
@@ -509,9 +515,11 @@ export function createGateway(cfg: GatewayConfig) {
     rewriteFiles(owner, body);
     if (type === "events_api") {
       const ev = body.event;
-      addPreamble(ev, cfg.sessionPreamble, owner);
-      owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
-      if (owner.threadOf.size > 1000) owner.threadOf.delete(owner.threadOf.keys().next().value!);
+      if (ev.type === "message") {
+        addPreamble(ev, cfg.sessionPreamble, owner);
+        owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
+        if (owner.threadOf.size > 1000) owner.threadOf.delete(owner.threadOf.keys().next().value!);
+      }
     }
 
     const env: Envelope = {
