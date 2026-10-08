@@ -513,3 +513,18 @@ test("each Slack message reaches the agent in a <slack> envelope with who wrote 
   assert.match(first.attrs, /^from="Real UPEPE" at="\d{4}-\d{2}-\d{2} \d{2}:\d{2} [A-Z+0-9:]+"$/);
   assert.ok(!lines.some((e) => /^(\$\w+(\s|$)(?!is unset)|!)/.test(e.body)), "commands are not sent to the agent");
 });
+
+test("Send to agent on any message starts a DM thread with its text and a link back, at the picker", async () => {
+  const n = views().length;
+  await slack.emit("interactive", {
+    type: "message_action", callback_id: "send_to_agent", trigger_id: "T_shortcut", user: { id: "UPEPE" }, team: { id: "T1", domain: "acme" },
+    channel: { id: "C_TEAM" }, message: { ts: "900.000001", user: "UXAVI", text: "login fails on Safari" },
+  }, true);
+  await waitFor(() => views().length > n);
+  const root = posts.find((p) => p.params.channel === "UPEPE" && p.params.text?.startsWith("📎"))!;
+  assert.equal(root.params.text, "📎 <https://acme.slack.com/archives/C_TEAM/p900000001|Shared message>:\n> login fails on Safari");
+  const next = await submit(lastView()); // the base folder
+  await submit(next.view, sessionChoice("new"));
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("login fails on Safari")));
+  assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]/);
+});

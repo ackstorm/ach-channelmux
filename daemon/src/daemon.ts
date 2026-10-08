@@ -814,15 +814,7 @@ export function createDaemon(cfg: DaemonConfig) {
       const help = /^\s*\$help\s*(\n|$)/i.test(m.text) ? HELP : `Commands work inside a thread with a session.\n${HELP}`;
       return void (await say({ channel: m.channel, thread: m.ts }, help));
     }
-    if (!m.thread_ts) {
-      pending.set(m.ts, { channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts });
-      save();
-      await say({ channel: m.channel, thread: m.ts }, "Where should I work?", [
-        section("Where should I work?"),
-        { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", m.ts), style: "primary" }] },
-      ]);
-      return;
-    }
+    if (!m.thread_ts) return void (await offerPicker({ channel: m.channel, text: m.text, files: m.files, user: m.user, ts: m.ts }));
     const t = threads[m.thread_ts];
     if (t && m.text && (await command(t, m.text))) return;
     if (m.text && (await answer(m.thread_ts, m.text))) return; // the reply to an ask_user question
@@ -845,6 +837,30 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!t || !m.text || /^\s*[$!]/.test(m.text)) return;
     void blocksFor({ ...m, files: undefined }, true).then((blocks) => prompt(t, blocks, { ts: m.ts }));
   }
+
+  // A new thread's first message waits for the picker; its button (re)opens the modal.
+  async function offerPicker(p: Pending & { ts: string }) {
+    pending.set(p.ts, p);
+    save();
+    return (await say({ channel: p.channel, thread: p.ts }, "Where should I work?", [
+      section("Where should I work?"),
+      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }] },
+    ])) as any;
+  }
+
+  // "Send to agent" on any message: its text, with a link back, starts a new thread in our DM.
+  app.shortcut("send_to_agent", async ({ ack, body }) => {
+    await ack();
+    const b = body as any;
+    const link = b.team?.domain ? `https://${b.team.domain}.slack.com/archives/${b.channel.id}/p${String(b.message.ts).replace(".", "")}` : "";
+    const text = b.message.text || "(a message without text)";
+    const quoted = text.split("\n").map((l: string) => `> ${l}`).join("\n");
+    // Posting to the user's id lands in our DM with them, which the reply names.
+    const root: any = await slack.chat.postMessage({ channel: b.user.id, text: `📎 ${link ? `<${link}|Shared message>` : "Shared message"}:\n${quoted}` });
+    const first = { channel: root.channel, text: `${text}${link ? `\n\n[Shared from this Slack message: ${link}]` : ""}`, user: b.user.id, ts: root.ts };
+    const picker = await offerPicker(first);
+    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, picker: picker.ts, cwd: "" }) });
+  });
 
   app.event("agent_session_stopped", async ({ event }) => {
     const t = threads[(event as any).thread_ts];

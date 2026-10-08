@@ -98,7 +98,8 @@ export function createMockSlack(users: Record<string, string>) {
         lastTs = Math.max(lastTs + 0.000001, Date.now() / 1000);
         const ts = lastTs.toFixed(6);
         if (method === "chat.postMessage") mock.onPost?.(params, ts);
-        return send({ ok: true, ts });
+        // Like Slack: a message posted to a user id goes to the app's DM with them.
+        return send({ ok: true, ts, channel: /^U/.test(params.channel ?? "") ? `D_${params.channel}` : params.channel });
       }
     }
   });

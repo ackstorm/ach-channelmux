@@ -17,7 +17,15 @@
     "agent_view": {
       "agent_description": "Your coding agent, in your own workspace.",
       "suggested_prompts": []
-    }
+    },
+    "shortcuts": [
+      {
+        "name": "Send to agent",
+        "type": "message",
+        "callback_id": "send_to_agent",
+        "description": "Start a coding-agent thread with this message"
+      }
+    ]
   },
   "oauth_config": {
     "scopes": {
@@ -31,7 +39,8 @@
         "reactions:write",
         "users:read",
         "users:read.email",
-        "assistant:write"
+        "assistant:write",
+        "commands"
       ]
     }
   },
