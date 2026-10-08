@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/main.ts",
-    "test": "node --test --test-concurrency=1 test/e2e.test.ts test/output.test.ts"
+    "test": "node --test --test-concurrency=1 --test-timeout=60000 test/e2e.test.ts test/output.test.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^1.7.0",

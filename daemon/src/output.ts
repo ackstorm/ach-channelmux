@@ -10,6 +10,8 @@ export const MAX_TEXT = 12_000;
 const FLUSH_MS = 1_000;
 // Slack ends a stream after about 5 minutes; roll over to a new message before that.
 const STREAM_MAX_AGE_MS = 240_000;
+// Slack drops a session's "processing" status after an hour unless it is sent again.
+const STATUS_REFRESH_MS = 30 * 60_000;
 const TASK_STATUS: Record<string, string> = { pending: "pending", in_progress: "in_progress", completed: "complete", failed: "error" };
 
 // task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
@@ -118,7 +120,7 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
   return parts;
 }
 
-export function createOutput(api: Api, where: { channel: string; thread: string }, opts: { title?: string; log?: Log } = {}) {
+export function createOutput(api: Api, where: { channel: string; thread: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
   let streaming = true; // until a stream call fails, for the rest of this turn
@@ -127,6 +129,8 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let afterTool = false;
   let quiet = false; // a tool ran and no text has come since
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let refresh: ReturnType<typeof setInterval> | undefined;
+  let suspended = false;
   let thinking: { id: string; text: string } | null = null; // the model's thinking since its last text or tool
   let thoughts = 0;
   const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
@@ -221,7 +225,10 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   }
 
   return {
-    begin: () => run(() => status("processing", opts.title ? { title: opts.title.slice(0, 200) } : {})),
+    begin: () => {
+      refresh = setInterval(() => !suspended && run(() => status("processing")), opts.statusRefreshMs ?? STATUS_REFRESH_MS);
+      return run(() => status("processing", opts.title ? { title: opts.title.slice(0, 200) } : {}));
+    },
     text(s: string) {
       if (s.trim()) {
         endThought();
@@ -245,14 +252,20 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       return quiet;
     },
     /** Before posting buttons (blocks only go out when a stream stops). */
-    pause: () =>
-      run(async () => {
+    pause: () => {
+      suspended = true;
+      return run(async () => {
         await flush();
         await stopStream().catch(() => {});
         await status("suspended");
-      }),
-    resume: () => run(() => status("processing")),
+      });
+    },
+    resume: () => {
+      suspended = false;
+      return run(() => status("processing"));
+    },
     end: () => {
+      clearInterval(refresh);
       endThought();
       return run(async () => {
         await flush();

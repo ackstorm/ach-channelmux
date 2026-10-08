@@ -149,6 +149,16 @@ test("the model's thinking is one card, opened when it starts and filled when te
   assert.equal(out.quiet, false);
 });
 
+test("a long turn sends its processing status again before Slack drops it", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where, { statusRefreshMs: 30 });
+  await out.begin();
+  await new Promise((r) => setTimeout(r, 100));
+  await out.end();
+  const n = calls.filter((c) => c.method === "agents.sessions.setStatus" && c.params.status === "processing").length;
+  assert.ok(n >= 3, `processing sent ${n} times`);
+});
+
 test("a card's sources go out once: Slack adds them to those it shows", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
