@@ -66,6 +66,7 @@ before(async () => {
     botToken: BOT_TOKEN,
     resolveToken: async (t) => (t === "tok-pepe" ? "pepe@example.com" : null),
     workingNoticeMs: 0, // forward 👀 so the test sees the daemon's turn markers
+    rates: {},
     log: () => {},
   });
   await gw.start();

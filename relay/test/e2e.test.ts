@@ -70,6 +70,7 @@ before(async () => {
     workingNoticeMs: 150,
     slowWorkingAfterMs: 400,
     slowWorkingNoticeMs: 150,
+    rates: {},
     log: () => {},
   });
   await gw.start();
@@ -195,6 +196,18 @@ test("interactivity: ack payload is relayed and views.open needs a delivered tri
   assert.deepEqual(reply, { response_action: "errors", errors: { cwd: "rejected by pepe1" } });
   const opened = await pepe1.app.client.views.open({ trigger_id: "T_REAL", view: { type: "modal", title: { type: "plain_text", text: "x" }, blocks: [] } });
   assert.equal(opened.ok, true);
+});
+
+test("a 429 from Slack is retried by the relay, not returned to the daemon", async () => {
+  slack.limits["chat.update"] = { max: 1, windowMs: 500 };
+  try {
+    const a = await pepe1.app.client.chat.update({ channel: "D_UPEPE", ts: "1.0", text: "a" });
+    const b = await pepe1.app.client.chat.update({ channel: "D_UPEPE", ts: "2.0", text: "b" });
+    assert.ok(a.ok && b.ok);
+    assert.equal(slack.rateLimited, 1);
+  } finally {
+    delete slack.limits["chat.update"];
+  }
 });
 
 test("criterion 4: a second daemon parks as standby and takes over when the first dies", async () => {

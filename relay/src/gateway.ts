@@ -8,12 +8,14 @@
 //     to the owner's DM,
 //   - proxies inbound file downloads so daemons never hold the bot token,
 //   - parks extra daemons of the same owner as hot standby,
-//   - tells the owner, in the thread, when none of their daemons is connected.
+//   - tells the owner, in the thread, when none of their daemons is connected,
+//   - spends the Slack app's shared rate limits for every daemon (limiter.ts).
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebSocketServer, WebSocket } from "ws";
+import { createLimiter } from "./limiter.ts";
 
 export interface GatewayConfig {
   port: number;
@@ -33,6 +35,10 @@ export interface GatewayConfig {
   slowWorkingNoticeMs?: number;
   /** Instructions appended, with who the user is and their local time, to the first message of each thread (a top-level DM starts a new agent session). Empty disables it. */
   sessionPreamble?: string;
+  /** Slack calls per minute per method (default RATES in limiter.ts); {} disables pacing. */
+  rates?: Record<string, number>;
+  /** chat.startStream is refused when it would wait longer. Default 2 s. */
+  maxStreamStartWaitMs?: number;
   log?: (msg: string, data?: Record<string, unknown>) => void;
 }
 
@@ -334,7 +340,7 @@ export function createGateway(cfg: GatewayConfig) {
 
   // ---------- upstream Slack calls (bot token) ----------
 
-  async function slack(method: string, params: Record<string, unknown>): Promise<any> {
+  async function upstreamCall(method: string, params: Record<string, unknown>) {
     const body = new URLSearchParams();
     for (const [k, v] of Object.entries(params)) {
       if (v === undefined || v === null) continue;
@@ -342,14 +348,13 @@ export function createGateway(cfg: GatewayConfig) {
     }
     const res = await fetch(upstream + method, {
       method: "POST",
-      headers: {
-        authorization: `Bearer ${cfg.botToken}`,
-        "content-type": "application/x-www-form-urlencoded",
-      },
+      headers: { authorization: `Bearer ${cfg.botToken}`, "content-type": "application/x-www-form-urlencoded" },
       body,
     });
-    return res.json();
+    if (res.status === 429) return { status: 429, retryAfter: Number(res.headers.get("retry-after")) || 1, body: null };
+    return { status: res.status, body: await res.json() };
   }
+  const slack = createLimiter(upstreamCall, { rates: cfg.rates, maxStreamStartWaitMs: cfg.maxStreamStartWaitMs, log });
 
   // Concurrent first calls (auth.test and apps.connections.open race at daemon
   // start) must resolve to the same Owner, so in-flight lookups are shared.

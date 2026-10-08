@@ -16,6 +16,7 @@ export interface Call {
 export function createMockSlack(users: Record<string, string>) {
   // users: slack user id -> email
   const calls: Call[] = [];
+  const windows = new Map<string, number[]>();
   const acks = new Map<string, (payload: unknown) => void>();
   let socket: WebSocket | null = null;
   let lastTs = 0;
@@ -38,6 +39,20 @@ export function createMockSlack(users: Record<string, string>) {
     const params = Object.fromEntries(new URLSearchParams(Buffer.concat(chunks).toString()));
     const token = (req.headers.authorization ?? "").replace("Bearer ", "");
     calls.push({ method, token, params });
+
+    const limit = mock.limits[method];
+    if (limit) {
+      const now = Date.now();
+      const hits = (windows.get(method) ?? []).filter((t) => now - t < limit.windowMs);
+      if (hits.length >= limit.max) {
+        mock.rateLimited++;
+        res.writeHead(429, { "content-type": "application/json", "retry-after": "1" });
+        return res.end(JSON.stringify({ ok: false, error: "ratelimited" }));
+      }
+      windows.set(method, [...hits, now]);
+    }
+    const failure = mock.fail.get(method);
+    if (failure) return send({ ok: false, error: failure });
 
     switch (method) {
       case "apps.connections.open":
@@ -82,6 +97,12 @@ export function createMockSlack(users: Record<string, string>) {
     calls,
     /** Optional hook: sees each chat.postMessage and the ts the mock returned. */
     onPost: undefined as ((params: Record<string, string>, ts: string) => void) | undefined,
+    /** Per-method sliding windows; over the limit answers HTTP 429 with Retry-After: 1. */
+    limits: {} as Record<string, { max: number; windowMs: number }>,
+    /** Methods that answer ok:false with this error. */
+    fail: new Map<string, string>(),
+    /** How many 429s were answered. */
+    rateLimited: 0,
     get url() {
       return `http://127.0.0.1:${port}`;
     },
