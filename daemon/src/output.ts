@@ -12,6 +12,52 @@ const FLUSH_MS = 1_000;
 const STREAM_MAX_AGE_MS = 240_000;
 const TASK_STATUS: Record<string, string> = { pending: "pending", in_progress: "in_progress", completed: "complete", failed: "error" };
 
+// task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
+// with msg_too_long; the margins are deliberate.
+const TITLE_MAX = 200;
+const DETAILS_MAX = 250;
+const OUTPUT_MAX = 500;
+
+/** What a tool card shows. Missing fields keep their earlier value. */
+export interface ToolInfo {
+  title?: string;
+  status?: string; // ACP: pending, in_progress, completed, failed
+  details?: string; // what ran: command, path, pattern
+  output?: string; // what came back: start of the result, edit sizes, exit code
+}
+
+const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const lineCount = (s?: string | null) => (s ? s.split("\n").length : 0);
+
+/** Describes an ACP tool_call / tool_call_update for a card. `input` is the tool's latest rawInput. */
+export function describeTool(u: any, input: any, cwd: string): ToolInfo {
+  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+  const i = input ?? {};
+  const path: string | undefined = i.filePath ?? i.path ?? u.locations?.[0]?.path;
+  const command = typeof i.command === "string" ? i.command : undefined;
+  let title: string | undefined = u.title ?? undefined;
+  if (command) title = command; // a shell card is its command
+  else if (title && path && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${rel(path)}`; // "read" -> "read calc.py"
+  let details: string | undefined;
+  if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
+  else if (i.url) details = String(i.url);
+  let output: string | undefined;
+  if (u.status === "completed" || u.status === "failed") {
+    const content: any[] = u.content ?? [];
+    const diffs = content.filter((c) => c.type === "diff");
+    const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim();
+    output = diffs.length ? diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n") : text || undefined;
+    const exit = u.rawOutput?.metadata?.exit;
+    if (typeof exit === "number" && exit !== 0) output = `exit ${exit}${output ? `\n${output}` : ""}`;
+  }
+  return {
+    ...(title && { title: clip(title, TITLE_MAX) }),
+    ...(u.status && { status: u.status }),
+    ...(details && { details: clip(details, DETAILS_MAX) }),
+    ...(output && { output: clip(output, OUTPUT_MAX) }),
+  };
+}
+
 type Api = (method: string, params: Record<string, unknown>) => Promise<any>;
 type Log = (msg: string, extra?: unknown) => void;
 type Chunk = { type: string; [k: string]: unknown };
@@ -107,17 +153,21 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       pending += s;
       if (streaming && !timer) timer = setTimeout(() => run(flush), FLUSH_MS);
     },
-    tool(id: string, title: string | undefined, acpStatus: string | undefined) {
+    tool(id: string, info: ToolInfo) {
       const prev = tasks.get(id);
+      const details = info.details ?? (prev?.details as string | undefined);
+      const output = info.output ?? (prev?.output as string | undefined);
       const task: Chunk = {
         type: "task_update",
         // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
         id: prev?.id ?? `t${tasks.size + 1}`,
-        title: String(title ?? prev?.title ?? "tool").slice(0, 256),
-        status: TASK_STATUS[acpStatus ?? ""] ?? prev?.status ?? "in_progress",
+        title: clip(String(info.title ?? prev?.title ?? "tool"), TITLE_MAX),
+        status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
+        ...(details && { details }),
+        ...(output && { output }),
       };
       // Agents repeat unchanged updates; each would cost an append from the shared budget.
-      if (prev && prev.title === task.title && prev.status === task.status) return chain;
+      if (prev && (["title", "status", "details", "output"] as const).every((k) => prev[k] === task[k])) return chain;
       tasks.set(id, task);
       afterTool = true;
       quiet = true;

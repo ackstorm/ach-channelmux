@@ -12,7 +12,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { Readable, Writable } from "node:stream";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { createOutput, type Output } from "./output.ts";
+import { createOutput, describeTool, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -117,7 +117,8 @@ export function createDaemon(cfg: DaemonConfig) {
         configWaiters.get(sessionId)?.();
       }
       if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-        if ((update as any).rawInput !== undefined) inputs.set(update.toolCallId, (update as any).rawInput);
+        const raw = (update as any).rawInput;
+        if (raw && Object.keys(raw).length) inputs.set(update.toolCallId, raw); // opencode starts with {} and fills it later
       }
       if (replaying.has(sessionId)) {
         if (update.sessionUpdate === "user_message_chunk") lastReply.set(sessionId, "");
@@ -130,7 +131,7 @@ export function createDaemon(cfg: DaemonConfig) {
       if (!out) return;
       if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") out.text(update.content.text);
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
-        void out.tool(update.toolCallId, update.title ?? undefined, update.status ?? undefined);
+        void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), bySession.get(sessionId)?.cwd ?? ""));
       }
     },
     async requestPermission({ sessionId, toolCall, options }) {

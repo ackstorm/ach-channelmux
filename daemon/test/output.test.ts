@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOutput, splitMarkdown } from "../src/output.ts";
+import { createOutput, describeTool, splitMarkdown } from "../src/output.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
   const calls: { method: string; params: any }[] = [];
@@ -32,8 +32,8 @@ test("a turn streams text and tool cards into one message, then stops the stream
   await out.begin();
   out.text("On it, ");
   out.text("checking.");
-  await out.tool("t0", "ls", "pending");
-  await out.tool("t0", undefined, "completed");
+  await out.tool("t0", { title: "ls", status: "pending" });
+  await out.tool("t0", { status: "completed" });
   out.text("Done.");
   await out.end();
   assert.deepEqual(calls.map((c) => c.method), [
@@ -49,7 +49,7 @@ test("when streaming is refused the turn goes out as one message per text segmen
   const out = createOutput(api, where);
   await out.begin();
   out.text("On it, checking.");
-  await out.tool("t0", "ls", "in_progress");
+  await out.tool("t0", { title: "ls", status: "in_progress" });
   out.text("Done.");
   await out.end();
   assert.deepEqual(calls.filter((c) => c.method === "chat.postMessage").map((c) => c.params.markdown_text), ["On it, checking.", "Done."]);
@@ -85,10 +85,38 @@ test("task cards get short ids and repeated identical updates are not sent", asy
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
   const long = "call_239715__thought__" + "AY89a1+PJ/".repeat(15);
-  await out.tool(long, "ls -la", "in_progress");
-  await out.tool(long, "ls -la", "in_progress");
-  await out.tool(long, undefined, "completed");
+  await out.tool(long, { title: "ls -la", status: "in_progress" });
+  await out.tool(long, { title: "ls -la", status: "in_progress" });
+  await out.tool(long, { status: "completed" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
   assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["t1", "in_progress"], ["t1", "complete"]]);
+});
+
+test("describeTool turns opencode's tool updates into card title, details and output", () => {
+  const cwd = "/w/proj";
+  // Shapes recorded from opencode 2.0.24 over ACP.
+  const read = describeTool({ title: "read", status: "completed", locations: [{ path: "/w/proj/calc.py" }], content: [{ type: "content", content: { type: "text", text: "1: def add(a, b):" } }] }, { path: "calc.py" }, cwd);
+  assert.deepEqual(read, { title: "read calc.py", status: "completed", output: "1: def add(a, b):" });
+  const edit = describeTool({ title: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Edited calc.py" } }, { type: "diff", path: "/w/proj/calc.py", oldText: "    return a - b", newText: "    return a + b\n" }] }, { path: "calc.py", oldString: "x", newString: "y" }, cwd);
+  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +2 −1" });
+  const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
+  assert.deepEqual(shell, { title: "python3 t.py", status: "completed", output: "exit 1\nTraceback" });
+  assert.equal(describeTool({ status: "completed" }, { command: "ls" }, cwd).title, "ls"); // the final update carries no title
+  const pending = describeTool({ title: "shell", kind: "execute", status: "pending", locations: [{ path: cwd }] }, { cwd }, cwd);
+  assert.deepEqual(pending, { title: "shell", status: "pending" }); // not "shell /w/proj"
+  const grep = describeTool({ title: "grep", kind: "search", status: "pending" }, { pattern: "TODO", path: "/w/proj/src" }, cwd);
+  assert.deepEqual(grep, { title: "grep src", status: "pending", details: "TODO in src" });
+  assert.ok(describeTool({ title: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "z".repeat(2000) } }] }, {}, cwd).output!.length <= 500);
+});
+
+test("a card's details and output reach the stream, and a repeated identical update is not resent", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.tool("x", { title: "shell", status: "pending", details: "$ ls" });
+  await out.tool("x", { status: "completed", output: "a.txt" });
+  await out.tool("x", { status: "completed", output: "a.txt" });
+  await out.end();
+  const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
+  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", "$ ls", "a.txt"]]);
 });
