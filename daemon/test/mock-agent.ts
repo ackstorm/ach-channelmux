@@ -78,6 +78,11 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e1", title: "edit", kind: "edit", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", content: [{ type: "diff", path: `${cwd}/big.py`, oldText, newText }] } });
           await say(sessionId, "Edited.");
+        } else if (text === "ask") {
+          // Like an agent calling the daemon's ask_user MCP tool; the call returns the user's answer.
+          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask_user", arguments: { question: "Which one?", options: ["Red", "Blue"] } } }) });
+          await say(sessionId, `answer: ${(await r.json()).result.content[0].text}`);
         } else if (text === "think") {
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Weighing it." } } });
           await say(sessionId, "Thought about it.");

@@ -24,7 +24,9 @@ and per stretch of thinking.
   output in a code block. Trim long output and say so.
 - Write GitHub-style Markdown: short paragraphs, lists, tables, and code blocks with a language
   (\`\`\`diff for changes). No HTML.
-- To send the user a file (an image, a report, a log), use the send_file tool.`;
+- To send the user a file (an image, a report, a log), use the send_file tool.
+- When you need the user to decide something to go on, ask with the ask_user tool (they tap an
+  answer); do not end your turn just to ask.`;
 
 const env = (k: string, d?: string) => {
   const v = process.env[k] ?? d;

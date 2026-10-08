@@ -265,6 +265,50 @@ export function createDaemon(cfg: DaemonConfig) {
     },
   };
 
+  const ASK_USER = {
+    name: "ask_user",
+    description:
+      "Ask the user a question in this Slack thread and wait for the answer. Give up to 5 short options " +
+      "to show as buttons (they can also type any answer). Use it when you need a decision to go on.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question, in Markdown" },
+        options: { type: "array", items: { type: "string" }, description: "Up to 5 short answers to choose from" },
+      },
+      required: ["question"],
+    },
+  };
+
+  // ask_user: the question waits per thread; a button or the user's next message in the thread answers it.
+  const questions = new Map<string, { text: string; ts?: string; resolve: (answer: string) => void }>();
+  async function ask(t: Thread, args: { question?: string; options?: unknown }) {
+    const out = outputs.get(t.sessionId);
+    await out?.pause();
+    const text = `❓ ${String(args.question ?? "").slice(0, 2900)}`;
+    const options = (Array.isArray(args.options) ? args.options : []).slice(0, 5).map((o) => String(o).slice(0, 2000));
+    const answered = new Promise<string>((resolve) => questions.set(t.thread, { text, resolve }));
+    const posted: any = await say(t, text, [
+      section(text),
+      ...(options.length ? [{ type: "actions", elements: options.map((o, i) => button(o, `ask_${i}`, o)) }] : []),
+      { type: "context", elements: [{ type: "mrkdwn", text: options.length ? "Tap an answer or reply in this thread." : "Reply in this thread." }] },
+    ]);
+    const q = questions.get(t.thread);
+    if (q) q.ts = posted.ts;
+    const answer = await answered;
+    await out?.resume();
+    return answer;
+  }
+  async function answer(thread: string, text: string) {
+    const q = questions.get(thread);
+    const t = threads[thread];
+    if (!q || !t) return false;
+    questions.delete(thread);
+    q.resolve(text);
+    if (q.ts) await slack.chat.update({ channel: t.channel, ts: q.ts, text: `${q.text}\n→ *${text.slice(0, 500)}*`, blocks: [] }).catch(() => {});
+    return true;
+  }
+
   // Uploads to the thread. A snippet_type (e.g. "diff") makes Slack show it as a code snippet.
   async function upload(t: Thread, filename: string, data: Buffer, opts: { comment?: string; snippet?: string } = {}) {
     const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: data.length, ...(opts.snippet && { snippet_type: opts.snippet }) })) as any;
@@ -310,7 +354,10 @@ export function createDaemon(cfg: DaemonConfig) {
       return reply({ result: { protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "slack", version: "1" } } });
     }
     if (msg.method === "ping") return reply({ result: {} });
-    if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE] } });
+    if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE, ASK_USER] } });
+    if (msg.method === "tools/call" && p.name === "ask_user") {
+      return reply({ result: { content: [{ type: "text", text: await ask(t, p.arguments ?? {}) }] } });
+    }
     if (msg.method === "tools/call" && p.name === "send_file") {
       try {
         return reply({ result: { content: [{ type: "text", text: await sendFile(t, p.arguments ?? {}) }] } });
@@ -598,7 +645,10 @@ export function createDaemon(cfg: DaemonConfig) {
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} · ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(":", "")}`, ts: first.ts }); // Slack shows ":" as "_" in titles
   }
 
-  const stop = (t: Thread) => agent.cancel({ sessionId: t.sessionId });
+  const stop = async (t: Thread) => {
+    await answer(t.thread, "(The user stopped the turn without answering.)");
+    await agent.cancel({ sessionId: t.sessionId });
+  };
 
   // ---------- commands: $model, $compact, $clear, $stop, $help, ! shell ----------
 
@@ -734,6 +784,7 @@ export function createDaemon(cfg: DaemonConfig) {
     }
     const t = threads[m.thread_ts];
     if (t && m.text && (await command(t, m.text))) return;
+    if (m.text && (await answer(m.thread_ts, m.text))) return; // the reply to an ask_user question
     // Not awaited: the turn can outlive Bolt's handler.
     if (t) return void blocksFor(m).then((blocks) => prompt(t, blocks, { ts: m.ts }));
     const where = { channel: m.channel, thread: m.thread_ts };
@@ -860,6 +911,12 @@ export function createDaemon(cfg: DaemonConfig) {
     await stop(t);
     const b = body as any;
     await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
+  });
+
+  app.action(/^ask_/, async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    await answer(b.message.thread_ts, (action as any).value);
   });
 
   app.action(/^perm_/, async ({ ack, body, action }) => {

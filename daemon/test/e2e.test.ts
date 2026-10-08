@@ -303,12 +303,30 @@ test("a voice clip reaches the agent as Slack's transcript, waited for while Sla
 test("the agent sends a file to the thread with the send_file tool, without our token reaching the upload URL", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000011", thread_ts: "100.000001" }));
   const sent = await waitFor(() => agentLog().find((e) => e.m === "sent"));
-  assert.deepEqual(sent.tools, ["send_file"]);
+  assert.deepEqual(sent.tools, ["send_file", "ask_user"]);
   assert.equal(sent.result, "Sent report.txt to the user.");
   const done = calls("files.completeUploadExternal").at(-1)!;
   assert.deepEqual([done.params.channel_id, done.params.thread_ts, done.params.initial_comment], [DM, "100.000001", "here it is"]);
   const [{ id }] = JSON.parse(done.params.files);
   assert.deepEqual(slack.uploads.get(id), { body: "report body", auth: undefined });
+});
+
+test("the agent's ask_user question is answered with a button or a reply in the thread", async () => {
+  const replied = (n: number) => streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join("");
+  let n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "ask", { ts: "100.000018", thread_ts: "100.000001" }));
+  const q = await waitFor(() => posts.find((p) => p.params.blocks?.includes("ask_1")));
+  assert.equal(q.params.text, "❓ Which one?");
+  await click({ ts: q.ts, thread_ts: "100.000001" }, { type: "button", action_id: "ask_1", value: "Blue" });
+  await waitFor(() => replied(n).includes("answer: Blue"));
+  assert.ok(calls("chat.update").some((c) => c.params.ts === q.ts && c.params.text === "❓ Which one?\n→ *Blue*"));
+
+  n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "ask", { ts: "100.000019", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.postMessage" && c.params.blocks?.includes("ask_1")));
+  await slack.emit("events_api", slack.dm("UPEPE", "green, actually", { ts: "100.000020", thread_ts: "100.000001" }));
+  await waitFor(() => replied(n).includes("answer: green, actually"));
+  assert.equal(agentLog().some((e) => e.m === "prompt" && e.text.includes("green, actually")), false); // an answer, not a new prompt
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {
