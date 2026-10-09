@@ -531,6 +531,18 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && /Unknown command/.test(p.params.text ?? "")));
 });
 
+test("a session the agent has not titled yet shows as Untitled, not opencode's timestamp title", async () => {
+  const n = posts.length;
+  await slack.emit("events_api", slack.dm("UPEPE", "$clear", { ts: "500.000020", thread_ts: "500.000001" })); // a new session, no prompt yet
+  const cleared = await waitFor(() => posts.slice(n).find((p) => p.params.text?.startsWith("🧹")));
+  const id = /opencode -s (\S+)/.exec(cleared.params.text)![1];
+  await slack.emit("events_api", slack.dm("UPEPE", "which one?", { ts: "500.000021" }));
+  let { view } = await openPicker("500.000021");
+  view = await tap(view, "picker_pick", ".");
+  const option = view.blocks.at(-1).element.options.find((o: any) => o.value === id);
+  assert.equal(option.text.text, "Untitled");
+});
+
 test("an edit before the picker changes the first prompt; an edit in a session reaches the agent as a correction", async () => {
   const edit = (ts: string, text: string, thread_ts?: string) =>
     slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts, thread_ts, text }, previous_message: { text: "old" } });

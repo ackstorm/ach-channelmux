@@ -578,7 +578,8 @@ export function createDaemon(cfg: DaemonConfig) {
       return null;
     };
     return all
-      .map((x) => ({ ...x, rel: relOf(x.cwd) }))
+      // opencode names a session it has not titled yet "New session - <ISO time>": shown as untitled.
+      .map((x) => ({ ...x, title: /^New session - \d{4}-\d\d-\d\dT[\d:.]+Z$/.test(x.title ?? "") ? null : x.title, rel: relOf(x.cwd) }))
       .filter((x): x is typeof x & { rel: string } => x.rel !== null && isDir(abs(x.rel)))
       .sort((a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? ""));
   }
@@ -630,7 +631,7 @@ export function createDaemon(cfg: DaemonConfig) {
       { text: plain("🆕 New session"), value: "new" },
       ...list.map((x) => {
         const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
-        return { text: plain((x.title || x.sessionId).slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
+        return { text: plain((x.title || "Untitled").slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
       }),
     ];
     return modal("picker_session", "Choose session", "Start", p, [
@@ -661,7 +662,7 @@ export function createDaemon(cfg: DaemonConfig) {
         loaded.set(sessionId, Promise.resolve());
         head = `📁 \`${cwd}\` · new session`;
       } else {
-        const title = (await sessions()).find((x) => x.sessionId === choice)?.title ?? choice;
+        const title = (await sessions()).find((x) => x.sessionId === choice)?.title || "Untitled";
         const old = bySession.get(choice);
         const before = old && (await slack.chat.getPermalink({ channel: old.channel, message_ts: old.thread }).then((r) => r.permalink, () => undefined));
         if (old) delete threads[old.thread];

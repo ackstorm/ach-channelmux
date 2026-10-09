@@ -16,7 +16,7 @@ const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON
 let n = existsSync(process.env.MOCK_AGENT_LOG!) ? readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter((l) => l.includes('"m":"new"')).length : 0;
 const cancels = new Map<string, () => void>();
 let flaky = 0; // prompt "flaky" fails the first time
-const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[]; updated?: number }>();
+const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[]; updated?: number; titled?: boolean }>();
 let clock = Date.now(); // strictly increasing "last used" times
 const touch = (sessionId: string) => {
   const x = sessions.get(sessionId);
@@ -47,7 +47,8 @@ new acp.AgentSideConnection(
         return {};
       },
       async listSessions() {
-        return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: `Session ${sessionId}`, updatedAt: new Date(x.updated ?? 0).toISOString() })) };
+        // Like opencode: a timestamp title until the first prompt names the session.
+        return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: x.titled ? `Session ${sessionId}` : `New session - ${new Date(x.updated ?? 0).toISOString()}`, updatedAt: new Date(x.updated ?? 0).toISOString() })) };
       },
       async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
@@ -59,12 +60,12 @@ new acp.AgentSideConnection(
       },
       async unstable_forkSession({ sessionId: from, cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers: mcpServers ?? [] });
+        sessions.set(sessionId, { cwd, mcpServers: mcpServers ?? [], titled: true });
         log({ m: "new", sessionId, cwd, from });
         return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
-        sessions.set(sessionId, { cwd, mcpServers });
+        sessions.set(sessionId, { cwd, mcpServers, titled: true }); // it has a history
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
@@ -81,6 +82,7 @@ new acp.AgentSideConnection(
         const text = envelope ? envelope[1] + envelope[3] : raw;
         const images = prompt.filter((p) => p.type === "image").map((p: any) => p.mimeType);
         touch(sessionId);
+        sessions.get(sessionId)!.titled = true;
         log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
         if (text === "flaky" && !flaky++) throw new Error("gateway timeout");
         if (text === "broken") throw new Error("gateway timeout");
