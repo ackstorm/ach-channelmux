@@ -77,8 +77,8 @@ const submit = (view: any, values: Record<string, unknown> = {}) =>
   slack.emit("interactive", { type: "view_submission", user: { id: "UPEPE" }, trigger_id: "T_submit", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata, state: { values } } }, true) as Promise<any>;
 const sessionChoice = (value: string) => ({ session: { session: { type: "radio_buttons", selected_option: { value } } } });
 // The picker sits in the DM's main view; its buttons carry the message (thread) it is for.
-const pickerFor = (thread: string, action = "picker_open_modal") =>
-  waitFor(() => posts.find((p) => !p.params.thread_ts && p.params.blocks?.includes(action) && p.params.blocks.includes(thread)));
+const pickerFor = (thread: string) =>
+  waitFor(() => posts.find((p) => !p.params.thread_ts && p.params.blocks?.includes("picker_open_modal") && p.params.blocks.includes(thread)));
 async function openPicker(thread: string) {
   const msg = await pickerFor(thread);
   const n = views().length;
@@ -438,7 +438,7 @@ test("the picker offers last-used folders and continues an existing session in t
   assert.match(calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text, /^📁 `beta` · continuing \*Session ses_1\* → <.*\|Open thread>$/);
   assert.match(head, /continuing \*Session ses_1\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p100000001\|previous thread>/);
   // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
-  const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text === "Session recap")!.params.markdown_text;
+  const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.markdown_text?.includes("Session recap"))!.params.markdown_text;
   assert.equal(recap, "**📜 Session recap**\n\n> **You:** fix the bug\n>\n> **Agent:** OLD HISTORY");
   assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
@@ -590,18 +590,6 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   // The relay's context block reaches the agent after the link, never the quote in the DM.
   assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]\n\n\[Context from the Slack relay/);
   await turnEnded(root.ts!); // a turn still running when the relay stops keeps retrying, and the test process never exits
-});
-
-test("the picker message offers a one-tap new session in the last used folder", async () => {
-  await slack.emit("events_api", slack.dm("UPEPE", "quick one", { ts: "910.000001" }));
-  const msg = await pickerFor("910.000001", "picker_quick");
-  const quick = JSON.parse(msg.params.blocks)[1].elements[1];
-  const last = agentLog().filter((e) => e.m === "new").at(-1).cwd;
-  assert.equal(quick.text.text, `▶ New session in ${last === base ? basename(base) : basename(last)}`);
-  await click({ ts: msg.ts }, { type: "button", action_id: "picker_quick", value: quick.value });
-  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "quick one"));
-  assert.equal(agentLog().filter((e) => e.m === "new").at(-1).cwd, last);
-  await turnEnded("910.000001");
 });
 
 test("a new message starting with $ and words is a message, not a command", async () => {

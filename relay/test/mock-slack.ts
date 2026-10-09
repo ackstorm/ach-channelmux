@@ -62,6 +62,8 @@ export function createMockSlack(users: Record<string, string>) {
     const failure = mock.fail.get(method);
     if (failure) return send({ ok: false, error: failure });
 
+    // Like Slack: a message is text (with blocks) or markdown_text, never both.
+    if (method === "chat.postMessage" && params.text && params.markdown_text) return send({ ok: false, error: "markdown_text_conflict" });
     switch (method) {
       case "apps.connections.open":
         if (token !== APP_TOKEN) return send({ ok: false, error: "invalid_auth" });

@@ -699,7 +699,7 @@ export function createDaemon(cfg: DaemonConfig) {
     head += `\nResume it in a terminal:${resumeCmd(t.cwd, t.sessionId)}`;
     // The thread gets the header and the recap; the picker, in the DM's main view, becomes a link to it.
     const header: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, unfurl_links: false });
-    if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: "Session recap", markdown_text: recap } as any);
+    if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, markdown_text: recap } as any); // Slack refuses text with markdown_text
     const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: header.ts }).then((r) => r.permalink, () => undefined);
     const done = `📁 \`${nameOf(p.cwd)}\` · ${status}${link ? ` → <${link}|Open thread>` : ""}`;
     await slack.chat.update({ channel: p.channel, ts: p.picker, text: done, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
@@ -852,7 +852,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const tail = out.length > SHELL_SHOWN ? `…\n${out.slice(-SHELL_SHOWN)}` : out;
     const status = code === 0 ? "" : `\n${code === null ? "timed out or failed to start" : `exit ${code}`}`;
     const fenced = `\`\`\`\n$ ${cmd}\n${tail.replaceAll("\`\`\`", "ˋˋˋ")}\n\`\`\`${status}`;
-    await slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, text: `$ ${cmd}`, markdown_text: fenced } as any);
+    await slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, markdown_text: fenced } as any);
     shellNotes.set(t.sessionId, [...(shellNotes.get(t.sessionId) ?? []), fenced]);
   }
 
@@ -897,16 +897,14 @@ export function createDaemon(cfg: DaemonConfig) {
     void prompt(t, blocksFor({ ...m, files: undefined }, true), { ts: m.ts });
   }
 
-  // A new message waits for the picker, in the DM's main view: its button (re)opens the modal,
-  // next to a one-tap "new session in the last used folder". The thread opens once a session starts.
+  // A new message waits for the picker, in the DM's main view: its button (re)opens the modal.
+  // The thread opens once a session starts.
   async function offerPicker(p: Pending & { ts: string }) {
     pending.set(p.ts, p);
     save();
-    const last = await sessions().then((all) => all[0]?.rel, () => undefined);
-    const quick = last === undefined ? [] : [button(`▶ New session in ${last || basename(cfg.baseDir)}`, "picker_quick", JSON.stringify({ thread: p.ts, cwd: last || "." }))];
     return (await slack.chat.postMessage({ channel: p.channel, text: "Where should I work?", blocks: [
       section("Where should I work?"),
-      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }, ...quick] },
+      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }] },
     ] as any })) as any;
   }
 
@@ -939,14 +937,6 @@ export function createDaemon(cfg: DaemonConfig) {
     slack.views.update({ view_id: body.view.id, view: await view });
 
   const expired = (channel: string) => slack.chat.postMessage({ channel, text: "This picker has expired. Send a new message to start a thread." });
-  app.action("picker_quick", async ({ ack, body, action }) => {
-    await ack();
-    const b = body as any;
-    const { thread, cwd } = JSON.parse((action as any).value);
-    if (!pending.has(thread)) return void (await expired(b.channel.id));
-    await start({ channel: b.channel.id, thread, picker: b.message.ts, cwd: cwd === "." ? "" : cwd }, "new");
-  });
-
   app.action("picker_open_modal", async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
@@ -986,7 +976,7 @@ export function createDaemon(cfg: DaemonConfig) {
   app.view("picker_session", async ({ ack, view }) => {
     await ack({ response_action: "clear" });
     const choice = (view.state.values as any).session?.session?.selected_option?.value ?? "new";
-    void start(JSON.parse(view.private_metadata), choice);
+    void start(JSON.parse(view.private_metadata), choice).catch((err) => log("session_start_failed", { error: String(err) }));
   });
 
   app.action("cfg_open", async ({ ack, body, action }) => {
