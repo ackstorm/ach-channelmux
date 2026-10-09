@@ -5,7 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
-import { createGateway, addPreamble, localTime, WORKING_MESSAGES, SLOW_WORKING_MESSAGES } from "../src/gateway.ts";
+import { createGateway, addPreamble, addShortcutPreamble, localTime, WORKING_MESSAGES, SLOW_WORKING_MESSAGES } from "../src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
@@ -280,6 +280,16 @@ test("offline: every message gets OFFLINE_MESSAGE where it was written, and noth
   await slack.emit("events_api", slack.dm("UXAVI", "now?"));
   await waitFor(() => xavi.got.length === 1);
   assert.equal(xavi.got[0].text, "now?");
+});
+
+test("session preamble: a message shortcut's text gets it too, other interactions never", () => {
+  const user = { email: "pepe@example.com" };
+  const shortcut = { type: "message_action", message: { text: "login fails on Safari", ts: "1.0" } };
+  addShortcutPreamble(shortcut, "P", user);
+  assert.match(shortcut.message.text, /^login fails on Safari\n\n\[Context from the Slack relay[\s\S]*User: pepe@example\.com\.[\s\S]*\nP\n\[End of relay context\]$/);
+  const click = { type: "block_actions", message: { text: "a picker" } };
+  addShortcutPreamble(click, "P", user);
+  assert.equal(click.message.text, "a picker");
 });
 
 test("session preamble: only a new top-level message, never commands, edits or other events", () => {

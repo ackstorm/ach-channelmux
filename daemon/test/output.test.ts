@@ -44,6 +44,21 @@ test("a turn streams text and tool cards into one message, then stops the stream
   assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"]]);
 });
 
+test("blocks given to end() go under the streamed reply; without a stream there is nothing to attach them to", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.begin();
+  out.text("Done.");
+  await out.end([{ type: "context_actions", elements: [] }]);
+  assert.deepEqual(calls.find((c) => c.method === "chat.stopStream")!.params.blocks, [{ type: "context_actions", elements: [] }]);
+  const plain = fakeApi({ "chat.startStream": "ratelimited" });
+  const out2 = createOutput(plain.api, where);
+  await out2.begin();
+  out2.text("Done.");
+  await out2.end([{ type: "context_actions", elements: [] }]);
+  assert.ok(plain.calls.every((c) => !c.params.blocks));
+});
+
 test("when streaming is refused the turn goes out as one message per text segment", async () => {
   const { api, calls } = fakeApi({ "chat.startStream": "ratelimited" });
   const out = createOutput(api, where);

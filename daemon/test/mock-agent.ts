@@ -82,6 +82,7 @@ new acp.AgentSideConnection(
         touch(sessionId);
         log({ m: "prompt", sessionId, text, ...(images.length && { images }) });
         if (text === "flaky" && !flaky++) throw new Error("gateway timeout");
+        if (text === "broken") throw new Error("gateway timeout");
         if (text === "wait") {
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };

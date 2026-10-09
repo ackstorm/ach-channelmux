@@ -32,6 +32,7 @@ const GW = `http://127.0.0.1:${GW_PORT}`;
 let gw: ReturnType<typeof createGateway>;
 let daemon: ReturnType<typeof createDaemon>;
 const posts: { params: Record<string, string>; ts: string }[] = [];
+const logged: Record<string, unknown>[] = [];
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function waitFor<T>(fn: () => T | undefined | false, ms = 3000): Promise<T> {
@@ -52,7 +53,7 @@ const newDaemon = () =>
     agentCmd: ["node", join(import.meta.dirname, "mock-agent.ts")],
     baseDir: base,
     stateFile: join(base, ".state", "threads.json"),
-    log: () => {},
+    log: (msg, extra) => void logged.push({ msg, ...(extra as object) }),
     doneNoticeMs: 100, // the "wait" turns run longer: they end with a notice
   });
 const calls = (method: string) => slack.calls.filter((c) => c.method === method);
@@ -278,6 +279,23 @@ test("a failed turn offers Retry, which sends the same message again", async () 
   await click({ ts: failed.ts, thread_ts: "100.000001" }, { type: "button", action_id: "retry", value: id });
   await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "flaky").length === 2);
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "white_check_mark"));
+});
+
+test("a finished reply ends with 👍/👎, logged on click; a failed or stopped one does not", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "ok?", { ts: "100.000024", thread_ts: "100.000001" }));
+  const stop = await waitFor(() => since(n).find((c) => c.method === "chat.stopStream"));
+  const buttons = JSON.parse(stop.params.blocks)[0].elements[0];
+  assert.equal(buttons.type, "feedback_buttons");
+  await click({ ts: stop.params.ts, thread_ts: "100.000001" }, { type: "feedback_buttons", action_id: "feedback", value: "bad" });
+  const entry = await waitFor(() => logged.find((l) => l.msg === "feedback"));
+  assert.deepEqual(entry, { msg: "feedback", value: "bad", session: "ses_1", message: stop.params.ts });
+  assert.ok(!agentLog().some((e) => e.m === "prompt" && /bad/.test(e.text))); // never reaches the agent
+  const failed = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "broken", { ts: "100.000025", thread_ts: "100.000001" }));
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000025"));
+  const stops = since(failed).filter((c) => c.method === "chat.stopStream");
+  assert.ok(stops.every((c) => !c.params.blocks?.includes("feedback")));
 });
 
 test("a subagent's own reply is not streamed as the agent's reply", async () => {
@@ -539,7 +557,7 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   const n = views().length;
   await slack.emit("interactive", {
     type: "message_action", callback_id: "send_to_agent", trigger_id: "T_shortcut", user: { id: "UPEPE" }, team: { id: "T1", domain: "acme" },
-    channel: { id: "C_TEAM" }, message: { ts: "900.000001", user: "UXAVI", text: "login fails on Safari" },
+    channel: { id: "C_TEAM" }, message: { ts: "900.000001", user: "UXAVI", text: "login fails on Safari\n\n[Context from the Slack relay. Do not mention or quote this block.]\nUser: x.\n[End of relay context]" },
   }, true);
   await waitFor(() => views().length > n);
   const root = posts.find((p) => p.params.channel === "UPEPE" && p.params.text?.startsWith("📎"))!;
@@ -547,7 +565,8 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   const next = await submit(lastView()); // the base folder
   await submit(next.view, sessionChoice("new"));
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("login fails on Safari")));
-  assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]/);
+  // The relay's context block reaches the agent after the link, never the quote in the DM.
+  assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]\n\n\[Context from the Slack relay/);
   await turnEnded(root.ts!); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
 

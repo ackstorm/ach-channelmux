@@ -408,6 +408,16 @@ export function createDaemon(cfg: DaemonConfig) {
   // How a turn ended, as a reaction on the message that asked for it.
   const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
   const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
+  // 👍/👎 under a finished reply: logged for whoever runs the daemon, never sent to the agent.
+  const FEEDBACK = [{
+    type: "context_actions",
+    elements: [{
+      type: "feedback_buttons",
+      action_id: "feedback",
+      positive_button: { text: { type: "plain_text", text: "👍" }, accessibility_label: "Good response", value: "good" },
+      negative_button: { text: { type: "plain_text", text: "👎" }, accessibility_label: "Bad response", value: "bad" },
+    }],
+  }];
   const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
@@ -443,7 +453,7 @@ export function createDaemon(cfg: DaemonConfig) {
         out.text(`\n\n⚠️ ${err?.message ?? err}`);
         outcome = "failed";
       } finally {
-        await out.end();
+        await out.end(outcome === "done" ? FEEDBACK : undefined);
         // Edits too long for their cards: the whole turn's changes as one diff snippet.
         const diffs = turnDiffs.get(t.sessionId);
         turnDiffs.delete(t.sessionId);
@@ -881,11 +891,15 @@ export function createDaemon(cfg: DaemonConfig) {
     await ack();
     const b = body as any;
     const link = b.team?.domain ? `https://${b.team.domain}.slack.com/archives/${b.channel.id}/p${String(b.message.ts).replace(".", "")}` : "";
-    const text = b.message.text || "(a message without text)";
+    // The relay may have appended its context block: the agent gets it, the quote does not.
+    const full: string = b.message.text ?? "";
+    const at = full.indexOf("\n\n[Context from the Slack relay");
+    const text = (at >= 0 ? full.slice(0, at) : full) || "(a message without text)";
+    const context = at >= 0 ? full.slice(at) : "";
     const quoted = text.split("\n").map((l: string) => `> ${l}`).join("\n");
     // Posting to the user's id lands in our DM with them, which the reply names.
     const root: any = await slack.chat.postMessage({ channel: b.user.id, text: `📎 ${link ? `<${link}|Shared message>` : "Shared message"}:\n${quoted}` });
-    const first = { channel: root.channel, text: `${text}${link ? `\n\n[Shared from this Slack message: ${link}]` : ""}`, user: b.user.id, ts: root.ts };
+    const first = { channel: root.channel, text: `${text}${link ? `\n\n[Shared from this Slack message: ${link}]` : ""}${context}`, user: b.user.id, ts: root.ts };
     const picker = await offerPicker(first);
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, picker: picker.ts, cwd: "" }) });
   });
@@ -1005,6 +1019,13 @@ export function createDaemon(cfg: DaemonConfig) {
     await stop(t);
     const b = body as any;
     await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
+  });
+
+  app.action("feedback", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const t = threads[b.message?.thread_ts ?? b.container?.thread_ts];
+    log("feedback", { value: (action as any).value, session: t?.sessionId, message: b.message?.ts });
   });
 
   app.action("retry", async ({ ack, body, action }) => {

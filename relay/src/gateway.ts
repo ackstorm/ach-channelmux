@@ -338,6 +338,18 @@ export function addPreamble(
   ].join("\n");
 }
 
+// A message shortcut starts a session from someone else's message: it gets the context block too.
+export function addShortcutPreamble(
+  body: { type?: string; message?: { text?: string } },
+  preamble: string | undefined,
+  user: { email: string; name?: string; tz?: string },
+) {
+  if (body.type !== "message_action" || !body.message) return;
+  const m = { type: "message", text: body.message.text ?? "" };
+  addPreamble(m, preamble, user);
+  body.message.text = m.text;
+}
+
 export function createGateway(cfg: GatewayConfig) {
   const log = cfg.log ?? ((m, d) => console.log(JSON.stringify({ msg: m, ...d })));
   const upstream = cfg.upstreamApiUrl.endsWith("/") ? cfg.upstreamApiUrl : cfg.upstreamApiUrl + "/";
@@ -529,6 +541,7 @@ export function createGateway(cfg: GatewayConfig) {
     if (type === "interactive") {
       if (body.trigger_id) owner.triggers.add(body.trigger_id);
       if (body.view?.id) owner.views.add(body.view.id);
+      addShortcutPreamble(body, cfg.sessionPreamble, owner);
     }
     rewriteFiles(owner, body?.event?.files);
     if (type === "events_api") {

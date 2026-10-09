@@ -147,11 +147,11 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       log("status_failed", { status: s, error: String(err) }),
     );
 
-  async function stopStream() {
+  async function stopStream(blocks?: unknown[]) {
     if (!stream) return;
     const ts = stream.ts;
     stream = null;
-    await api("chat.stopStream", { channel, ts }); // also sets the session back to active
+    await api("chat.stopStream", { channel, ts, ...(blocks && { blocks }) }); // also sets the session back to active
   }
 
   async function send(chunks: Chunk[]): Promise<boolean> {
@@ -268,12 +268,13 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       suspended = false;
       return run(() => status("processing"));
     },
-    end: () => {
+    /** Blocks (e.g. feedback buttons) go under the streamed reply; without a stream they are dropped. */
+    end: (blocks?: unknown[]) => {
       clearInterval(refresh);
       endThought();
       return run(async () => {
         await flush();
-        if (stream) await stopStream().catch(() => status("active"));
+        if (stream) await stopStream(blocks).catch(() => status("active"));
         else await status("active");
       });
     },
