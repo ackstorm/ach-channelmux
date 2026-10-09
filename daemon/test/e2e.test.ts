@@ -138,9 +138,13 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  assert.ok(calls("chat.delete").some((c) => c.params.ts === msg.ts)); // the picker gives way to the header
-  const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.reply_broadcast === "true")!;
+  const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.text?.startsWith("📁"))!;
+  assert.equal(header.params.reply_broadcast, undefined); // the header stays in the thread
   assert.equal(header.params.unfurl_links, "false"); // the previous thread's link stays a link, not a preview
+  // The picker, in the main view, becomes a link to the thread.
+  const done = calls("chat.update").find((c) => c.params.ts === msg.ts)!;
+  assert.equal(done.params.text, `📁 \`beta\` · new session → <https://example.slack.com/archives/${DM}/p${header.ts.replace(".", "")}|Open thread>`);
+  assert.equal(done.params.blocks, "[]");
   const head = header.params.text;
   assert.match(head, /beta` · new session/);
   assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
@@ -430,12 +434,12 @@ test("the picker offers last-used folders and continues an existing session in t
 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "carry on"));
   assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
-  const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.reply_broadcast === "true")?.params.text);
-  assert.ok(calls("chat.delete").some((c) => c.params.ts === msg.ts));
+  const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text?.startsWith("📁"))?.params.text);
+  assert.match(calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text, /^📁 `beta` · continuing \*Session ses_1\* → <.*\|Open thread>$/);
   assert.match(head, /continuing \*Session ses_1\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p100000001\|previous thread>/);
-  // The last exchanges, out of their envelopes; the history itself is not re-posted.
-  assert.match(head, /^> \*you:\* fix the bug$/m);
-  assert.match(head, /^> \*agent:\* OLD HISTORY$/m);
+  // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
+  const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text === "Session recap")!.params.markdown_text;
+  assert.equal(recap, "**📜 Session recap**\n\n> **You:** fix the bug\n>\n> **Agent:** OLD HISTORY");
   assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));

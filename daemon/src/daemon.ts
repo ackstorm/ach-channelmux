@@ -103,7 +103,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const permissions = new Map<string, { sessionId: string; resolve: (optionId?: string) => void }>(); // request id -> its answer (none: cancelled)
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
-  const history = new Map<string, { who: "you" | "agent"; text: string }[]>(); // session -> its last messages, seen while its history replays
+  const history = new Map<string, { who: "You" | "Agent"; text: string; tool?: boolean }[]>(); // session -> its last messages, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
@@ -144,10 +144,14 @@ export function createDaemon(cfg: DaemonConfig) {
       // A subagent's reply (opencode streams it on the parent session) is its card's output, not ours.
       if (update.sessionUpdate === "agent_message_chunk" && (update as any)._meta?.["opencode/child-session"]) return;
       if (replaying.has(sessionId)) {
-        const who = update.sessionUpdate === "user_message_chunk" ? "you" : update.sessionUpdate === "agent_message_chunk" ? "agent" : null;
+        const h = history.get(sessionId) ?? [];
+        const last = h.at(-1);
+        // A turn's text before a tool call ("Let me check…") gives way to the text after it: its answer.
+        if (update.sessionUpdate === "tool_call" && last?.who === "Agent") last.tool = true;
+        const who = update.sessionUpdate === "user_message_chunk" ? "You" : update.sessionUpdate === "agent_message_chunk" ? "Agent" : null;
         if (who && update.content.type === "text") {
-          const h = history.get(sessionId) ?? [];
-          if (h.at(-1)?.who !== who) h.push({ who, text: "" });
+          if (last?.who !== who) h.push({ who, text: "" });
+          else if (last.tool) Object.assign(last, { text: "", tool: false });
           h.at(-1)!.text += update.content.text;
           history.set(sessionId, h.slice(-6)); // the last 3 exchanges
         }
@@ -654,6 +658,8 @@ export function createDaemon(cfg: DaemonConfig) {
     const cwd = abs(p.cwd);
     let t: Thread;
     let head: string;
+    let recap = "";
+    let status = "new session";
     try {
       if (choice === "new") {
         const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
@@ -671,12 +677,17 @@ export function createDaemon(cfg: DaemonConfig) {
         threads[p.thread] = t;
         bySession.set(choice, t);
         await open(t);
-        // The last exchanges, one line each, out of the envelopes and context blocks we added.
-        const recap = (history.get(choice) ?? []).map(({ who, text }) => {
-          const s = text.replace(/<\/?slack[^>]*>/g, "").replace(/\[Context from the Slack relay[\s\S]*?\[End of relay context\]/g, "").replace(/\s+/g, " ").trim();
-          return s && `\n> *${who}:* ${s.length > 300 ? `${s.slice(0, 300)}…` : s}`;
+        // The last exchanges, one paragraph each, out of the envelopes and context blocks we added.
+        const lines = (history.get(choice) ?? []).flatMap(({ who, text }) => {
+          let s = text.replace(/<\/?slack[^>]*>/g, "").replace(/\[Context from the Slack relay[\s\S]*?\[End of relay context\]/g, "").replace(/\s+/g, " ").trim();
+          if (!s) return [];
+          if (s.length > 300) s = `${s.slice(0, 300)}…`;
+          for (const mark of ["**", "`"]) if (s.split(mark).length % 2 === 0) s += mark; // a cut never leaves one open
+          return [`> **${who}:** ${s}`];
         });
-        head = `📁 \`${cwd}\` · continuing *${title}*${before ? ` · <${before}|previous thread>` : ""}${recap.join("")}`;
+        if (lines.length) recap = `**📜 Session recap**\n\n${lines.join("\n>\n")}`;
+        status = `continuing *${title}*`;
+        head = `📁 \`${cwd}\` · ${status}${before ? ` · <${before}|previous thread>` : ""}`;
       }
     } catch (err: any) {
       log("session_start_failed", { cwd, error: err?.message ?? String(err) });
@@ -686,10 +697,12 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(t.sessionId, t);
     save();
     head += `\nResume it in a terminal:${resumeCmd(t.cwd, t.sessionId)}`;
-    // The picker gives way to a header that is also broadcast to the DM's main view, so each
-    // thread's folder and session can be found there.
-    await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
-    await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true, unfurl_links: false });
+    // The thread gets the header and the recap; the picker, in the DM's main view, becomes a link to it.
+    const header: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, unfurl_links: false });
+    if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: "Session recap", markdown_text: recap } as any);
+    const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: header.ts }).then((r) => r.permalink, () => undefined);
+    const done = `📁 \`${nameOf(p.cwd)}\` · ${status}${link ? ` → <${link}|Open thread>` : ""}`;
+    await slack.chat.update({ channel: p.channel, ts: p.picker, text: done, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
 

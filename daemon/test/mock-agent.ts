@@ -69,6 +69,8 @@ new acp.AgentSideConnection(
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
+        await say(sessionId, "Let me check.");
+        await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "h1", title: "ls", kind: "execute", status: "completed" } });
         await say(sessionId, "OLD HISTORY");
         // Like opencode: a provisional settings list now, the real one a moment later.
         setTimeout(() => void conn.sessionUpdate({ sessionId, update: { sessionUpdate: "config_option_update", configOptions: models("m1") } }), 200);
