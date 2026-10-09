@@ -63,7 +63,7 @@ WHERE a.auth_token = $1
 
 ## Operations
 
-Daemon build: the script pins `VERSION`, an ach-channelmux release; the next workspace
-start installs a new one. Logs: `/tmp/ach-channelmux-daemon.log`. The thread → session map
+Daemon build: the script pins `VERSION`, the latest ach-channelmux release (each release
+bumps it); copy the script again to upgrade, and the next workspace start installs it. Logs: `/tmp/ach-channelmux-daemon.log`. The thread → session map
 persists in `~/.local/state/ach-channelmux/threads.json` and OpenCode's sessions in its own
 data dir, both on the home volume, so threads resume after a workspace restart.

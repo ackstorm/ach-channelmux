@@ -93,7 +93,7 @@ jobs:
             exit 0
           fi
           git add chart/Chart.yaml chart/values.yaml \
-                  package.json package-lock.json
+                  package.json package-lock.json examples/coder/daemon.sh
           git commit -m "chore(release): bump manifests to v$VERSION [skip ci]"
           git push origin main
 

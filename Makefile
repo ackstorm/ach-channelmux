@@ -31,6 +31,7 @@ release-bump: ## Internal: bump chart and package versions. Used by release.yml;
 	@sed -i -E 's/^version: .*/version: $(VERSION)/' $(CHART)/Chart.yaml
 	@sed -i -E 's/^appVersion: .*/appVersion: v$(VERSION)/' $(CHART)/Chart.yaml
 	@sed -i -E 's|^([[:space:]]+)tag: v.*|\1tag: v$(VERSION)|' $(CHART)/values.yaml
+	@sed -i -E 's/^VERSION=v.*/VERSION=v$(VERSION)/' examples/coder/daemon.sh
 	@npm version $(VERSION) --no-git-tag-version --allow-same-version >/dev/null
 	@echo "Manifests bumped to v$(VERSION)."
 
