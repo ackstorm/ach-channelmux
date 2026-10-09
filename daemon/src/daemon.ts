@@ -640,6 +640,9 @@ export function createDaemon(cfg: DaemonConfig) {
     ]);
   }
 
+  // opencode finds a session from its project folder, so the command starts with a cd there.
+  const resumeCmd = (cwd: string, id: string) => `\`cd ${/^[\w./-]+$/.test(cwd) ? cwd : `'${cwd.replaceAll("'", "'\\''")}'`} && opencode -s ${id}\``;
+
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
     const first = pending.get(p.thread);
@@ -681,11 +684,11 @@ export function createDaemon(cfg: DaemonConfig) {
     threads[p.thread] = t;
     bySession.set(t.sessionId, t);
     save();
-    head += `\nResume it in a terminal: \`opencode -s ${t.sessionId}\``;
+    head += `\nResume it in a terminal: ${resumeCmd(t.cwd, t.sessionId)}`;
     // The picker gives way to a header that is also broadcast to the DM's main view, so each
     // thread's folder and session can be found there.
     await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
-    await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true });
+    await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, reply_broadcast: true, unfurl_links: false });
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
 
@@ -798,7 +801,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, fresh);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal: \`opencode -s ${sessionId}\``);
+    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal: ${resumeCmd(t.cwd, sessionId)}`);
   }
 
   // $fork: a copy of the session in a new thread (its root is our message), to try something else.
