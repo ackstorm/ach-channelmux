@@ -81,6 +81,7 @@ const pickerFor = (thread: string) =>
   waitFor(() => posts.find((p) => !p.params.thread_ts && p.params.blocks?.includes("picker_open_modal") && p.params.blocks.includes(thread)));
 async function openPicker(thread: string) {
   const msg = await pickerFor(thread);
+  assert.match(msg.params.text, /^👋 Hi Real! Pick where to work: a folder, then a new session or one you already have there\.$/); // Slack's real_name "Real UPEPE"
   const n = views().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
   await waitFor(() => views().length > n);

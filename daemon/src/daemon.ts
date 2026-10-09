@@ -902,8 +902,11 @@ export function createDaemon(cfg: DaemonConfig) {
   async function offerPicker(p: Pending & { ts: string }) {
     pending.set(p.ts, p);
     save();
-    return (await slack.chat.postMessage({ channel: p.channel, text: "Where should I work?", blocks: [
-      section("Where should I work?"),
+    // A greeting by first name, then what to do: this message is not the agent, it only opens one.
+    const name = (await person(p.user)).name?.split(" ")[0];
+    const hi = `👋 Hi${name ? ` ${name}` : ""}! Pick where to work: a folder, then a new session or one you already have there.`;
+    return (await slack.chat.postMessage({ channel: p.channel, text: hi, blocks: [
+      section(`${hi}\nYour message goes to the agent once you start; its reply opens in a thread under it.`),
       { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }] },
     ] as any })) as any;
   }
