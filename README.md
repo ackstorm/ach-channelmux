@@ -39,7 +39,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | `SESSION_PREAMBLE` | Optional; `""` disables the context block. |
 | `PORT` | Default `8080`. |
 
-Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im` and
+Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, `app_home_opened` and
 `agent_session_stopped` events, interactivity, App Home messages tab, the `agent_view`
 feature with `assistant:write`). After updating an existing app's manifest, reinstall it.
 
