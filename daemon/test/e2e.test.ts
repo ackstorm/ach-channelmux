@@ -143,7 +143,7 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   assert.equal(header.params.unfurl_links, "false"); // the previous thread's link stays a link, not a preview
   const head = header.params.text;
   assert.match(head, /beta` · new session/);
-  assert.equal(head.split("\n").at(-1), `Resume it in a terminal: \`cd ${join(base, "beta")} && opencode -s ses_1\``);
+  assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000001" && c.params.name === "white_check_mark"));
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
@@ -436,7 +436,7 @@ test("the picker offers last-used folders and continues an existing session in t
   // The last exchanges, out of their envelopes; the history itself is not re-posted.
   assert.match(head, /^> \*you:\* fix the bug$/m);
   assert.match(head, /^> \*agent:\* OLD HISTORY$/m);
-  assert.equal(head.split("\n").at(-1), `Resume it in a terminal: \`cd ${join(base, "beta")} && opencode -s ses_1\``);
+  assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });

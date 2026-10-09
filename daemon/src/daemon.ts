@@ -640,8 +640,8 @@ export function createDaemon(cfg: DaemonConfig) {
     ]);
   }
 
-  // opencode finds a session from its project folder, so the command starts with a cd there.
-  const resumeCmd = (cwd: string, id: string) => `\`cd ${/^[\w./-]+$/.test(cwd) ? cwd : `'${cwd.replaceAll("'", "'\\''")}'`} && opencode -s ${id}\``;
+  // opencode finds a session from its project folder: a cd there, then the resume, as a block to copy.
+  const resumeCmd = (cwd: string, id: string) => `\n\`\`\`\ncd ${/^[\w./-]+$/.test(cwd) ? cwd : `'${cwd.replaceAll("'", "'\\''")}'`}\nopencode -s ${id}\n\`\`\``;
 
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
@@ -684,7 +684,7 @@ export function createDaemon(cfg: DaemonConfig) {
     threads[p.thread] = t;
     bySession.set(t.sessionId, t);
     save();
-    head += `\nResume it in a terminal: ${resumeCmd(t.cwd, t.sessionId)}`;
+    head += `\nResume it in a terminal:${resumeCmd(t.cwd, t.sessionId)}`;
     // The picker gives way to a header that is also broadcast to the DM's main view, so each
     // thread's folder and session can be found there.
     await slack.chat.delete({ channel: p.channel, ts: p.picker }).catch((err) => log("picker_delete_failed", { error: String(err) }));
@@ -801,7 +801,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, fresh);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal: ${resumeCmd(t.cwd, sessionId)}`);
+    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal:${resumeCmd(t.cwd, sessionId)}`);
   }
 
   // $fork: a copy of the session in a new thread (its root is our message), to try something else.
