@@ -1,6 +1,6 @@
 // Agent daemon: a Bolt app that connects to the relay as if it were Slack and runs each
-// DM thread as an ACP session (e.g. `opencode acp`). A new thread opens a picker (a Slack modal)
-// for the folder, then for a new or existing session in it.
+// DM thread as an ACP session (e.g. `opencode acp`). A new message gets a picker in the DM's main
+// view: a new session (its folder is chosen in the thread, in a Slack modal) or an existing one.
 
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -103,7 +103,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const permissions = new Map<string, { sessionId: string; resolve: (optionId?: string) => void }>(); // request id -> its answer (none: cancelled)
   const permissionTexts = new Map<string, string>(); // request id -> "what" (kept out of the button value, which Slack caps at 2000 chars)
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
-  const lastReply = new Map<string, string>(); // session -> its last agent reply, seen while its history replays
+  const history = new Map<string, { who: "you" | "agent"; text: string }[]>(); // session -> its last messages, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
@@ -144,9 +144,12 @@ export function createDaemon(cfg: DaemonConfig) {
       // A subagent's reply (opencode streams it on the parent session) is its card's output, not ours.
       if (update.sessionUpdate === "agent_message_chunk" && (update as any)._meta?.["opencode/child-session"]) return;
       if (replaying.has(sessionId)) {
-        if (update.sessionUpdate === "user_message_chunk") lastReply.set(sessionId, "");
-        if (update.sessionUpdate === "agent_message_chunk" && update.content.type === "text") {
-          lastReply.set(sessionId, (lastReply.get(sessionId) ?? "") + update.content.text);
+        const who = update.sessionUpdate === "user_message_chunk" ? "you" : update.sessionUpdate === "agent_message_chunk" ? "agent" : null;
+        if (who && update.content.type === "text") {
+          const h = history.get(sessionId) ?? [];
+          if (h.at(-1)?.who !== who) h.push({ who, text: "" });
+          h.at(-1)!.text += update.content.text;
+          history.set(sessionId, h.slice(-6)); // the last 3 exchanges
         }
         return;
       }
@@ -395,7 +398,7 @@ export function createDaemon(cfg: DaemonConfig) {
     let p = loaded.get(t.sessionId);
     if (!p) {
       replaying.add(t.sessionId);
-      lastReply.delete(t.sessionId);
+      history.delete(t.sessionId);
       p = tools(t.thread)
         .then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
         .then((r) => r?.configOptions && !configs.has(t.sessionId) && configs.set(t.sessionId, r.configOptions));
@@ -516,9 +519,8 @@ export function createDaemon(cfg: DaemonConfig) {
   interface Pick {
     channel: string;
     thread: string;
-    picker: string; // ts of the "Where should I work?" message
+    picker: string; // ts of the picker message, deleted when the session starts
     cwd: string; // relative to baseDir; "" is baseDir
-    back?: string; // folder screen that "Other folder" returns to
   }
   const canList = ready.then((r) => Boolean(r.agentCapabilities?.sessionCapabilities?.list));
   const abs = (rel: string) => (rel ? join(cfg.baseDir, rel) : cfg.baseDir);
@@ -621,22 +623,6 @@ export function createDaemon(cfg: DaemonConfig) {
     return modal("picker_folder", "Choose folder", `Use ${nameOf(p.cwd)}`, p, blocks);
   }
 
-  async function sessionView(p: Pick) {
-    const list = (await sessions()).filter((x) => x.rel === p.cwd).slice(0, 9); // radio buttons hold 10 options
-    const options = [
-      { text: plain("🆕 New session"), value: "new" },
-      ...list.map((x) => {
-        const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
-        return { text: plain((x.title || x.sessionId).slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
-      }),
-    ];
-    return modal("picker_session", "Choose session", "Start", p, [
-      section(`📁 \`${abs(p.cwd)}\``),
-      { type: "actions", elements: [button("⬅️ Other folder", "picker_other", "other")] },
-      { type: "input", block_id: "session", label: plain("Session"), element: { type: "radio_buttons", action_id: "session", options, initial_option: options[0] } },
-    ]);
-  }
-
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
     const first = pending.get(p.thread);
@@ -657,15 +643,19 @@ export function createDaemon(cfg: DaemonConfig) {
       } else {
         const title = (await sessions()).find((x) => x.sessionId === choice)?.title ?? choice;
         const old = bySession.get(choice);
+        const before = old && (await slack.chat.getPermalink({ channel: old.channel, message_ts: old.thread }).then((r) => r.permalink, () => undefined));
         if (old) delete threads[old.thread];
         loaded.delete(choice); // reload: its tools are bound to the thread
         t = { ...where, sessionId: choice, cwd };
         threads[p.thread] = t;
         bySession.set(choice, t);
         await open(t);
-        const last = (lastReply.get(choice) ?? "").trim();
-        const quote = last ? `\n${(last.length > 500 ? `${last.slice(0, 500)}…` : last).replace(/^/gm, "> ")}` : "";
-        head = `📁 \`${cwd}\` · continuing *${title}*${quote}`;
+        // The last exchanges, one line each, out of the envelopes and context blocks we added.
+        const recap = (history.get(choice) ?? []).map(({ who, text }) => {
+          const s = text.replace(/<\/?slack[^>]*>/g, "").replace(/\[Context from the Slack relay[\s\S]*?\[End of relay context\]/g, "").replace(/\s+/g, " ").trim();
+          return s && `\n> *${who}:* ${s.length > 300 ? `${s.slice(0, 300)}…` : s}`;
+        });
+        head = `📁 \`${cwd}\` · continuing *${title}*${before ? ` · <${before}|previous thread>` : ""}${recap.join("")}`;
       }
     } catch (err: any) {
       log("session_start_failed", { cwd, error: err?.message ?? String(err) });
@@ -854,7 +844,7 @@ export function createDaemon(cfg: DaemonConfig) {
     // Not awaited: the turn can outlive Bolt's handler.
     if (t) return void prompt(t, blocksFor(m), { ts: m.ts });
     const where = { channel: m.channel, thread: m.thread_ts };
-    if (pending.has(m.thread_ts)) return void (await say(where, "Choose a folder above first."));
+    if (pending.has(m.thread_ts)) return void (await say(where, "Pick a session or a folder above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
 
@@ -873,11 +863,28 @@ export function createDaemon(cfg: DaemonConfig) {
     void prompt(t, blocksFor({ ...m, files: undefined }, true), { ts: m.ts });
   }
 
-  // A new thread's first message waits for the picker; its button (re)opens the modal.
-  // A one-tap "new session in the last used folder" sits next to it.
+  // A new message waits for the picker, in the DM's main view: a new session, or one of the latest.
+  // With no sessions to continue, it goes straight to the folder.
   async function offerPicker(p: Pending & { ts: string }) {
     pending.set(p.ts, p);
     save();
+    const list = (await sessions().catch(() => [])).slice(0, 20);
+    if (!list.length) return askFolder(p);
+    const options = list.map((x) => {
+      const where = ` — ${x.rel || basename(cfg.baseDir)}${x.updatedAt ? ` · ${ago(x.updatedAt)}` : ""}`;
+      const title = x.title || x.sessionId;
+      const room = 75 - where.length; // a select option's text holds 75 characters
+      return { text: plain(`${title.length > room ? `${title.slice(0, room - 1)}…` : title}${where}`.slice(0, 75)), value: x.sessionId };
+    });
+    await slack.chat.postMessage({ channel: p.channel, text: "New session, or continue one?", blocks: [
+      section("New session, or continue one?"),
+      // block_id carries the thread; the select's value is the session.
+      { type: "actions", block_id: p.ts, elements: [{ ...button("🆕 New session", "picker_new", p.ts), style: "primary" }, { type: "static_select", action_id: "picker_resume", placeholder: plain("Continue a session…"), options }] },
+    ] as any });
+  }
+
+  // A new session's folder, asked in its thread: the modal's button, and a one-tap last used folder.
+  async function askFolder(p: Pending & { ts: string }) {
     const last = await sessions().then((all) => all[0]?.rel, () => undefined);
     const quick = last === undefined ? [] : [button(`▶ New session in ${last || basename(cfg.baseDir)}`, "picker_quick", JSON.stringify({ thread: p.ts, cwd: last || "." }))];
     return (await say({ channel: p.channel, thread: p.ts }, "Where should I work?", [
@@ -900,7 +907,10 @@ export function createDaemon(cfg: DaemonConfig) {
     // Posting to the user's id lands in our DM with them, which the reply names.
     const root: any = await slack.chat.postMessage({ channel: b.user.id, text: `📎 ${link ? `<${link}|Shared message>` : "Shared message"}:\n${quoted}` });
     const first = { channel: root.channel, text: `${text}${link ? `\n\n[Shared from this Slack message: ${link}]` : ""}${context}`, user: b.user.id, ts: root.ts };
-    const picker = await offerPicker(first);
+    // Shared from elsewhere: a new session, its folder modal open at once.
+    pending.set(first.ts, first);
+    save();
+    const picker = await askFolder(first);
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, picker: picker.ts, cwd: "" }) });
   });
 
@@ -909,16 +919,34 @@ export function createDaemon(cfg: DaemonConfig) {
     if (t && outputs.has(t.sessionId)) await stop(t);
   });
 
-  // The picker: block actions redraw the modal in place; its submits move to the next screen.
+  // The folder modal: block actions redraw it in place; its submit starts a new session there.
   const pickOf = (body: any): Pick => JSON.parse(body.view.private_metadata);
   const redraw = async (body: any, view: Promise<ReturnType<typeof modal>>) =>
     slack.views.update({ view_id: body.view.id, view: await view });
 
+  const expired = (channel: string, thread?: string) =>
+    slack.chat.postMessage({ channel, ...(thread && { thread_ts: thread }), text: "This picker has expired. Send a new message to start a thread." });
+  app.action("picker_new", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const first = pending.get((action as any).value);
+    if (!first?.ts) return void (await expired(b.channel.id));
+    await slack.chat.delete({ channel: b.channel.id, ts: b.message.ts }).catch((err) => log("picker_delete_failed", { error: String(err) }));
+    await askFolder({ ...first, ts: first.ts });
+  });
+  app.action("picker_resume", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const { block_id: thread, selected_option } = action as any;
+    const s = (await sessions()).find((x) => x.sessionId === selected_option?.value);
+    if (!pending.has(thread) || !s) return void (await expired(b.channel.id));
+    await start({ channel: b.channel.id, thread, picker: b.message.ts, cwd: s.rel }, s.sessionId);
+  });
   app.action("picker_quick", async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
     const { thread, cwd } = JSON.parse((action as any).value);
-    if (!pending.has(thread)) return void (await say({ channel: b.channel.id, thread }, "This picker has expired. Send a new message to start a thread."));
+    if (!pending.has(thread)) return void (await expired(b.channel.id, thread));
     await start({ channel: b.channel.id, thread, picker: b.message.ts, cwd: cwd === "." ? "" : cwd }, "new");
   });
 
@@ -927,7 +955,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const b = body as any;
     const thread = (action as any).value as string;
     const first = pending.get(thread);
-    if (!first) return void (await say({ channel: b.channel.id, thread }, "This picker has expired. Send a new message to start a thread."));
+    if (!first) return void (await expired(b.channel.id, thread));
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, picker: b.message.ts, cwd: "" }) });
   });
   app.action("picker_open", async ({ ack, body, action }) => {
@@ -947,21 +975,11 @@ export function createDaemon(cfg: DaemonConfig) {
     const value = (action as any).value as string;
     const rel = value === "." ? "" : value;
     if (rel.split("/").includes("..") || !isDir(abs(rel))) return;
-    await redraw(body, sessionView({ ...pickOf(body), cwd: rel, back: "" }));
-  });
-  app.action("picker_other", async ({ ack, body }) => {
-    await ack();
-    const p = pickOf(body);
-    await redraw(body, folderView({ ...p, cwd: p.back ?? "" }));
+    await redraw(body, folderView({ ...pickOf(body), cwd: rel }));
   });
   app.view("picker_folder", async ({ ack, view }) => {
-    const p: Pick = JSON.parse(view.private_metadata);
-    await ack({ response_action: "update", view: await sessionView({ ...p, back: p.cwd }) });
-  });
-  app.view("picker_session", async ({ ack, view }) => {
     await ack({ response_action: "clear" });
-    const choice = (view.state.values as any).session?.session?.selected_option?.value ?? "new";
-    void start(JSON.parse(view.private_metadata), choice);
+    void start(JSON.parse(view.private_metadata), "new");
   });
 
   app.action("cfg_open", async ({ ack, body, action }) => {
