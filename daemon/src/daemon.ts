@@ -645,8 +645,9 @@ export function createDaemon(cfg: DaemonConfig) {
     ]);
   }
 
-  // opencode finds a session from its project folder: a cd there, then the resume, as a block to copy.
-  const resumeCmd = (cwd: string, id: string) => `\n\`\`\`\ncd ${/^[\w./-]+$/.test(cwd) ? cwd : `'${cwd.replaceAll("'", "'\\''")}'`}\nopencode -s ${id}\n\`\`\``;
+  // A thread's header: its folder, its session (title and id, to resume it elsewhere), its previous thread.
+  const header = (cwd: string, title: string, id: string, before?: string) =>
+    `📁 \`${cwd}\`\n💬 ${title} · \`${id}\`${before ? `\n↩️ <${before}|previous thread>` : ""}`;
 
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
@@ -666,7 +667,7 @@ export function createDaemon(cfg: DaemonConfig) {
         if (configOptions) configs.set(sessionId, configOptions);
         t = { ...where, sessionId, cwd };
         loaded.set(sessionId, Promise.resolve());
-        head = `📁 \`${cwd}\` · new session`;
+        head = header(cwd, "New session", sessionId);
       } else {
         const title = (await sessions()).find((x) => x.sessionId === choice)?.title || "Untitled";
         const old = bySession.get(choice);
@@ -687,7 +688,7 @@ export function createDaemon(cfg: DaemonConfig) {
         });
         if (lines.length) recap = `**📜 Session recap**\n\n${lines.join("\n>\n")}`;
         status = `continuing *${title}*`;
-        head = `📁 \`${cwd}\` · ${status}${before ? ` · <${before}|previous thread>` : ""}`;
+        head = header(cwd, `*${title}*`, choice, before);
       }
     } catch (err: any) {
       log("session_start_failed", { cwd, error: err?.message ?? String(err) });
@@ -696,11 +697,10 @@ export function createDaemon(cfg: DaemonConfig) {
     threads[p.thread] = t;
     bySession.set(t.sessionId, t);
     save();
-    head += `\nResume it in a terminal:${resumeCmd(t.cwd, t.sessionId)}`;
     // The thread gets the header and the recap; the picker, in the DM's main view, becomes a link to it.
-    const header: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, unfurl_links: false });
+    const posted: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, markdown_text: recap } as any); // Slack refuses text with markdown_text
-    const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: header.ts }).then((r) => r.permalink, () => undefined);
+    const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: posted.ts }).then((r) => r.permalink, () => undefined);
     const done = `📁 \`${nameOf(p.cwd)}\` · ${status}${link ? ` → <${link}|Open thread>` : ""}`;
     await slack.chat.update({ channel: p.channel, ts: p.picker, text: done, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
@@ -815,7 +815,7 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, fresh);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await say(t, `🧹 New session in \`${t.cwd}\`. Resume it in a terminal:${resumeCmd(t.cwd, sessionId)}`);
+    await say(t, `🧹 ${header(t.cwd, "New session", sessionId)}`);
   }
 
   // $fork: a copy of the session in a new thread (its root is our message), to try something else.

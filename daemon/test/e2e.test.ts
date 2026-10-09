@@ -146,8 +146,7 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   assert.equal(done.params.text, `📁 \`beta\` · new session → <https://example.slack.com/archives/${DM}/p${header.ts.replace(".", "")}|Open thread>`);
   assert.equal(done.params.blocks, "[]");
   const head = header.params.text;
-  assert.match(head, /beta` · new session/);
-  assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
+  assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000001" && c.params.name === "white_check_mark"));
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
@@ -436,11 +435,10 @@ test("the picker offers last-used folders and continues an existing session in t
   assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
   const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text?.startsWith("📁"))?.params.text);
   assert.match(calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text, /^📁 `beta` · continuing \*Session ses_1\* → <.*\|Open thread>$/);
-  assert.match(head, /continuing \*Session ses_1\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p100000001\|previous thread>/);
+  assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 *Session ses_1* · \`ses_1\`\n↩️ <https://example.slack.com/archives/D_UPEPE/p100000001|previous thread>`);
   // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
   const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.markdown_text?.includes("Session recap"))!.params.markdown_text;
   assert.equal(recap, "**📜 Session recap**\n\n> **You:** fix the bug\n>\n> **Agent:** OLD HISTORY");
-  assert.ok(head.endsWith(`Resume it in a terminal:\n\`\`\`\ncd ${join(base, "beta")}\nopencode -s ses_1\n\`\`\``));
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });
@@ -539,7 +537,7 @@ test("a session the agent has not titled yet shows as Untitled, not opencode's t
   const n = posts.length;
   await slack.emit("events_api", slack.dm("UPEPE", "$clear", { ts: "500.000020", thread_ts: "500.000001" })); // a new session, no prompt yet
   const cleared = await waitFor(() => posts.slice(n).find((p) => p.params.text?.startsWith("🧹")));
-  const id = /opencode -s (\S+)/.exec(cleared.params.text)![1];
+  const id = /💬 New session · `(\S+)`/.exec(cleared.params.text)![1];
   await slack.emit("events_api", slack.dm("UPEPE", "which one?", { ts: "500.000021" }));
   let { view } = await openPicker("500.000021");
   view = await tap(view, "picker_pick", ".");
