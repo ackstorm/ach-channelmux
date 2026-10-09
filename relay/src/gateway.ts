@@ -35,6 +35,8 @@ export interface GatewayConfig {
   slowWorkingNoticeMs?: number;
   /** Instructions appended, with who the user is and their local time, to the first message of each thread (a top-level DM starts a new agent session). Empty disables it. */
   sessionPreamble?: string;
+  /** Reply to a message while no daemon is connected (e.g. how to start the workspace). */
+  offlineMessage?: string;
   /** Slack calls per minute per method (default RATES in limiter.ts); {} disables pacing. */
   rates?: Record<string, number>;
   /** chat.startStream is refused when it would wait longer. Default 2 s. */
@@ -456,14 +458,14 @@ export function createGateway(cfg: GatewayConfig) {
     log("subscriber_promoted", { owner: owner.email, conn: owner.primary.id });
   }
 
-  // Nothing is held while offline: every message gets the notice, in its thread.
+  // Nothing is held while offline: every message gets the notice, where it was written.
   async function goOffline(env: Envelope, channel: string) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
     const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
     await slack("chat.postMessage", {
       channel,
-      thread_ts: ev.thread_ts ?? ev.ts,
-      text: "Your environment is not connected. Open your workspace and try again.",
+      thread_ts: ev.thread_ts, // top-level stays top-level: no thread for a session that never started
+      text: cfg.offlineMessage ?? "Your workspace is offline. Start it and try again.",
     });
   }
 

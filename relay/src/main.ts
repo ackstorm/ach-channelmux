@@ -7,6 +7,7 @@
 //   AUTH_RESOLVER_EMAIL_FIELD          dotted path to the owner's email in the JSON reply (default "email")
 //   PORT                               default 8080
 //   SESSION_PREAMBLE                   optional; added to each thread's first message (default below, "" disables)
+//   OFFLINE_MESSAGE                    optional; reply while the user's daemon is not connected
 
 import { createGateway } from "./gateway.ts";
 import { tokenResolver } from "./resolver.ts";
@@ -46,6 +47,7 @@ const gw = createGateway({
     emailField: env("AUTH_RESOLVER_EMAIL_FIELD", "email"),
   }),
   sessionPreamble: env("SESSION_PREAMBLE", SLACK_PREAMBLE),
+  offlineMessage: process.env.OFFLINE_MESSAGE || undefined,
 });
 
 await gw.start();

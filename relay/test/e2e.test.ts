@@ -74,6 +74,7 @@ before(async () => {
     slowWorkingAfterMs: 400,
     slowWorkingNoticeMs: 150,
     rates: {},
+    offlineMessage: "Offline. Start it at <https://example.com|your workspace>.",
     log: () => {},
   });
   await gw.start();
@@ -268,13 +269,13 @@ test("criterion 4: a second daemon parks as standby and takes over when the firs
   assert.equal(pepe1.got.at(-1).text, "still pepe1");
 });
 
-test("offline: every message gets the notice in its thread, and nothing is replayed on connect", async () => {
-  for (const ts of ["100.000001", "100.000002"]) {
-    await slack.emit("events_api", slack.dm("UXAVI", "hello?", { ts }));
-    await waitFor(() =>
-      slack.calls.some((c) => c.method === "chat.postMessage" && c.params.thread_ts === ts && /not connected/.test(c.params.text)),
-    );
-  }
+test("offline: every message gets OFFLINE_MESSAGE where it was written, and nothing is replayed on connect", async () => {
+  const notice = (thread?: string) =>
+    slack.calls.filter((c) => c.method === "chat.postMessage" && c.params.thread_ts === thread && /^Offline\. Start it/.test(c.params.text));
+  for (const ts of ["100.000001", "100.000002"]) await slack.emit("events_api", slack.dm("UXAVI", "hello?", { ts }));
+  await waitFor(() => notice(undefined).length === 2); // top-level: answered top-level, no thread opened
+  await slack.emit("events_api", slack.dm("UXAVI", "still?", { ts: "100.000004", thread_ts: "100.000003" }));
+  await waitFor(() => notice("100.000003").length === 1);
   const xavi = await daemon("xavi", "gw-xavi");
   await slack.emit("events_api", slack.dm("UXAVI", "now?"));
   await waitFor(() => xavi.got.length === 1);

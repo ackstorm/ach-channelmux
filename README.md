@@ -25,7 +25,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | Files | `url_private*` (and a voice clip's `vtt` transcript) in delivered events and `conversations.replies` are rewritten to `/files/<id>/<name>`; only the owner's daemon can fetch them. Uploads go straight to Slack's presigned URL (daemons need egress to `files.slack.com`). |
 | Working notice | While 👀 is on a message (the daemon's "turn running" reaction), posts a rotating status line (`🥧 *Baking…*`) in its thread, then "taking a while" lines with the elapsed time; deletes it when 👀 goes. |
 | Session preamble | A top-level DM starts a thread and a new agent session; the relay appends a context block with the user's name, email and local time, plus `SESSION_PREAMBLE` (default in `relay/src/main.ts`: the user sees only reply text, so acknowledge before using tools and quote tool output). Thread replies, edits and daemon commands (`/cmd`, `$cmd`, `!shell`) pass untouched. |
-| Offline | No daemon connected: every message gets a "not connected" notice in its thread. Nothing is held or replayed. |
+| Offline | No daemon connected: every message gets `OFFLINE_MESSAGE` as a reply where it was written (top level or its thread). Nothing is held or replayed. |
 | State | In memory. One replica. Slack redelivers unacked envelopes (deduplicated by `event_id`); daemons reconnect on their own. |
 
 ## Configuration
@@ -37,6 +37,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | `AUTH_RESOLVER_URL`, `AUTH_RESOLVER_HEADER` | Token resolver endpoint and the header that carries the token. |
 | `AUTH_RESOLVER_EMAIL_FIELD` | Dotted path to the email in its reply. Default `email`. |
 | `SESSION_PREAMBLE` | Optional; `""` disables the context block. |
+| `OFFLINE_MESSAGE` | Optional reply while the user's daemon is not connected, e.g. how to start their workspace (Slack mrkdwn, `<url\|text>` links). Default: "Your workspace is offline. Start it and try again." |
 | `PORT` | Default `8080`. |
 
 Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, `app_home_opened` and
