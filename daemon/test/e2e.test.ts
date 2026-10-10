@@ -623,18 +623,15 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   daemon = newDaemon();
   await daemon.start();
   await say("$model", "500.000003");
-  const panel = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.blocks?.includes("cfg_open")));
+  const panel = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.blocks?.includes("cfg:model")));
   assert.match(panel.params.text, /\*Model\* `Model one`/);
   assert.doesNotMatch(panel.params.text, /Session Mode/);
-  const n = views().length;
-  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_cfg", channel: { id: DM }, message: { ts: panel.ts, thread_ts: T }, actions: [{ type: "button", action_id: "cfg_open", value: T }] }, true);
-  await waitFor(() => views().length > n);
-  const settingsView = lastView();
-  const menu = settingsView.blocks.find((b: any) => b.block_id === "cfg_model").element;
-  assert.equal(menu.initial_option.value, "m1");
-  assert.deepEqual(await submit(settingsView, { cfg_model: { value: { type: "static_select", selected_option: { value: "m2" } } } }), { response_action: "clear" });
+  const menu = JSON.parse(panel.params.blocks).find((b: any) => b.accessory?.action_id === "cfg:model");
+  assert.deepEqual([menu.text.text, menu.accessory.initial_option.value], ["*Model*", "m1"]);
+  await click({ ts: panel.ts, thread_ts: T }, { type: "static_select", action_id: "cfg:model", selected_option: { value: "m2" } });
   await waitFor(() => agentLog().some((e) => e.m === "config" && e.configId === "model" && e.value === "m2"));
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === panel.ts && /`Model two`/.test(c.params.text)));
+  const redrawn = await waitFor(() => calls("chat.update").find((c) => c.params.ts === panel.ts && /`Model two`/.test(c.params.text)));
+  assert.equal(JSON.parse(redrawn.params.blocks).find((b: any) => b.accessory?.action_id === "cfg:model").accessory.initial_option.value, "m2");
 
   await say("$compact", "500.000004");
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/compact"));

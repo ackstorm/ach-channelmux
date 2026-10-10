@@ -922,18 +922,24 @@ export function createDaemon(cfg: DaemonConfig) {
     return true;
   }
 
-  // $model: a one-line summary in the thread; "Change" opens a modal with each setting as a full-width menu.
+  // $model: each setting with its own menu (picking a value changes it at once), then context and cost.
   // The agent's mode (opencode: build/plan) is left out: it is not a setting users change from Slack.
   const selects = (t: Thread) => (configs.get(t.sessionId) ?? []).filter((o) => o.type === "select" && o.category !== "mode") as any[];
   const choicesOf = (o: any) => (o.options as any[]).flatMap((x) => x.options ?? [x]) as { value: string; name: string; description?: string }[];
   const currentName = (o: any) => choicesOf(o).find((c) => c.value === o.currentValue)?.name ?? String(o.currentValue);
   const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
-  const summary = (t: Thread) => {
+  const usageOf = (t: Thread) => {
     const u = usage.get(t.sessionId);
     const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${u.used && u.used < u.size / 100 ? "<1" : Math.round((100 * u.used) / u.size)}%)`] : [];
     if (u?.cost) context.push(`*Cost* ${u.cost.currency === "USD" ? "$" : `${u.cost.currency} `}${u.cost.amount.toFixed(u.cost.amount < 1 ? 3 : 2)}`);
-    return `⚙️ ${[...selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``), ...context].join("   ·   ")}`;
+    return context;
   };
+  // The message's text: what a notification or a client without blocks shows.
+  const summary = (t: Thread) => `⚙️ ${[...selects(t).map((o) => `*${o.name}* \`${currentName(o).replace(/^[^/]+\//, "")}\``), ...usageOf(t)].join("   ·   ")}`;
+  const panel = (t: Thread) => [
+    ...selects(t).map((o) => section(`*${o.name}*`, { ...settingMenu(o), action_id: `cfg:${o.id}` })),
+    ...(usageOf(t).length ? [{ type: "context", elements: [{ type: "mrkdwn", text: usageOf(t).join("   ·   ") }] }] : []),
+  ];
 
   const agentHelp = (t: Thread) => {
     const own = (agentCommands.get(t.sessionId) ?? []).filter((c) => !BUILTIN.includes(c.name.toLowerCase()));
@@ -957,9 +963,7 @@ export function createDaemon(cfg: DaemonConfig) {
   async function settings(t: Thread) {
     await loadedWithSettings(t);
     if (!selects(t).length) return void (await say(t, "This agent has no settings to change."));
-    await say(t, summary(t), [
-      section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" }),
-    ]);
+    await say(t, summary(t), panel(t));
   }
 
   // A setting as a menu: provider-prefixed values ("ackstorm/claude-fable-5") are grouped by provider.
@@ -1269,50 +1273,21 @@ export function createDaemon(cfg: DaemonConfig) {
     void start(JSON.parse(view.private_metadata), choice).catch((err) => log("session_start_failed", { error: String(err) }));
   });
 
-  app.action("cfg_open", async ({ ack, body, action }) => {
+  app.action(/^cfg:/, async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
-    const t = threads[(action as any).value];
-    if (!t) return;
-    await slack.views.open({
-      trigger_id: b.trigger_id,
-      view: {
-        type: "modal",
-        callback_id: "cfg_save",
-        title: plain("Session settings"),
-        submit: plain("Save"),
-        close: plain("Cancel"),
-        private_metadata: JSON.stringify({ thread: t.thread, summary: b.message.ts }),
-        blocks: [
-          { type: "context", elements: [{ type: "mrkdwn", text: `📁 \`${t.cwd}\`` }] },
-          ...selects(t).map((o) => ({
-            type: "input",
-            block_id: `cfg_${o.id}`,
-            label: plain(o.name),
-            ...(o.description && { hint: plain(String(o.description).slice(0, 2000)) }),
-            element: settingMenu(o),
-          })),
-        ] as any[],
-      },
-    });
-  });
-  app.view("cfg_save", async ({ ack, view }) => {
-    await ack({ response_action: "clear" });
-    const { thread, summary: ts } = JSON.parse(view.private_metadata);
-    const t = threads[thread];
-    if (!t) return;
-    for (const [block, v] of Object.entries(view.state.values as any)) {
-      const value = (v as any).value?.selected_option?.value;
-      const o = selects(t).find((x) => `cfg_${x.id}` === block);
-      if (!o || value === undefined || value === o.currentValue) continue;
-      try {
-        const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value });
-        configs.set(t.sessionId, r.configOptions);
-      } catch (err: any) {
-        await say(t, `⚠️ Could not change ${o.name}: ${err?.message ?? err}`);
-      }
+    const a = action as any;
+    const t = threads[b.message?.thread_ts];
+    const o = t && selects(t).find((x) => `cfg:${x.id}` === a.action_id);
+    if (!o || a.selected_option.value === o.currentValue) return;
+    try {
+      const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
+      configs.set(t.sessionId, r.configOptions);
+    } catch (err: any) {
+      await say(t, `⚠️ Could not change ${o.name}: ${err?.message ?? err}`);
     }
-    await slack.chat.update({ channel: t.channel, ts, text: summary(t), blocks: [section(summary(t), { ...button("Change", "cfg_open", t.thread), style: "primary" })] as any[] });
+    // Redrawn either way: a failed change shows the value still in use.
+    await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: summary(t), blocks: panel(t) as any[] });
   });
 
   // "Send now" on a queued notice: stop the running turn, so the queue moves on.
