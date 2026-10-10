@@ -2,6 +2,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -29,6 +30,20 @@ const GW_PORT = await new Promise<number>((r) => {
 });
 const GW = `http://127.0.0.1:${GW_PORT}`;
 
+// A speech-to-text API: answers with a transcript, or fails while sttDown is set.
+const sttCalls: { url?: string; auth?: string; body: string }[] = [];
+let sttDown = false;
+const stt = createHttpServer((req, res) => {
+  let body = "";
+  req.on("data", (c) => (body += c));
+  req.on("end", () => {
+    sttCalls.push({ url: req.url, auth: req.headers.authorization, body });
+    if (sttDown) return void res.writeHead(500).end();
+    res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ text: " hello from the model " }));
+  });
+});
+await new Promise<void>((r) => stt.listen(0, "127.0.0.1", r));
+
 let gw: ReturnType<typeof createGateway>;
 let daemon: ReturnType<typeof createDaemon>;
 const posts: { params: Record<string, string>; ts: string }[] = [];
@@ -55,6 +70,7 @@ const newDaemon = () =>
     stateFile: join(base, ".state", "threads.json"),
     log: (msg, extra) => void logged.push({ msg, ...(extra as object) }),
     doneNoticeMs: 100, // the "wait" turns run longer: they end with a notice
+    stt: { url: `http://127.0.0.1:${(stt.address() as any).port}/v1/`, model: "stt-test", language: "es", headers: async () => ({ authorization: "Bearer k-1" }) },
   });
 const calls = (method: string) => slack.calls.filter((c) => c.method === method);
 const replies = (thread: string) => posts.filter((p) => p.params.thread_ts === thread && p.params.markdown_text).map((p) => p.params.markdown_text);
@@ -115,6 +131,7 @@ after(async () => {
   await daemon.stop();
   await gw.stop();
   await slack.stop();
+  stt.close();
 });
 
 test("a new DM gets the picker in the main view; browsing to a folder and starting a new session runs the thread there", async () => {
@@ -392,6 +409,26 @@ test("a second question while one waits is refused; a voice reply answers the fi
   await slack.emit("events_api", slack.dm("UPEPE", "", { ts: "100.000025", thread_ts: "100.000001", subtype: "file_share", files: [clip] }));
   await waitFor(() => streamed(since(n)).some((c: any) => c.type === "markdown_text" && c.text.includes("answer: [Voice message, transcribed by Slack]\nthe second one")));
   await turnEnded("100.000024");
+});
+
+test("a voice clip Slack did not transcribe goes to the stt model, and is saved as a file when that fails", async () => {
+  const clip = (id: string) => ({ id, name: "audio_message.m4a", subtype: "slack_audio", size: 20, url_private_download: `${slack.url}/files/${id}/audio_message.m4a`, transcription: { status: "none" } });
+  await slack.emit("events_api", slack.dm("UPEPE", "", { ts: "100.000026", thread_ts: "100.000001", subtype: "file_share", files: [clip("FV3")] }));
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("transcribed]")));
+  assert.equal(p.text, "[Voice message, transcribed]\nhello from the model");
+  assert.equal(sttCalls.length, 1); // the clips Slack transcribed (the tests above) never reached it
+  const [call] = sttCalls;
+  assert.deepEqual([call.url, call.auth], ["/v1/audio/transcriptions", "Bearer k-1"]);
+  assert.match(call.body, /name="model"\r\n\r\nstt-test\r\n[\s\S]*name="language"\r\n\r\nes\r\n/);
+  assert.doesNotMatch(call.body, /name="prompt"/); // unset, not sent empty
+  assert.match(call.body, /filename="audio_message\.m4a"[\s\S]*content of FV3/);
+
+  sttDown = true;
+  await slack.emit("events_api", slack.dm("UPEPE", "", { ts: "100.000027", thread_ts: "100.000001", subtype: "file_share", files: [clip("FV4")] }));
+  const q = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("audio_message.m4a")));
+  assert.match(q.text, /^\[Attached file saved at \S+\/audio_message\.m4a\]$/);
+  assert.ok(logged.some((l) => l.msg === "stt_failed" && l.file === "FV4"));
+  sttDown = false;
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {

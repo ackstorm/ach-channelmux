@@ -52,6 +52,8 @@ export interface DaemonConfig {
   baseDir: string;
   /** Thread -> session map, so threads resume after a restart. */
   stateFile: string;
+  /** Speech to text for voice clips Slack did not transcribe: an OpenAI-compatible API (its /audio/transcriptions). */
+  stt?: { url: string; model: string; language?: string; prompt?: string; headers: () => Promise<Record<string, string>> };
   /** Called when the agent process exits on its own. */
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
@@ -228,15 +230,23 @@ export function createDaemon(cfg: DaemonConfig) {
         log("file_fetch_failed", { file: f.id, status: res.status });
         continue;
       }
+      const body = Buffer.from(await res.arrayBuffer());
+      if (f.subtype === "slack_audio" && cfg.stt) {
+        const text = await transcribe(body, f.name).catch((err) => void log("stt_failed", { file: f.id, error: String(err) }));
+        if (text) {
+          notes.push(`[Voice message, transcribed]\n${text}`);
+          continue;
+        }
+      }
       const path = join(mkdtempSync(join(tmpdir(), "ach-channelmux-")), basename(f.name));
-      writeFileSync(path, Buffer.from(await res.arrayBuffer()));
+      writeFileSync(path, body);
       notes.push(`[Attached file saved at ${path}]`);
     }
     return notes;
   }
 
   // A Slack voice clip: Slack's own transcript (its preview, or the whole WebVTT when longer), polled
-  // for while Slack is still transcribing. Without one, the audio is saved like any other file.
+  // for while Slack is still transcribing. Without one, the stt model transcribes it, or the audio is saved like any other file.
   async function voice(f: any, m: Where): Promise<string | undefined> {
     for (let i = 0; f.transcription?.status === "processing" && m.channel && i < VOICE_POLLS; i++) {
       await sleep(1_000);
@@ -251,6 +261,18 @@ export function createDaemon(cfg: DaemonConfig) {
       if (res.ok) text = vttText(await res.text());
     }
     return text ? `[Voice message, transcribed by Slack]\n${text}` : undefined;
+  }
+
+  async function transcribe(audio: Buffer, name: string): Promise<string | undefined> {
+    const { url, model, language, prompt, headers } = cfg.stt!;
+    const form = new FormData();
+    form.append("model", model);
+    if (language) form.append("language", language);
+    if (prompt) form.append("prompt", prompt);
+    form.append("file", new Blob([audio]), name);
+    const res = await fetch(`${url.replace(/\/$/, "")}/audio/transcriptions`, { method: "POST", headers: await headers(), body: form, signal: AbortSignal.timeout(60_000) });
+    if (!res.ok) throw new Error(`status ${res.status}`);
+    return ((await res.json()) as any).text?.trim();
   }
 
   // ---------- MCP: the agent's Slack tools ----------
