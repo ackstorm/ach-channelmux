@@ -787,6 +787,15 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
   assert.deepEqual(JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).defaults, { model: "m2" });
 
+  // After a restart, before any session loads, the Home tab still knows the agent's settings.
+  await daemon.stop();
+  daemon = newDaemon();
+  await daemon.start();
+  n = published().length;
+  await opened();
+  await waitFor(() => published().length > n);
+  assert.equal(JSON.parse(published().at(-1)!.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
+
   // The next new session gets it.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
   const msg = await pickerFor("930.000001");

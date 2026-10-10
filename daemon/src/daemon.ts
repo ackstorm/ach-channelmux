@@ -96,9 +96,10 @@ export function createDaemon(cfg: DaemonConfig) {
   let threads: Record<string, Thread> = {}; // thread ts -> session
   let waiting: [string, Pending][] = [];
   let defaults: Record<string, string> = {}; // setting id -> value new sessions start with, chosen on the Home tab
+  let knownSettings: acp.SessionConfigOption[] = []; // the agent's settings, as its latest session reported them (for the Home tab after a restart)
   try {
     const state = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
-    ({ threads, pending: waiting = [], defaults = {} } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
+    ({ threads, pending: waiting = [], defaults = {}, settings: knownSettings = [] } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
   const pending = new Map<string, Pending>(waiting); // thread ts -> first message, until the picker starts a session
@@ -124,7 +125,7 @@ export function createDaemon(cfg: DaemonConfig) {
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
     // ponytail: only the 50 newest unanswered pickers survive a restart.
-    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), defaults }));
+    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), defaults, settings: latestSettings() }));
   }
 
   const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
@@ -983,9 +984,11 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // ---------- Home tab: status, defaults for new sessions, recent threads ----------
 
+  // The settings the agent offers, as its latest session reported them; saved, so a restart still knows them.
+  const latestSettings = () => [...configs.values()].at(-1) ?? knownSettings;
+
   async function homeView() {
-    // The settings the agent offers, as its latest session reported them.
-    const options = ([...configs.values()].at(-1) ?? []).filter((o) => o.type === "select" && o.category !== "mode") as any[];
+    const options = latestSettings().filter((o) => o.type === "select" && o.category !== "mode") as any[];
     const titles = new Map((await sessions().catch(() => [])).map((x) => [x.sessionId, x.title]));
     const recent = Object.values(threads).sort((a, b) => Number(b.thread) - Number(a.thread)).slice(0, 5);
     const rows = await Promise.all(recent.map(async (t) => {
