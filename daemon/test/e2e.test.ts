@@ -91,8 +91,8 @@ const mark = () => slack.calls.length;
 // The picker modal: the latest view the daemon opened or redrew, and the user's taps on it.
 const views = () => slack.calls.filter((c) => c.method === "views.open" || c.method === "views.update");
 const lastView = () => JSON.parse(views().at(-1)!.params.view);
-const actionValues = (view: any, actionId: string) =>
-  view.blocks.flatMap((b: any) => [b.accessory, ...(b.elements ?? [])]).filter((e: any) => e?.action_id === actionId).map((e: any) => e.value);
+// The folder modal's browse buttons (picker_open_0, _1, …): the subfolders shown.
+const browse = (view: any) => view.blocks.flatMap((b: any) => b.elements ?? []).filter((e: any) => /^picker_open_\d+$/.test(e.action_id ?? "")).map((e: any) => e.value);
 async function tap(view: any, action_id: string, value: string, action: object = { type: "button", value }) {
   const n = views().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_tap", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata }, actions: [{ action_id, ...action }] }, true);
@@ -107,11 +107,37 @@ const pickerFor = (thread: string) =>
   waitFor(() => posts.find((p) => !p.params.thread_ts && p.params.blocks?.includes("picker_open_modal") && p.params.blocks.includes(thread)));
 async function openPicker(thread: string) {
   const msg = await pickerFor(thread);
-  assert.match(msg.params.text, /^👋 Hi Real! Pick where to work: a folder, then a new session or one you already have there\.$/); // Slack's real_name "Real UPEPE"
+  assert.equal(msg.params.text, "👋 Hi Real! Pick the folder to work in."); // Slack's real_name "Real UPEPE"
   const n = views().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
   await waitFor(() => views().length > n);
   return { msg, view: lastView() };
+}
+// "Use" in the folder modal with a searched folder; the base folder is "Use" with nothing picked.
+const searched = (rel: string) => ({ search: { picker_search: { type: "external_select", selected_option: { value: rel } } } });
+// The session question the thread gets once its folder is chosen.
+const questionIn = (thread: string) => waitFor(() => posts.find((p) => p.params.thread_ts === thread && p.params.blocks?.includes("session_new")));
+async function answerNew(thread: string) {
+  const q = await questionIn(thread);
+  await click({ ts: q.ts, thread_ts: thread }, { type: "button", action_id: "session_new", value: thread });
+}
+async function openPrevious(thread: string) {
+  const q = await questionIn(thread);
+  const n = views().length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_prev_${thread}`, channel: { id: DM }, message: { ts: q.ts, thread_ts: thread }, actions: [{ type: "button", action_id: "session_previous", value: thread }] }, true);
+  await waitFor(() => views().length > n);
+  return lastView();
+}
+async function answerPrevious(thread: string, sessionId: string) {
+  const view = await openPrevious(thread);
+  assert.deepEqual(await submit(view, sessionChoice(sessionId)), { response_action: "clear" });
+  return view;
+}
+// The whole picker: a folder ("" is the base), then a new session.
+async function startNew(thread: string, rel = "") {
+  const { view } = await openPicker(thread);
+  assert.deepEqual(await submit(view, rel ? searched(rel) : {}), { response_action: "clear" });
+  await answerNew(thread);
 }
 const since = (n: number) => slack.calls.slice(n);
 const turnEnded = (ts: string) => waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === ts && c.params.name === "white_check_mark"));
@@ -147,30 +173,35 @@ after(async () => {
 test("a new DM gets the picker in the main view; browsing to a folder and starting a new session runs the thread there", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "fix the bug", { ts: "100.000001" }));
   let { msg, view } = await openPicker("100.000001");
-  assert.deepEqual(actionValues(view, "picker_open"), ["alpha", "beta", "gamma"]); // no hidden folders or node_modules; symlinks count
-  assert.deepEqual(actionValues(view, "picker_pick"), []); // no sessions yet: no "Last used"
-  view = await tap(view, "picker_open", "gamma");
-  assert.deepEqual(actionValues(view, "picker_open"), ["deep"]);
+  assert.deepEqual(browse(view), ["alpha", "beta", "gamma"]); // no hidden folders or node_modules; symlinks count
+  assert.equal(view.blocks.some((b: any) => b.block_id === "recent"), false); // no sessions yet: no Recent
+  view = await tap(view, "picker_open_2", "gamma");
+  assert.deepEqual(browse(view), ["deep"]);
   view = await tap(view, "picker_up", "up");
-  view = await tap(view, "picker_open", "beta");
-  assert.equal(view.submit.text, "Use beta");
-  const next = await submit(view);
-  assert.equal(next.response_action, "update");
-  view = next.view;
-  assert.deepEqual(view.blocks.at(-1).element.options.map((o: any) => o.value), ["new"]);
+  view = await tap(view, "picker_open_1", "beta");
+  assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "beta")}\``);
+  assert.deepEqual(await submit(view), { response_action: "clear" }); // "Use": the folder being browsed
+
+  // The folder is chosen: the greeting links to the thread, which asks for the session. Nothing reached the agent yet.
+  const q = await questionIn("100.000001");
+  assert.equal(q.params.text, `📁 \`${join(base, "beta")}\`\nNo sessions here yet.`);
+  assert.deepEqual(JSON.parse(q.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id]), [["🆕 New session", "session_new"]]); // no previous ones
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && c.params.text === `📁 \`beta\` → <https://example.slack.com/archives/${DM}/p${q.ts.replace(".", "")}|Open thread>`));
+  assert.ok(!existsSync(process.env.MOCK_AGENT_LOG!) || !agentLog().some((e) => e.m === "prompt"));
 
   const n = mark();
-  assert.deepEqual(await submit(view, sessionChoice("new")), { response_action: "clear" });
+  await answerNew("100.000001");
   await waitFor(() => calls("chat.stopStream").length > 0);
   assert.deepEqual(agentLog().slice(0, 2), [
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.text?.startsWith("📁"))!;
+  assert.ok(calls("chat.delete").some((c) => c.params.ts === q.ts)); // the question gives way to the header
+  const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.text?.startsWith("📁") && p.params.text.includes("💬"))!;
   assert.equal(header.params.reply_broadcast, undefined); // the header stays in the thread
   assert.equal(header.params.unfurl_links, "false"); // the previous thread's link stays a link, not a preview
-  // The picker, in the main view, becomes a link to the thread.
-  const done = calls("chat.update").find((c) => c.params.ts === msg.ts)!;
+  // The greeting, in the main view, links to the header.
+  const done = calls("chat.update").filter((c) => c.params.ts === msg.ts).at(-1)!;
   assert.equal(done.params.text, `📁 \`beta\` · new session → <https://example.slack.com/archives/${DM}/p${header.ts.replace(".", "")}|Open thread>`);
   assert.equal(done.params.blocks, "[]");
   const head = header.params.text;
@@ -492,19 +523,18 @@ test("the picker searches folders under the base, and creates a new one where it
     slack.emit("interactive", { type: "block_suggestion", user: { id: "UPEPE" }, action_id: "picker_search", block_id: "search", value, view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata } }, true) as Promise<any>;
   assert.deepEqual((await suggest("DEE")).options, [{ text: { type: "plain_text", text: "gamma/deep", emoji: true }, value: "gamma/deep" }]); // through the symlink
   assert.deepEqual((await suggest("modules")).options, []); // node_modules is skipped
-  view = await tap(view, "picker_search", "", { type: "external_select", selected_option: { value: "gamma/deep" } });
-  assert.equal(view.callback_id, "picker_session");
-  assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "gamma/deep")}\``);
 
-  view = await tap(view, "picker_other", "other");
   view = await tap(view, "picker_mkdir", "../out");
   assert.match(view.blocks.at(-1).elements[0].text, /^⚠️ "\.\.\/out" can't be a folder here/);
   assert.equal(existsSync(join(base, "../out")), false);
   view = await tap(view, "picker_mkdir", " new one ");
   assert.ok(statSync(join(base, "new one")).isDirectory());
   assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "new one")}\``);
-  assert.equal(view.submit.text, "Use new one");
   assert.equal(view.blocks.at(-1).block_id, "mkdir:new one"); // a fresh input, not the name just typed
+
+  // "Use" with a searched folder takes it over the one being browsed.
+  assert.deepEqual(await submit(view, searched("gamma/deep")), { response_action: "clear" });
+  assert.match((await questionIn("910.000001")).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
 });
 
 test("a $command as a new message gets help, not the folder picker", async () => {
@@ -522,23 +552,25 @@ test("a reply in a thread the daemon does not know says so", async () => {
   await waitFor(() => posts.find((p) => p.params.thread_ts === "200.000001" && /no agent session/.test(p.params.text)));
 });
 
-test("the picker offers last-used folders and continues an existing session in the new thread, with a link to its old one and a recap", async () => {
+test("Recent folders in the modal; the thread offers previous sessions, continued in the new thread with a link to the old one and a recap", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "carry on", { ts: "300.000001" }));
-  let { msg, view } = await openPicker("300.000001");
-  assert.deepEqual(actionValues(view, "picker_pick"), ["beta"]);
-  view = await tap(view, "picker_pick", "beta");
-  const options = view.blocks.at(-1).element.options;
-  assert.deepEqual(options.map((o: any) => o.value), ["new", "ses_1"]);
-  assert.match(options[1].description.text, /another thread/);
-  view = await tap(view, "picker_other", "other"); // back to the first screen
-  assert.deepEqual(actionValues(view, "picker_pick"), ["beta"]);
-  view = await tap(view, "picker_pick", "beta");
-  await submit(view, sessionChoice("ses_1"));
+  const { msg, view } = await openPicker("300.000001");
+  const recent = view.blocks.find((b: any) => b.block_id === "recent").element.options;
+  assert.deepEqual(recent.map((o: any) => o.value), ["beta"]);
+  assert.match(recent[0].text.text, /^beta · \d+ min ago$/);
+  assert.deepEqual(await submit(view, { recent: { recent: { type: "static_select", selected_option: { value: "beta" } } } }), { response_action: "clear" });
+  const q = await questionIn("300.000001");
+  assert.equal(q.params.text, `📁 \`${join(base, "beta")}\`\nNew session, or continue one?`);
+  assert.deepEqual(JSON.parse(q.params.blocks)[1].elements.map((e: any) => e.action_id), ["session_new", "session_previous"]);
+  const previous = await answerPrevious("300.000001", "ses_1");
+  const options = previous.blocks.at(-1).element.options;
+  assert.deepEqual(options.map((o: any) => o.value), ["ses_1"]);
+  assert.match(options[0].description.text, /another thread/);
 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "carry on"));
   assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
-  const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text?.startsWith("📁"))?.params.text);
-  assert.match(calls("chat.update").find((c) => c.params.ts === msg.ts)!.params.text, /^📁 `beta` · continuing \*Session ses_1\* → <.*\|Open thread>$/);
+  const head = await waitFor(() => posts.find((p) => p.params.thread_ts === "300.000001" && p.params.text?.includes("💬"))?.params.text);
+  await waitFor(() => /^📁 `beta` · continuing \*Session ses_1\* → <.*\|Open thread>$/.test(calls("chat.update").filter((c) => c.params.ts === msg.ts).at(-1)?.params.text ?? ""));
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 *Session ses_1* · \`ses_1\`\n↩️ <https://example.slack.com/archives/D_UPEPE/p100000001|previous thread>`);
   // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
   const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.markdown_text?.includes("Session recap"))!.params.markdown_text;
@@ -547,30 +579,34 @@ test("the picker offers last-used folders and continues an existing session in t
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });
 
-test("a session in the base folder itself shows up in Last used and can be picked again", async () => {
+test("a session in the base folder itself shows up in Recent and can be picked again", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "at the root", { ts: "400.000001" }));
-  let { view } = await openPicker("400.000001");
-  const next = await submit(view); // "Use <base>" on the first screen
-  await submit(next.view, sessionChoice("new"));
+  await startNew("400.000001"); // "Use" with nothing picked: the base folder
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "at the root"));
   assert.deepEqual(agentLog().filter((e) => e.m === "new").at(-1).cwd, base);
 
   await slack.emit("events_api", slack.dm("UPEPE", "again at the root", { ts: "400.000002" }));
-  ({ view } = await openPicker("400.000002"));
-  assert.ok(actionValues(view, "picker_pick").includes("."), "the base folder is offered (as '.', never an empty value)");
-  view = await tap(view, "picker_pick", ".");
-  assert.equal(view.blocks.at(-1).element.options.length, 2); // New session + the root session
+  const { view } = await openPicker("400.000002");
+  const recent = view.blocks.find((b: any) => b.block_id === "recent").element.options.map((o: any) => o.value);
+  assert.ok(recent.includes("."), "the base folder is offered (as '.', never an empty value)");
+  await submit(view, { recent: { recent: { type: "static_select", selected_option: { value: "." } } } });
+  assert.match((await questionIn("400.000002")).params.text, /\nNew session, or continue one\?$/);
 });
 
-test("a picker still works after the daemon restarts", async () => {
+test("the picker and the session question still work after the daemon restarts", async () => {
+  const restart = async () => {
+    await daemon.stop();
+    daemon = newDaemon();
+    await daemon.start();
+  };
   await slack.emit("events_api", slack.dm("UPEPE", "before the restart", { ts: "500.000001" }));
   await pickerFor("500.000001");
-  await daemon.stop();
-  daemon = newDaemon();
-  await daemon.start();
+  await restart();
   const { view } = await openPicker("500.000001");
-  const next = await submit(view);
-  await submit(next.view, sessionChoice("new"));
+  await submit(view);
+  await questionIn("500.000001");
+  await restart();
+  await answerNew("500.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
 });
 
@@ -643,9 +679,9 @@ test("a session the agent has not titled yet shows as Untitled, not opencode's t
   const cleared = await waitFor(() => posts.slice(n).find((p) => p.params.text?.startsWith("🧹")));
   const id = /💬 New session · `(\S+)`/.exec(cleared.params.text)![1];
   await slack.emit("events_api", slack.dm("UPEPE", "which one?", { ts: "500.000021" }));
-  let { view } = await openPicker("500.000021");
-  view = await tap(view, "picker_pick", ".");
-  const option = view.blocks.at(-1).element.options.find((o: any) => o.value === id);
+  const { view } = await openPicker("500.000021");
+  await submit(view, { recent: { recent: { type: "static_select", selected_option: { value: "." } } } });
+  const option = (await openPrevious("500.000021")).blocks.at(-1).element.options.find((o: any) => o.value === id);
   assert.equal(option.text.text, "Untitled");
 });
 
@@ -655,9 +691,7 @@ test("an edit before the picker changes the first prompt; an edit in a session r
   await slack.emit("events_api", slack.dm("UPEPE", "lsit files", { ts: "700.000001" }));
   await pickerFor("700.000001");
   await slack.emit("events_api", edit("700.000001", "list files"));
-  const { view } = await openPicker("700.000001");
-  const next = await submit(view);
-  await submit(next.view, sessionChoice("new"));
+  await startNew("700.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "list files"));
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "lsit files"), false);
 
@@ -686,8 +720,8 @@ test("Send to agent on any message starts a DM thread with its text and a link b
   await waitFor(() => views().length > n);
   const root = posts.find((p) => p.params.channel === "UPEPE" && p.params.text?.startsWith("📎"))!;
   assert.equal(root.params.text, "📎 <https://acme.slack.com/archives/C_TEAM/p900000001|Shared message>:\n> login fails on Safari");
-  const next = await submit(lastView()); // the base folder
-  await submit(next.view, sessionChoice("new"));
+  await submit(lastView()); // the base folder
+  await answerNew(root.ts!);
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("login fails on Safari")));
   // The relay's context block reaches the agent after the link, never the quote in the DM.
   assert.match(p.text, /\[Shared from this Slack message: https:\/\/acme\.slack\.com\/archives\/C_TEAM\/p900000001\]\n\n\[Context from the Slack relay/);
@@ -703,41 +737,32 @@ test("editing the first message keeps the relay's context block", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "lsit\n\n[Context from the Slack relay. Do not mention or quote this block.]\nUser: x.\n[End of relay context]", { ts: "800.000004" }));
   await pickerFor("800.000004");
   await slack.emit("events_api", slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts: "800.000004", text: "list" }, previous_message: { text: "lsit" } }));
-  const { view } = await openPicker("800.000004");
-  const next = await submit(view);
-  await submit(next.view, sessionChoice("new"));
+  await startNew("800.000004");
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.startsWith("list\n\n[Context from the Slack relay")));
   assert.match(p.text, /User: x\./);
   await turnEnded("800.000004");
 });
 
-test("a folder the message names is offered first, starting there with one tap", async () => {
+test("a folder the message names is offered first: one tap chooses it, then the thread asks for the session", async () => {
   const buttons = (msg: any) => JSON.parse(msg.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id, e.value]);
   await slack.emit("events_api", slack.dm("UPEPE", "check the DEEP folder, please", { ts: "920.000001" }));
   let msg = await pickerFor("920.000001");
   assert.equal(msg.params.text, "👋 Hi Real! Work in `gamma/deep`?");
   assert.deepEqual(buttons(msg), [
-    ["▶ New session there", "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep", choice: "new" })],
-    ["📂 Choose another", "picker_open_modal", "920.000001"],
+    ["📁 Use deep", "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep" })],
+    ["📂 Choose folder", "picker_open_modal", "920.000001"],
   ]);
   await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: buttons(msg)[0][2] });
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep` → <.*\|Open thread>$/.test(c.params.text)));
+  await answerNew("920.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP folder, please"));
   assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep")));
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep` · new session → <.*\|Open thread>$/.test(c.params.text)));
 
-  // A folder with sessions also offers to continue the latest; several folders, one button each.
-  await slack.emit("events_api", slack.dm("UPEPE", "deep again", { ts: "921.000001" }));
-  msg = await pickerFor("921.000001");
-  const [, cont] = buttons(msg);
-  assert.match(cont[0], /^↩ Continue “.+”$/);
-  const value = JSON.parse(cont[2]);
-  assert.deepEqual([value.thread, value.cwd], ["921.000001", "gamma/deep"]);
-  assert.match(value.choice, /^ses_/); // the session to continue
-  assert.match(JSON.parse(msg.params.blocks)[0].text.text, /\nFound in your message · 1 session there, last used /);
+  // Several folders: one button each, last used first.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
   msg = await pickerFor("922.000001");
   assert.equal(msg.params.text, "👋 Hi Real! Work in one of these folders?");
-  assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["▶ gamma/deep", "▶ alpha", "📂 Choose another"]); // last used first
+  assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["📁 Use deep", "📁 Use alpha", "📂 Choose folder"]);
 });
 
 test("the Home tab shows the agent, defaults for new sessions and recent threads; a default applies to the next new session", async () => {
@@ -763,7 +788,8 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   // The next new session gets it.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
   const msg = await pickerFor("930.000001");
-  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: JSON.stringify({ thread: "930.000001", cwd: "alpha", choice: "new" }) });
+  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: JSON.stringify({ thread: "930.000001", cwd: "alpha" }) });
+  await answerNew("930.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
   assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
 });
