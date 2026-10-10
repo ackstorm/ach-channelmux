@@ -583,6 +583,29 @@ export function createDaemon(cfg: DaemonConfig) {
       .sort();
   }
 
+  // Folders under baseDir, three levels down, whose path contains the query (any case).
+  function search(query: string) {
+    const q = query.toLowerCase();
+    const found: string[] = [];
+    // ponytail: walks the tree on every keystroke; index it if big trees make the search slow.
+    const walk = (rel: string, depth: number) => {
+      let subs: string[];
+      try {
+        subs = subfolders(rel);
+      } catch {
+        return; // unreadable
+      }
+      for (const n of subs) {
+        if (found.length >= 100) return; // Slack shows at most 100 options
+        const r = rel ? join(rel, n) : n;
+        if (r.toLowerCase().includes(q)) found.push(r);
+        if (depth < 3) walk(r, depth + 1);
+      }
+    };
+    walk("", 1);
+    return found;
+  }
+
   // The agent's sessions under baseDir, newest first. The agent may store a session's real path,
   // so paths are mapped back through baseDir's own real path and its top-level symlinks.
   async function sessions() {
@@ -625,8 +648,11 @@ export function createDaemon(cfg: DaemonConfig) {
     blocks: blocks as any[],
   });
 
-  async function folderView(p: Pick) {
-    const blocks: unknown[] = [section(`📁 \`${abs(p.cwd)}\``)];
+  async function folderView(p: Pick, error?: string) {
+    const blocks: unknown[] = [
+      section(`📁 \`${abs(p.cwd)}\``),
+      { type: "actions", block_id: "search", elements: [{ type: "external_select", action_id: "picker_search", placeholder: plain("🔎 Search folders"), min_query_length: 1 }] },
+    ];
     if (p.cwd) blocks.push({ type: "actions", elements: [button(`⬅️ Back to ${nameOf(parentOf(p.cwd))}`, "picker_up", "up")] });
     else {
       const recent = new Map<string, { n: number; when: string }>();
@@ -648,6 +674,16 @@ export function createDaemon(cfg: DaemonConfig) {
     // ponytail: a modal holds 100 blocks; folders past the first 80 are not offered.
     for (const n of subs.slice(0, 80)) blocks.push(section(`📁 ${n}`, button("Open ›", "picker_open", n)));
     if (!subs.length) blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: "No subfolders here." }] });
+    // Enter creates the folder and opens it. The block id follows the folder, so a new one starts empty.
+    blocks.push({
+      type: "input",
+      block_id: `mkdir:${p.cwd}`.slice(0, 255),
+      optional: true,
+      dispatch_action: true,
+      label: plain(`➕ New folder in ${nameOf(p.cwd)}`),
+      element: { type: "plain_text_input", action_id: "picker_mkdir", placeholder: plain("Name, then Enter"), dispatch_action_config: { trigger_actions_on: ["on_enter_pressed"] } },
+    });
+    if (error) blocks.push({ type: "context", elements: [{ type: "plain_text", text: `⚠️ ${error}` }] });
     return modal("picker_folder", "Choose folder", `Use ${nameOf(p.cwd)}`, p, blocks);
   }
 
@@ -982,12 +1018,29 @@ export function createDaemon(cfg: DaemonConfig) {
     const p = pickOf(body);
     await redraw(body, folderView({ ...p, cwd: parentOf(p.cwd) }));
   });
-  app.action("picker_pick", async ({ ack, body, action }) => {
+  // A folder chosen from Last used or from the search.
+  app.action(/^picker_(pick|search)$/, async ({ ack, body, action }) => {
     await ack();
-    const value = (action as any).value as string;
+    const value: string = (action as any).value ?? (action as any).selected_option?.value ?? "";
     const rel = value === "." ? "" : value;
     if (rel.split("/").includes("..") || !isDir(abs(rel))) return;
     await redraw(body, sessionView({ ...pickOf(body), cwd: rel, back: "" }));
+  });
+  app.options("picker_search", async ({ ack, body }) => {
+    const found = search((body as any).value ?? "").filter((r) => r.length <= 150); // Slack's limit on an option's value
+    await ack({ options: found.map((r) => ({ text: plain(r.length > 75 ? `…${r.slice(-74)}` : r), value: r })) });
+  });
+  app.action("picker_mkdir", async ({ ack, body, action }) => {
+    await ack();
+    const p = pickOf(body);
+    const name = (((action as any).value as string) ?? "").trim();
+    if (!/^[^/\\.][^/\\]*$/.test(name)) return void (await redraw(body, folderView(p, `"${name}" can't be a folder here: one name, no slashes, not starting with a dot.`)));
+    try {
+      mkdirSync(join(abs(p.cwd), name), { recursive: true }); // an existing folder just opens
+    } catch (err: any) {
+      return void (await redraw(body, folderView(p, `Couldn't create "${name}": ${err.code ?? err}`)));
+    }
+    await redraw(body, folderView({ ...p, cwd: join(p.cwd, name) }));
   });
   app.action("picker_other", async ({ ack, body }) => {
     await ack();

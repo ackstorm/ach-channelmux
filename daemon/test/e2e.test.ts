@@ -4,7 +4,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
-import { mkdirSync, mkdtempSync, readFileSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
@@ -83,9 +83,9 @@ const views = () => slack.calls.filter((c) => c.method === "views.open" || c.met
 const lastView = () => JSON.parse(views().at(-1)!.params.view);
 const actionValues = (view: any, actionId: string) =>
   view.blocks.flatMap((b: any) => [b.accessory, ...(b.elements ?? [])]).filter((e: any) => e?.action_id === actionId).map((e: any) => e.value);
-async function tap(view: any, action_id: string, value: string) {
+async function tap(view: any, action_id: string, value: string, action: object = { type: "button", value }) {
   const n = views().length;
-  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_tap", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata }, actions: [{ type: "button", action_id, value }] }, true);
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_tap", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata }, actions: [{ action_id, ...action }] }, true);
   await waitFor(() => views().length > n);
   return lastView();
 }
@@ -439,6 +439,28 @@ test("a file-only message (no text) still reaches the agent", async () => {
     files: [file("F3", "data.csv", "text/csv")],
   }));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text?.includes("data.csv")));
+});
+
+test("the picker searches folders under the base, and creates a new one where it is", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "somewhere new", { ts: "910.000001" }));
+  let { view } = await openPicker("910.000001");
+  const suggest = (value: string) =>
+    slack.emit("interactive", { type: "block_suggestion", user: { id: "UPEPE" }, action_id: "picker_search", block_id: "search", value, view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata } }, true) as Promise<any>;
+  assert.deepEqual((await suggest("DEE")).options, [{ text: { type: "plain_text", text: "gamma/deep", emoji: true }, value: "gamma/deep" }]); // through the symlink
+  assert.deepEqual((await suggest("modules")).options, []); // node_modules is skipped
+  view = await tap(view, "picker_search", "", { type: "external_select", selected_option: { value: "gamma/deep" } });
+  assert.equal(view.callback_id, "picker_session");
+  assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "gamma/deep")}\``);
+
+  view = await tap(view, "picker_other", "other");
+  view = await tap(view, "picker_mkdir", "../out");
+  assert.match(view.blocks.at(-1).elements[0].text, /^⚠️ "\.\.\/out" can't be a folder here/);
+  assert.equal(existsSync(join(base, "../out")), false);
+  view = await tap(view, "picker_mkdir", " new one ");
+  assert.ok(statSync(join(base, "new one")).isDirectory());
+  assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "new one")}\``);
+  assert.equal(view.submit.text, "Use new one");
+  assert.equal(view.blocks.at(-1).block_id, "mkdir:new one"); // a fresh input, not the name just typed
 });
 
 test("a $command as a new message gets help, not the folder picker", async () => {
