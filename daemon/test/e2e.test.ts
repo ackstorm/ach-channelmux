@@ -253,7 +253,8 @@ test("Slack's stop button cancels the running turn; a message meanwhile is queue
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
-  await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /^⏹️ Stopped · \d+s$/.test(p.params.text ?? ""))); // a long turn ends with a message, which notifies
+  // A long turn ends with a notice in the main view, which notifies, linking its thread.
+  await waitFor(() => posts.find((p) => !p.params.thread_ts && /^⏹️ Stopped in `beta` · \d+s → <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p100000001\|Open thread>$/.test(p.params.text ?? "")));
 });
 
 test("Send now on a queued notice stops the running turn and the queued message runs", async () => {

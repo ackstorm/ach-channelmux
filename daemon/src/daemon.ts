@@ -563,7 +563,12 @@ export function createDaemon(cfg: DaemonConfig) {
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
         }
         const took = Date.now() - started;
-        if (took >= (cfg.doneNoticeMs ?? 60_000)) await say(t, `${DONE[outcome]} · ${duration(took)}`).catch(() => {});
+        // A long turn ends with a notice in the main view (it notifies; a stream's end does not), linking its thread.
+        if (took >= (cfg.doneNoticeMs ?? 60_000)) {
+          const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
+          const text = `${DONE[outcome]} in \`${basename(t.cwd)}\` · ${duration(took)}${link ? ` → <${link}|Open thread>` : ""}`;
+          await slack.chat.postMessage({ channel: t.channel, text, unfurl_links: false }).catch(() => {});
+        }
         outputs.delete(t.sessionId);
       }
     });
