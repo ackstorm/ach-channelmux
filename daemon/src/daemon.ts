@@ -42,6 +42,15 @@ const NUDGE =
   "You ended your turn without replying to the user. Reply now with the result of what you just did " +
   "(what you found or changed, and anything they need to decide). Do not run the same tools again.";
 
+// A folder's full path for a label. Too long: the middle gives way to "[...]", keeping the start and the
+// folder's own name ("/workspace/local/epepe[...]/ach-project").
+export function short(path: string, max = 60) {
+  if (path.length <= max) return path;
+  const name = basename(path);
+  const head = max - name.length - "[...]/".length;
+  return head > 0 ? `${path.slice(0, head)}[...]/${name}` : `[...]/${name.slice(-(max - "[...]/".length))}`;
+}
+
 export interface DaemonConfig {
   /** Relay base URL; its Web API facade is at /api/. */
   relayUrl: string;
@@ -744,15 +753,9 @@ export function createDaemon(cfg: DaemonConfig) {
   async function folderView(p: Pick, error?: string) {
     const list = await sessions();
     const recent = [...new Set(list.map((x) => x.rel))].slice(0, 10);
-    const when = new Map(list.map((x) => [x.rel, ago(x.updatedAt)] as const).reverse()); // newest wins
-    const label = (rel: string) => {
-      const name = rel || nameOf("");
-      const tail = when.get(rel) ? ` · ${when.get(rel)}` : "";
-      return name.length + tail.length > 75 ? `…${name.slice(-(74 - tail.length))}${tail}` : `${name}${tail}`;
-    };
     const blocks: unknown[] = [section(`📁 \`${abs(p.cwd)}\``)];
     // Slack rejects an empty option value: the base folder ("") goes as ".".
-    if (recent.length) blocks.push({ type: "input", block_id: "recent", optional: true, label: plain("Recent"), element: { type: "static_select", action_id: "recent", placeholder: plain("Pick a recent folder"), options: recent.map((r) => ({ text: plain(label(r)), value: r || "." })) } });
+    if (recent.length) blocks.push({ type: "input", block_id: "recent", optional: true, label: plain("Recent"), element: { type: "static_select", action_id: "recent", placeholder: plain("Pick a recent folder"), options: recent.map((r) => ({ text: plain(short(abs(r))), value: r || "." })) } });
     blocks.push({ type: "input", block_id: "search", optional: true, label: plain("Or search all folders"), element: { type: "external_select", action_id: "picker_search", placeholder: plain("🔎 Type a name…"), min_query_length: 1 } });
     if (p.cwd) blocks.push({ type: "actions", elements: [button(`⬅️ Back to ${nameOf(parentOf(p.cwd))}`, "picker_up", "up")] });
     const subs = subfolders(p.cwd);
@@ -1145,7 +1148,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const at = p.text.indexOf("\n\n[Context from the Slack relay");
     const found = named(at >= 0 ? p.text.slice(0, at) : p.text, await sessions());
     // Slack wants each button's action_id unique in its block: numbered.
-    const use = found.map((cwd, i) => button(`📁 Use ${nameOf(cwd)}`, `picker_suggest_${i}`, JSON.stringify({ thread: p.ts, cwd })));
+    const use = found.map((cwd, i) => button(`📁 ${short(abs(cwd))}`, `picker_suggest_${i}`, JSON.stringify({ thread: p.ts, cwd })));
     const choose = button("📂 Choose folder", "picker_open_modal", p.ts);
     const hi =
       found.length === 1 ? `👋 Hi${to}! Work in \`${found[0]}\`?`

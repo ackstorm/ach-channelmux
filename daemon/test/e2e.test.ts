@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-slack.ts";
-import { createDaemon } from "../src/daemon.ts";
+import { createDaemon, short } from "../src/daemon.ts";
 
 const DM = "D_UPEPE";
 const slack = createMockSlack({ UPEPE: "pepe@example.com" });
@@ -557,7 +557,7 @@ test("Recent folders in the modal; the thread offers previous sessions, continue
   const { msg, view } = await openPicker("300.000001");
   const recent = view.blocks.find((b: any) => b.block_id === "recent").element.options;
   assert.deepEqual(recent.map((o: any) => o.value), ["beta"]);
-  assert.match(recent[0].text.text, /^beta · \d+ min ago$/);
+  assert.equal(recent[0].text.text, join(base, "beta")); // the full path, no time
   assert.deepEqual(await submit(view, { recent: { recent: { type: "static_select", selected_option: { value: "beta" } } } }), { response_action: "clear" });
   const q = await questionIn("300.000001");
   assert.equal(q.params.text, `📁 \`${join(base, "beta")}\`\nNew session, or continue one?`);
@@ -749,7 +749,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
   let msg = await pickerFor("920.000001");
   assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in `gamma/deep`?");
   assert.deepEqual(buttons(msg), [
-    ["📁 Use deep", "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep" })],
+    [`📁 ${join(base, "gamma/deep")}`, "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep" })],
     ["📂 Choose folder", "picker_open_modal", "920.000001"],
   ]);
   await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: buttons(msg)[0][2] });
@@ -763,7 +763,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
   await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
   msg = await pickerFor("922.000001");
   assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in one of these folders?");
-  assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["📁 Use deep", "📁 Use alpha", "📂 Choose folder"]);
+  assert.deepEqual(buttons(msg).map((b: any) => b[0]), [`📁 ${join(base, "gamma/deep")}`, `📁 ${join(base, "alpha")}`, "📂 Choose folder"]);
 });
 
 test("the Home tab shows the agent, defaults for new sessions and recent threads; a default applies to the next new session", async () => {
@@ -805,4 +805,12 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
   assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
   await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
+});
+
+test("a long folder path keeps its start and its name, the middle cut", () => {
+  assert.equal(short("/workspace/local/x"), "/workspace/local/x");
+  const long = `/workspace/local/${"epepe".repeat(10)}/deeper/ach-project`;
+  assert.equal(short(long), `${long.slice(0, 60 - "ach-project".length - 6)}[...]/ach-project`);
+  assert.equal(short(long).length, 60);
+  assert.equal(short(`/w/${"n".repeat(80)}`), `[...]/${"n".repeat(54)}`);
 });
