@@ -124,6 +124,10 @@ export function createDaemon(cfg: DaemonConfig) {
   const inputs = new Map<string, unknown>(); // toolCallId -> rawInput (OpenCode sends it in updates, not in the permission request)
   const history = new Map<string, { who: "You" | "Agent"; text: string; tool?: boolean }[]>(); // session -> its last messages, seen while its history replays
   const configs = new Map<string, acp.SessionConfigOption[]>(); // session -> its settings (model, effort, mode)
+  const setConfigs = (sessionId: string, options: acp.SessionConfigOption[]) => {
+    configs.set(sessionId, options);
+    homeChanged();
+  };
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
   const usage = new Map<string, { used: number; size: number; cost?: { amount: number; currency: string } | null }>(); // session -> context use, cost so far
@@ -152,7 +156,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
       if (update.sessionUpdate === "config_option_update") {
-        configs.set(sessionId, update.configOptions);
+        setConfigs(sessionId, update.configOptions);
         configWaiters.get(sessionId)?.();
       }
       if (update.sessionUpdate === "available_commands_update") agentCommands.set(sessionId, update.availableCommands);
@@ -491,7 +495,7 @@ export function createDaemon(cfg: DaemonConfig) {
       history.delete(t.sessionId);
       p = tools(t.thread)
         .then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
-        .then((r) => r?.configOptions && !configs.has(t.sessionId) && configs.set(t.sessionId, r.configOptions));
+        .then((r) => r?.configOptions && !configs.has(t.sessionId) && setConfigs(t.sessionId, r.configOptions));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
     }
@@ -992,7 +996,7 @@ export function createDaemon(cfg: DaemonConfig) {
       const r = await agent.setSessionConfigOption({ sessionId, configId, value }).catch((err) => void log("default_failed", { configId, error: String(err) }));
       if (r) current = r.configOptions;
     }
-    if (current) configs.set(sessionId, current);
+    if (current) setConfigs(sessionId, current);
   }
 
   // ---------- Home tab: status, defaults for new sessions, recent threads ----------
@@ -1034,8 +1038,18 @@ export function createDaemon(cfg: DaemonConfig) {
       ] as any[],
     };
   }
-  const publishHome = async (user: string) =>
-    slack.views.publish({ user_id: user, view: await homeView() }).catch((err) => log("home_failed", { error: String(err) }));
+  // The menus the Home tab shows: a change redraws it for whoever opened it, as Slack keeps showing its last copy.
+  const homeMenus = () => JSON.stringify(latestSettings().filter((o) => o.type === "select").map((o) => [o.id, choicesOf(o).map((c) => c.value)]));
+  let homeUser: string | undefined;
+  let homeShown = "";
+  const publishHome = async (user: string) => {
+    homeUser = user;
+    homeShown = homeMenus();
+    await slack.views.publish({ user_id: user, view: await homeView() }).catch((err) => log("home_failed", { error: String(err) }));
+  };
+  function homeChanged() {
+    if (homeUser && homeMenus() !== homeShown) void publishHome(homeUser);
+  }
   app.event("app_home_opened", async ({ event }) => {
     if ((event as any).tab === "home") await publishHome((event as any).user);
   });
@@ -1068,7 +1082,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of ${title ? `*${title}*` : "a session"} in \`${t.cwd}\`. Reply in this thread to continue it.` });
     try {
       const { sessionId, configOptions } = await agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers: await tools(root.ts) });
-      if (configOptions) configs.set(sessionId, configOptions);
+      if (configOptions) setConfigs(sessionId, configOptions);
       const copy = { channel: t.channel, thread: root.ts, sessionId, cwd: t.cwd };
       threads[root.ts] = copy;
       bySession.set(sessionId, copy);
@@ -1282,7 +1296,7 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!o || a.selected_option.value === o.currentValue) return;
     try {
       const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
-      configs.set(t.sessionId, r.configOptions);
+      setConfigs(t.sessionId, r.configOptions);
     } catch (err: any) {
       await say(t, `⚠️ Could not change ${o.name}: ${err?.message ?? err}`);
     }

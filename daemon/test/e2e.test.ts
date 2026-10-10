@@ -794,6 +794,13 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => published().length > n);
   assert.equal(JSON.parse(published().at(-1)!.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
 
+  // Settings that change its menus redraw the open Home tab: a loaded session's provisional list, then the full one.
+  const menu = (c: any) => JSON.parse(c.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").accessory.options.map((o: any) => o.text.text);
+  n = published().length;
+  await slack.emit("events_api", slack.dm("UPEPE", "$model", { ts: "920.000009", thread_ts: "920.000001" }));
+  await waitFor(() => published().slice(n).some((c) => menu(c).includes("Model zero")));
+  await waitFor(() => menu(published().at(-1)).includes("Model two"));
+
   // The next new session gets it.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
   const msg = await pickerFor("930.000001");
