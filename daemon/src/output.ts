@@ -30,21 +30,32 @@ export interface ToolInfo {
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
-export const lineCount = (s?: string | null) => (s ? s.split("\n").length : 0);
+// A text's lines; its final newline ends the last line, it does not start another.
+const linesOf = (s?: string | null) => (s ? s.replace(/\n$/, "").split("\n") : []);
+export const lineCount = (s?: string | null) => linesOf(s).length;
 // A card's output renders Markdown when expanded (```diff in colour, verified on Slack); fences
 // are closed after clipping so a cut never leaves one open.
 const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(body.replaceAll("\`\`\`", "ˋˋˋ"), max)}\n\`\`\``;
 const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) =>
-  [...(oldText ? oldText.split("\n").map((l) => `-${l}`) : []), ...(newText ? newText.split("\n").map((l) => `+${l}`) : [])].join("\n");
+  [...linesOf(oldText).map((l) => `-${l}`), ...linesOf(newText).map((l) => `+${l}`)].join("\n");
 
 /** Turn diffs longer than this (what a card shows) also go to the thread as a changes.diff snippet. */
 export const DIFF_IN_CARD = 400;
 
-/** The full diff of a finished edit, or undefined: "--- path / +++ path" then -/+ lines per file. */
-export function fullDiff(u: any, cwd: string): string | undefined {
-  if (u.status !== "completed") return undefined;
-  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+/** A finished edit's diffs. opencode's write reports none: its input (path and whole content) stands for one. */
+export function editsOf(u: any, input: any): { path: string; oldText?: string | null; newText?: string | null }[] {
+  if (u.status !== "completed") return [];
   const diffs = (u.content ?? []).filter((c: any) => c.type === "diff");
+  const path = input?.filePath ?? input?.path;
+  // ponytail: an overwritten file counts as all new lines; its old content is not reported.
+  if (!diffs.length && typeof input?.content === "string" && typeof path === "string") return [{ path, oldText: null, newText: input.content }];
+  return diffs;
+}
+
+/** The full diff of a finished edit, or undefined: "--- path / +++ path" then -/+ lines per file. */
+export function fullDiff(u: any, cwd: string, input?: any): string | undefined {
+  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+  const diffs = editsOf(u, input);
   if (!diffs.length) return undefined;
   return diffs.map((d: any) => `--- ${rel(d.path)}\n+++ ${rel(d.path)}\n${diffLines(d.oldText, d.newText)}`).join("\n");
 }

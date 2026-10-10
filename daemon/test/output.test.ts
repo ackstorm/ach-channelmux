@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOutput, describeTool, splitMarkdown } from "../src/output.ts";
+import { createOutput, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
   const calls: { method: string; params: any }[] = [];
@@ -114,7 +114,11 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   const read = describeTool({ title: "read", status: "completed", locations: [{ path: "/w/proj/calc.py" }], content: [{ type: "content", content: { type: "text", text: "1: def add(a, b):" } }] }, { path: "calc.py" }, cwd);
   assert.deepEqual(read, { title: "read calc.py", status: "completed", output: "```\n1: def add(a, b):\n```" });
   const edit = describeTool({ title: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Edited calc.py" } }, { type: "diff", path: "/w/proj/calc.py", oldText: "    return a - b", newText: "    return a + b\n" }] }, { path: "calc.py", oldString: "x", newString: "y" }, cwd);
-  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +2 −1\n```diff\n-    return a - b\n+    return a + b\n+\n```" });
+  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +1 −1\n```diff\n-    return a - b\n+    return a + b\n```" });
+  // opencode's write reports no diff: its input stands for one (a new file's lines).
+  const write = { title: "write", kind: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Created file successfully: hello.txt" } }] };
+  assert.equal(fullDiff(write, cwd, { filePath: "/w/proj/hello.txt", content: "hola\nadiós\n" }), "--- hello.txt\n+++ hello.txt\n+hola\n+adiós");
+  assert.equal(fullDiff({ ...write, status: "in_progress" }, cwd, { filePath: "/w/proj/hello.txt", content: "hola\n" }), undefined);
   const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
   assert.deepEqual(shell, { title: "python3 t.py", status: "failed", output: "exit 1\n```\nTraceback\n```" }); // shown as an error card
   assert.equal(describeTool({ status: "completed" }, { command: "ls" }, cwd).title, "ls"); // the final update carries no title

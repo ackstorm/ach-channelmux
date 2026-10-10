@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { DIFF_IN_CARD, createOutput, describeTool, fullDiff, lineCount, type Output } from "./output.ts";
+import { DIFF_IN_CARD, createOutput, describeTool, editsOf, fullDiff, lineCount, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -171,11 +171,11 @@ export function createDaemon(cfg: DaemonConfig) {
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         const cwd = bySession.get(sessionId)?.cwd ?? "";
         void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), cwd));
-        const diff = fullDiff(update, cwd);
+        const diff = fullDiff(update, cwd, inputs.get(update.toolCallId));
         if (diff) {
           turnDiffs.set(sessionId, [...(turnDiffs.get(sessionId) ?? []), diff]);
           const files = turnEdits.get(sessionId) ?? new Map<string, [number, number]>();
-          for (const d of (update as any).content.filter((c: any) => c.type === "diff")) {
+          for (const d of editsOf(update, inputs.get(update.toolCallId))) {
             const [added, removed] = files.get(d.path) ?? [0, 0];
             files.set(d.path, [added + lineCount(d.newText), removed + lineCount(d.oldText)]);
           }
