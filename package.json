@@ -1,6 +1,6 @@
 {
   "name": "ach-channelmux",
-  "version": "0.2.40",
+  "version": "0.2.41",
   "description": "Slack relay: one Slack app, a personal coding agent per user",
   "private": true,
   "license": "MIT",
