@@ -990,20 +990,29 @@ export function createDaemon(cfg: DaemonConfig) {
     const recent = Object.values(threads).sort((a, b) => Number(b.thread) - Number(a.thread)).slice(0, 5);
     const rows = await Promise.all(recent.map(async (t) => {
       const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
-      return `📁 \`${basename(t.cwd)}\` · ${titles.get(t.sessionId) || "Untitled"}${link ? ` · <${link}|Open>` : ""}`;
+      const title = (titles.get(t.sessionId) || "Untitled").replace(/[<>|]/g, " "); // they would break the link
+      const when = ago(new Date(Number(t.thread) * 1000).toISOString());
+      return `📁 *${basename(t.cwd)}* · ${link ? `<${link}|${title}>` : title}${when ? ` · ${when}` : ""}`;
     }));
     const note = (text: string) => ({ type: "context", elements: [{ type: "mrkdwn", text }] });
+    const header = (text: string) => ({ type: "header", text: plain(text) });
+    // A default shows by its short name (no provider prefix), the menu only changes it.
+    const chosen = (o: any) => {
+      const c = choicesOf(o).find((x) => x.value === defaults[o.id]);
+      return c ? `\`${c.name.replace(/^[^/]+\//, "")}\`` : "agent default";
+    };
     return {
       type: "home" as const,
       blocks: [
-        section(`*Your agent*\n🟢 Online · \`${basename(cfg.agentCmd[0])}\` on \`${hostname()}\` · folders under \`${cfg.baseDir}\``),
-        { type: "divider" },
-        section("*Defaults for new sessions*"),
+        header("Your agent"),
+        section(`🟢 Online · ${basename(cfg.agentCmd[0])} · ${cfg.baseDir}`),
+        note(`on ${hostname()}`),
+        header("Defaults for new sessions"),
         ...(options.length
-          ? options.map((o) => section(o.name, { ...settingMenu({ ...o, currentValue: defaults[o.id] }), action_id: `home_default:${o.id}`, placeholder: plain("The agent's default") }))
+          ? options.map((o) => section(`*${o.name}*   ${chosen(o)}`, { ...settingMenu(o), action_id: `home_default:${o.id}`, initial_option: undefined, placeholder: plain("Change…") }))
           : [note("Start a thread first: the agent's settings show up here.")]),
-        { type: "divider" },
-        section(`*Recent threads*\n${rows.join("\n") || "None yet."}`),
+        header("Recent threads"),
+        section(rows.join("\n") || "None yet."),
         { type: "divider" },
         note("Message me to start · each thread is one agent session · `$help` in a thread lists its commands"),
       ] as any[],

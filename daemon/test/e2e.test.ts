@@ -773,16 +773,18 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => published().length > n);
   let home = JSON.parse(published().at(-1)!.params.view);
   assert.equal(published().at(-1)!.params.user_id, "UPEPE");
-  assert.match(home.blocks[0].text.text, /^\*Your agent\*\n🟢 Online · `node` on `.+` · folders under `.+`$/);
+  assert.deepEqual(home.blocks.filter((b: any) => b.type === "header").map((b: any) => b.text.text), ["Your agent", "Defaults for new sessions", "Recent threads"]);
+  assert.equal(home.blocks[1].text.text, `🟢 Online · node · ${base}`);
   const model = home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model");
-  assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["Model", undefined, "The agent's default"]);
-  assert.match(home.blocks.find((b: any) => b.text?.text?.startsWith("*Recent threads*")).text.text, /\n📁 `deep` · .+ · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|Open>/);
+  assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["*Model*   agent default", undefined, "Change…"]);
+  const recent = home.blocks[home.blocks.findIndex((b: any) => b.text?.text === "Recent threads") + 1].text.text;
+  assert.match(recent, /📁 \*deep\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|[^>]+>/); // the title is the link
 
   n = published().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, view: { id: "V_HOME", type: "home" }, actions: [{ type: "static_select", action_id: "home_default:model", selected_option: { value: "m2" } }] }, true);
   await waitFor(() => published().length > n);
   home = JSON.parse(published().at(-1)!.params.view);
-  assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").accessory.initial_option.value, "m2");
+  assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
   assert.deepEqual(JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).defaults, { model: "m2" });
 
   // The next new session gets it.
