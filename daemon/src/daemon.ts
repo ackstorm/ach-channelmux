@@ -1102,7 +1102,9 @@ export function createDaemon(cfg: DaemonConfig) {
     const list = await sessions();
     const at = p.text.indexOf("\n\n[Context from the Slack relay");
     const found = named(at >= 0 ? p.text.slice(0, at) : p.text, list);
-    const go = (text: string, cwd: string, choice: string) => button(text, "picker_suggest", JSON.stringify({ thread: p.ts, cwd, choice }));
+    // Slack wants each button's action_id unique in its block: numbered.
+    let n = 0;
+    const go = (text: string, cwd: string, choice: string) => button(text, `picker_suggest_${n++}`, JSON.stringify({ thread: p.ts, cwd, choice }));
     const choose = button(found.length ? "📂 Choose another" : "📂 Choose folder", "picker_open_modal", p.ts);
     let hi = `👋 Hi${to}! Pick where to work: a folder, then a new session or one you already have there.`;
     let hint = "";
@@ -1167,7 +1169,7 @@ export function createDaemon(cfg: DaemonConfig) {
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, picker: b.message.ts, cwd: "" }) });
   });
   // A folder the first message named: starts there without the modal.
-  app.action("picker_suggest", async ({ ack, body, action }) => {
+  app.action(/^picker_suggest_\d+$/, async ({ ack, body, action }) => {
     await ack();
     const b = body as any;
     const { thread, cwd, choice } = JSON.parse((action as any).value);

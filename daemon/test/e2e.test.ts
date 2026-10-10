@@ -717,10 +717,10 @@ test("a folder the message names is offered first, starting there with one tap",
   let msg = await pickerFor("920.000001");
   assert.equal(msg.params.text, "👋 Hi Real! Work in `gamma/deep`?");
   assert.deepEqual(buttons(msg), [
-    ["▶ New session there", "picker_suggest", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep", choice: "new" })],
+    ["▶ New session there", "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep", choice: "new" })],
     ["📂 Choose another", "picker_open_modal", "920.000001"],
   ]);
-  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest", value: buttons(msg)[0][2] });
+  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: buttons(msg)[0][2] });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP folder, please"));
   assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep")));
   await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep` · new session → <.*\|Open thread>$/.test(c.params.text)));
@@ -763,7 +763,7 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   // The next new session gets it.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
   const msg = await pickerFor("930.000001");
-  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest", value: JSON.stringify({ thread: "930.000001", cwd: "alpha", choice: "new" }) });
+  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: JSON.stringify({ thread: "930.000001", cwd: "alpha", choice: "new" }) });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
   assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
 });

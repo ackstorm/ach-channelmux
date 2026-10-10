@@ -64,6 +64,11 @@ export function createMockSlack(users: Record<string, string>) {
 
     // Like Slack: a message is text (with blocks) or markdown_text, never both.
     if (method === "chat.postMessage" && params.text && params.markdown_text) return send({ ok: false, error: "markdown_text_conflict" });
+    // Like Slack: an action_id is unique within its block.
+    for (const b of params.blocks ? JSON.parse(params.blocks) : []) {
+      const ids = (b.elements ?? []).map((e: any) => e.action_id).filter(Boolean);
+      if (new Set(ids).size < ids.length) return send({ ok: false, error: "invalid_blocks" });
+    }
     switch (method) {
       case "apps.connections.open":
         if (token !== APP_TOKEN) return send({ ok: false, error: "invalid_auth" });
