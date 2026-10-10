@@ -161,6 +161,8 @@ jobs:
           node-version: '22'
           cache: npm
       - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2 # pinned: a new Bun may lack a cross-compile target for days (1.4.3 had no arm64)
       - name: Build daemon binaries
         run: npm ci --ignore-scripts && make daemon-bin
 
