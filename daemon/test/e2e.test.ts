@@ -757,6 +757,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
   await answerNew("920.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP folder, please"));
   assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep")));
+  await turnEnded("920.000001");
 
   // Several folders: one button each, last used first.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
@@ -803,4 +804,5 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await answerNew("930.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
   assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
+  await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
