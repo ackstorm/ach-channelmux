@@ -209,9 +209,9 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     tasks.set(id, task);
     afterTool = true;
     quiet = true;
-    // Slack adds a card's sources to those it already shows: send them only when they change.
-    const { sources: _, ...withoutSources } = task;
-    const chunk = same("sources") ? withoutSources : task;
+    // Slack appends a card's details, output and sources to what it already shows: send them only when they change.
+    const chunk = { ...task };
+    for (const k of ["details", "output", "sources"]) if (same(k)) delete chunk[k];
     return run(async () => {
       await flush();
       await send([chunk]);

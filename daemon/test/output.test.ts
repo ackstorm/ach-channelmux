@@ -148,7 +148,7 @@ test("a card's details and output reach the stream, and a repeated identical upd
   await out.tool("x", { status: "completed", output: "a.txt" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", "$ ls", "a.txt"]]);
+  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", undefined, "a.txt"]]);
 });
 
 test("the model's thinking is one card, opened when it starts and filled when text follows", async () => {
@@ -177,13 +177,14 @@ test("a long turn sends its processing status again before Slack drops it", asyn
   assert.ok(n >= 3, `processing sent ${n} times`);
 });
 
-test("a card's sources go out once: Slack adds them to those it shows", async () => {
+test("a card's sources, details and output go out once: Slack adds them to those it shows", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
   const sources = [{ type: "url" as const, text: "https://e.com", url: "https://e.com" }];
-  await out.tool("x", { title: "webfetch", status: "in_progress", sources });
-  await out.tool("x", { status: "completed", output: "Example", sources });
+  await out.tool("x", { title: "webfetch", status: "in_progress", details: "GET", sources });
+  await out.tool("x", { status: "completed", output: "Example", details: "GET", sources });
+  await out.tool("x", { status: "failed", output: "Example" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => c.sources?.length), [1, undefined]);
+  assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined]]);
 });
