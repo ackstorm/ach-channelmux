@@ -131,6 +131,8 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
   const code = describeTool({ title: "execute", kind: "other", status: "completed", rawOutput: { metadata: { error: true } }, content: [{ type: "content", content: { type: "text", text: "Unknown tool" } }] }, { code: "await x()" }, cwd);
   assert.deepEqual(code, { title: "execute", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" });
+  const calls = 'await tools.slack["send_voice"]({ text: "hi" })\nawait tools.github.list_issues({})\nawait tools.slack.send_voice({})';
+  assert.deepEqual(describeTool({ title: "execute", kind: "other", status: "pending" }, { code: calls }, cwd), { title: "slack.send_voice, github.list_issues", status: "pending", details: calls });
   const fetch = describeTool({ title: "webfetch", kind: "fetch", status: "pending" }, { url: "https://example.com/a", format: "markdown" }, cwd);
   assert.deepEqual(fetch, { title: "webfetch", status: "pending", sources: [{ type: "url", text: "https://example.com/a", url: "https://example.com/a" }] });
   const heredoc = "cat << 'EOF' > f.py\ndef f():\n    return 1\nEOF";

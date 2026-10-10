@@ -65,6 +65,9 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   const short = command !== undefined && !command.includes("\n") && command.length <= 100;
   if (command) title = short ? command : (typeof i.description === "string" && i.description) || `${command.split("\n")[0]} …`;
   else if (title && subject && u.kind !== "execute" && /^\w+$/.test(title)) title = `${title} ${subject}`; // "read" -> "read calc.py"
+  // opencode's code tool ("execute") runs code that calls MCP tools: titled by the tools it calls.
+  const called = typeof i.code === "string" ? [...i.code.matchAll(/\btools\.(\w+)(?:\.(\w+)|\[["'](\w+)["']\])/g)].map((m) => `${m[1]}.${m[2] ?? m[3]}`) : [];
+  if (called.length) title = [...new Set(called)].join(", ");
   if (child && title) title = `↳ ${title}`;
   const sources = typeof i.url === "string" && /^https?:\/\//.test(i.url) ? [{ type: "url" as const, text: clip(i.url, DETAILS_MAX), url: i.url }] : undefined;
   let details: string | undefined;
