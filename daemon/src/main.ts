@@ -14,6 +14,13 @@
 //   AUDIO_STT_HEADER       header carrying the key (default Authorization, sent as "Bearer <key>")
 //   AUDIO_STT_KEY          the key, or
 //   AUDIO_STT_KEY_COMMAND  a shell command printing it, run for each clip (for short-lived tokens)
+//
+// The agent gets a send_voice tool (text to an audio clip in the thread) when AUDIO_TTS_BASE_URL is set:
+//   AUDIO_TTS_BASE_URL     OpenAI-compatible API, e.g. https://llm.example.com/v1
+//   AUDIO_TTS_MODEL        its model (default tts-1)
+//   AUDIO_TTS_VOICE        its voice (default alloy; Gemini models take names like Kore or Puck)
+//   AUDIO_TTS_PROMPT       how to speak, put before the text, e.g. "Say it cheerfully"
+//   AUDIO_TTS_HEADER, AUDIO_TTS_KEY, AUDIO_TTS_KEY_COMMAND   as for STT
 
 import { execFile } from "node:child_process";
 import { homedir } from "node:os";
@@ -27,11 +34,15 @@ const env = (k: string, d?: string) => {
   return v;
 };
 
-const sttKey = async () =>
-  process.env.AUDIO_STT_KEY_COMMAND
-    ? (await promisify(execFile)("sh", ["-c", process.env.AUDIO_STT_KEY_COMMAND])).stdout.trim()
-    : env("AUDIO_STT_KEY", "");
-const sttHeader = env("AUDIO_STT_HEADER", "Authorization");
+// The auth header for AUDIO_STT_* or AUDIO_TTS_*: a key, or a command printing one, run for each call.
+const audioHeaders = (prefix: string) => {
+  const header = env(`${prefix}_HEADER`, "Authorization");
+  const command = process.env[`${prefix}_KEY_COMMAND`];
+  return async (): Promise<Record<string, string>> => {
+    const key = command ? (await promisify(execFile)("sh", ["-c", command])).stdout.trim() : env(`${prefix}_KEY`, "");
+    return key ? { [header]: header.toLowerCase() === "authorization" ? `Bearer ${key}` : key } : {};
+  };
+};
 
 const daemon = createDaemon({
   relayUrl: env("RELAY_URL"),
@@ -45,10 +56,16 @@ const daemon = createDaemon({
         model: env("AUDIO_STT_MODEL", "whisper-1"),
         language: process.env.AUDIO_STT_LANGUAGE,
         prompt: process.env.AUDIO_STT_PROMPT,
-        headers: async () => {
-          const key = await sttKey();
-          return key ? { [sttHeader]: sttHeader.toLowerCase() === "authorization" ? `Bearer ${key}` : key } : {};
-        },
+        headers: audioHeaders("AUDIO_STT"),
+      }
+    : undefined,
+  tts: process.env.AUDIO_TTS_BASE_URL
+    ? {
+        url: process.env.AUDIO_TTS_BASE_URL,
+        model: env("AUDIO_TTS_MODEL", "tts-1"),
+        voice: env("AUDIO_TTS_VOICE", "alloy"),
+        prompt: process.env.AUDIO_TTS_PROMPT,
+        headers: audioHeaders("AUDIO_TTS"),
       }
     : undefined,
   // Without its agent the daemon is useless: exit and let the supervisor restart both.

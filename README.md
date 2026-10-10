@@ -77,6 +77,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Files in | Fetched through the relay's proxy and saved to a temp folder; the prompt gets their paths, so the agent opens a file (image or not) only when it needs it. A voice clip comes as Slack's own transcript (its preview, or the whole WebVTT, waiting up to 15 s while Slack transcribes); without one, the `AUDIO_STT_*` model transcribes it when set, else (or when it fails) the audio is saved like any file. |
 | Questions | An `ask_user(question, options?)` tool on the same MCP server: the question shows with up to 5 answer buttons; a tap or the user's next message in the thread is the answer the tool returns. `$stop` answers it as stopped. |
 | Files out | Each session gets a `send_file(path, comment?)` tool from a small MCP server the daemon runs on `127.0.0.1` (per-process secret in the URL); it uploads the file (≤ 50 MB) to the thread. Needs an agent with HTTP MCP support (`opencode acp` has it). |
+| Voice out | With `AUDIO_TTS_BASE_URL` set, the agent also gets `send_voice(text)`: the text goes to the TTS model (with `AUDIO_TTS_PROMPT` before it) and the audio is uploaded to the thread as `voice.wav` or `voice.mp3`. |
 | Permissions | The agent's permission requests become buttons with its options, showing the command or path it wants to run. |
 | Restarts | Thread → session map in `STATE_FILE`; after a restart a thread reloads its session (`session/load`) without re-posting the history. |
 
@@ -90,6 +91,10 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | `AUDIO_STT_MODEL` | Default `whisper-1`. `AUDIO_STT_LANGUAGE` (e.g. `es`) and `AUDIO_STT_PROMPT` (names and terms to spell right) are optional. |
 | `AUDIO_STT_HEADER` | Header carrying the key. Default `Authorization`, sent as `Bearer <key>`. |
 | `AUDIO_STT_KEY`, `AUDIO_STT_KEY_COMMAND` | The key, or a shell command printing it, run for each clip (for short-lived tokens). |
+| `AUDIO_TTS_BASE_URL` | OpenAI-compatible API (its `/audio/speech`) for the `send_voice` tool. Unset: no tool. |
+| `AUDIO_TTS_MODEL`, `AUDIO_TTS_VOICE` | Default `tts-1` and `alloy`. Gemini models take voices like `Kore` or `Puck`. |
+| `AUDIO_TTS_PROMPT` | How to speak, put before the text (`"<prompt>: <text>"`), which Gemini models follow; OpenAI's `instructions` field is not sent. |
+| `AUDIO_TTS_HEADER`, `AUDIO_TTS_KEY`, `AUDIO_TTS_KEY_COMMAND` | As for STT. |
 
 Each release ships `ach-channelmux-daemon-linux-{amd64,arm64}` (glibc) and `checksums.txt`.
 `examples/coder/` is a complete example for Coder workspaces, including how to resolve

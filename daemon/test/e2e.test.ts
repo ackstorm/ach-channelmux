@@ -30,13 +30,20 @@ const GW_PORT = await new Promise<number>((r) => {
 });
 const GW = `http://127.0.0.1:${GW_PORT}`;
 
-// A speech-to-text API: answers with a transcript, or fails while sttDown is set.
+// A speech API: transcripts (failing while sttDown is set) and speech (failing while ttsDown is set).
 const sttCalls: { url?: string; auth?: string; body: string }[] = [];
+const ttsCalls: { auth?: string; body: any }[] = [];
 let sttDown = false;
+let ttsDown = false;
 const stt = createHttpServer((req, res) => {
   let body = "";
   req.on("data", (c) => (body += c));
   req.on("end", () => {
+    if (req.url === "/v1/audio/speech") {
+      ttsCalls.push({ auth: req.headers.authorization, body: JSON.parse(body) });
+      if (ttsDown) return void res.writeHead(500).end();
+      return void res.writeHead(200, { "content-type": "audio/wav" }).end("RIFF fake wav");
+    }
     sttCalls.push({ url: req.url, auth: req.headers.authorization, body });
     if (sttDown) return void res.writeHead(500).end();
     res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ text: " hello from the model " }));
@@ -61,7 +68,7 @@ async function waitFor<T>(fn: () => T | undefined | false, ms = 3000): Promise<T
   }
   assert.fail("timed out waiting for condition");
 }
-const newDaemon = () =>
+const newDaemon = (over: Partial<Parameters<typeof createDaemon>[0]> = {}) =>
   createDaemon({
     relayUrl: GW,
     token: "tok-pepe",
@@ -71,6 +78,8 @@ const newDaemon = () =>
     log: (msg, extra) => void logged.push({ msg, ...(extra as object) }),
     doneNoticeMs: 100, // the "wait" turns run longer: they end with a notice
     stt: { url: `http://127.0.0.1:${(stt.address() as any).port}/v1/`, model: "stt-test", language: "es", headers: async () => ({ authorization: "Bearer k-1" }) },
+    tts: { url: `http://127.0.0.1:${(stt.address() as any).port}/v1`, model: "tts-test", voice: "Puck", prompt: "Like a pirate", headers: async () => ({ authorization: "Bearer k-2" }) },
+    ...over,
   });
 const calls = (method: string) => slack.calls.filter((c) => c.method === method);
 const replies = (thread: string) => posts.filter((p) => p.params.thread_ts === thread && p.params.markdown_text).map((p) => p.params.markdown_text);
@@ -373,7 +382,7 @@ test("a voice clip reaches the agent as Slack's transcript, waited for while Sla
 test("the agent sends a file to the thread with the send_file tool, without our token reaching the upload URL", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000011", thread_ts: "100.000001" }));
   const sent = await waitFor(() => agentLog().find((e) => e.m === "sent"));
-  assert.deepEqual(sent.tools, ["send_file", "ask_user"]);
+  assert.deepEqual(sent.tools, ["send_file", "ask_user", "send_voice"]);
   assert.equal(sent.result, "Sent report.txt to the user.");
   const done = calls("files.completeUploadExternal").at(-1)!;
   assert.deepEqual([done.params.channel_id, done.params.thread_ts, done.params.initial_comment], [DM, "100.000001", "here it is"]);
@@ -429,6 +438,34 @@ test("a voice clip Slack did not transcribe goes to the stt model, and is saved 
   assert.match(q.text, /^\[Attached file saved at \S+\/audio_message\.m4a\]$/);
   assert.ok(logged.some((l) => l.msg === "stt_failed" && l.file === "FV4"));
   sttDown = false;
+});
+
+test("the agent's send_voice tool speaks through the tts model into the thread; without tts there is no tool", async () => {
+  const spoke = (n: number) => waitFor(() => agentLog().filter((e) => e.m === "spoke")[n]);
+  let n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "speak all done, captain", { ts: "100.000028", thread_ts: "100.000001" }));
+  assert.deepEqual(await spoke(0), { m: "spoke", tools: ["send_file", "ask_user", "send_voice"], result: "Sent the voice message to the user." });
+  assert.deepEqual(ttsCalls, [{ auth: "Bearer k-2", body: { model: "tts-test", voice: "Puck", input: "Like a pirate: all done, captain" } }]);
+  const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
+  assert.equal(get.params.filename, "voice.wav");
+  const done = since(n).find((c) => c.method === "files.completeUploadExternal")!;
+  assert.equal(done.params.thread_ts, "100.000001");
+  assert.equal(slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body, "RIFF fake wav");
+
+  ttsDown = true;
+  await slack.emit("events_api", slack.dm("UPEPE", "speak again", { ts: "100.000029", thread_ts: "100.000001" }));
+  const failed = await spoke(1);
+  assert.deepEqual([failed.result, failed.isError], ["Could not send the voice message: speech service: HTTP 500", true]);
+  ttsDown = false;
+
+  await daemon.stop();
+  daemon = newDaemon({ tts: undefined });
+  await daemon.start();
+  await slack.emit("events_api", slack.dm("UPEPE", "speak nobody hears", { ts: "100.000030", thread_ts: "100.000001" }));
+  assert.deepEqual((await spoke(2)).tools, ["send_file", "ask_user"]);
+  await daemon.stop();
+  daemon = newDaemon();
+  await daemon.start();
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {

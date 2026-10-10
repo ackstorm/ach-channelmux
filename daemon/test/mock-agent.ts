@@ -114,6 +114,15 @@ new acp.AgentSideConnection(
           const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
           const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask_user", arguments: { question: "Which one?", options: ["Red", "Blue"] } } }) });
           await say(sessionId, `answer: ${(await r.json()).result.content[0].text}`);
+        } else if (text.startsWith("speak ")) {
+          // Like an agent calling the daemon's send_voice MCP tool, when the daemon offers it.
+          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const rpc = async (method: string, params: unknown) =>
+            (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()).result;
+          const tools = (await rpc("tools/list", {})).tools.map((t: any) => t.name);
+          const r = tools.includes("send_voice") ? await rpc("tools/call", { name: "send_voice", arguments: { text: text.slice(6) } }) : undefined;
+          log({ m: "spoke", tools, result: r?.content[0].text, isError: r?.isError });
+          await say(sessionId, "Spoke.");
         } else if (text === "think") {
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Weighing it." } } });
           await say(sessionId, "Thought about it.");

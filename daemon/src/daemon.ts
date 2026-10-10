@@ -54,6 +54,8 @@ export interface DaemonConfig {
   stateFile: string;
   /** Speech to text for voice clips Slack did not transcribe: an OpenAI-compatible API (its /audio/transcriptions). */
   stt?: { url: string; model: string; language?: string; prompt?: string; headers: () => Promise<Record<string, string>> };
+  /** Text to speech for the agent's send_voice tool: an OpenAI-compatible API (its /audio/speech). */
+  tts?: { url: string; model: string; voice: string; prompt?: string; headers: () => Promise<Record<string, string>> };
   /** Called when the agent process exits on its own. */
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
@@ -313,6 +315,18 @@ export function createDaemon(cfg: DaemonConfig) {
     },
   };
 
+  const SEND_VOICE = {
+    name: "send_voice",
+    description:
+      "Speak a short message to the user as an audio clip in this Slack thread. Use it when the user asks for " +
+      "audio or talks to you with voice notes; keep it under a minute. Your text replies reach the user without it.",
+    inputSchema: {
+      type: "object",
+      properties: { text: { type: "string", description: "What to say, as plain spoken text (no Markdown)" } },
+      required: ["text"],
+    },
+  };
+
   // ask_user: the question waits per thread; a button or the user's next message in the thread answers it.
   const questions = new Map<string, { text: string; ts?: string; resolve: (answer: string) => void }>();
   async function ask(t: Thread, args: { question?: string; options?: unknown }) {
@@ -373,6 +387,24 @@ export function createDaemon(cfg: DaemonConfig) {
     return `Sent ${basename(path)} to the user.`;
   }
 
+  async function sendVoice(t: Thread, args: { text?: string }) {
+    const { url, model, voice, prompt, headers } = cfg.tts!;
+    const text = String(args.text ?? "").trim();
+    if (!text) throw new Error("nothing to say");
+    // The style goes before the text: models like Gemini's take it there (they ignore OpenAI's instructions).
+    const res = await fetch(`${url.replace(/\/$/, "")}/audio/speech`, {
+      method: "POST",
+      headers: { ...(await headers()), "content-type": "application/json" },
+      body: JSON.stringify({ model, voice, input: prompt ? `${prompt}: ${text}` : text }),
+      signal: AbortSignal.timeout(120_000),
+    });
+    if (!res.ok) throw new Error(`speech service: HTTP ${res.status}`);
+    // ponytail: wav or mp3 (OpenAI's default) only; map more types if a model sends them.
+    const ext = res.headers.get("content-type")?.includes("wav") ? "wav" : "mp3";
+    await upload(t, `voice.${ext}`, Buffer.from(await res.arrayBuffer()));
+    return "Sent the voice message to the user.";
+  }
+
   const mcp = createServer(async (req, res) => {
     const [, root, key, thread] = (req.url ?? "").split("/");
     const t = threads[thread];
@@ -396,7 +428,7 @@ export function createDaemon(cfg: DaemonConfig) {
       return reply({ result: { protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "slack", version: "1" } } });
     }
     if (msg.method === "ping") return reply({ result: {} });
-    if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE, ASK_USER] } });
+    if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE, ASK_USER, ...(cfg.tts ? [SEND_VOICE] : [])] } });
     if (msg.method === "tools/call" && p.name === "ask_user") {
       try {
         return reply({ result: { content: [{ type: "text", text: await ask(t, p.arguments ?? {}) }] } });
@@ -411,6 +443,14 @@ export function createDaemon(cfg: DaemonConfig) {
       } catch (err: any) {
         log("send_file_failed", { error: err?.message ?? String(err) });
         return reply({ result: { content: [{ type: "text", text: `Could not send the file: ${err?.message ?? err}` }], isError: true } });
+      }
+    }
+    if (msg.method === "tools/call" && p.name === "send_voice" && cfg.tts) {
+      try {
+        return reply({ result: { content: [{ type: "text", text: await sendVoice(t, p.arguments ?? {}) }] } });
+      } catch (err: any) {
+        log("send_voice_failed", { error: err?.message ?? String(err) });
+        return reply({ result: { content: [{ type: "text", text: `Could not send the voice message: ${err?.message ?? err}` }], isError: true } });
       }
     }
     reply({ error: { code: -32601, message: `unknown method ${msg.method}` } });
