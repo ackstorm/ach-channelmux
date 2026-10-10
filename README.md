@@ -16,16 +16,16 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 
 | Concern | Behaviour |
 |---|---|
-| Inbound | Routes only 1:1 DMs from humans (`channel_type=im`, no `bot_id`, no subtype except `file_share`, plus their own edits as `message_changed` when the text changed), interactive payloads and `agent_session_stopped` events, by Slack user id. Channels, group DMs and bot messages are dropped. |
+| Inbound | Routes only 1:1 DMs from humans (`channel_type=im`, no `bot_id`, no subtype except `file_share`, plus their own edits as `message_changed` when the text changed), interactive payloads, `agent_session_stopped` events and `app_home_opened` for the Home tab, by Slack user id. Channels, group DMs and bot messages are dropped. |
 | Identity | A daemon presents a token as its Slack token. The relay resolves it with a configurable endpoint: `GET $AUTH_RESOLVER_URL` with the token in header `$AUTH_RESOLVER_HEADER`; the owner's email is read from the JSON reply at `$AUTH_RESOLVER_EMAIL_FIELD` (dotted path). 401/403 or no email: rejected; other errors: HTTP 500, the daemon retries. Cached 5 min, keyed by a hash; tokens are never logged. Email → Slack user (`users.lookupByEmail`) → DM (`conversations.open`). |
 | Exclusivity | First connection per user is primary. Further connections are parked as hot standby; the oldest is promoted when the primary drops. |
-| Outbound | Web API facade at `/api/<method>`. `auth.test`, `team.info`, `files.getUploadURLExternal` pass through; `chat.*` (incl. `chat.getPermalink`), `chat.startStream`/`appendStream`/`stopStream`, `reactions.*`, `conversations.replies/info`, `assistant.threads.setStatus`, `agents.sessions.setStatus`/`rename`, `files.completeUploadExternal` must target the owner's DM; `users.info` only the owner; `views.open` needs a `trigger_id` delivered to that owner; `views.update` a known `view_id`; `conversations.list` returns empty. Everything else: `restricted_action`. |
+| Outbound | Web API facade at `/api/<method>`. `auth.test`, `team.info`, `files.getUploadURLExternal` pass through; `chat.*` (incl. `chat.getPermalink`), `chat.startStream`/`appendStream`/`stopStream`, `reactions.*`, `conversations.replies/info`, `assistant.threads.setStatus`, `agents.sessions.setStatus`/`rename`, `files.completeUploadExternal` must target the owner's DM; `users.info` only the owner; `views.open` needs a `trigger_id` delivered to that owner; `views.update` a known `view_id`; `views.publish` only the owner's Home; `conversations.list` returns empty. Everything else: `restricted_action`. |
 | Rate limits | All daemons share the app's per-method limits. Upstream calls queue per method at the tier rate (`RATES` in `relay/src/limiter.ts`); a 429 waits Retry-After and retries; queued edits and appends of one message merge; `chat.startStream` is refused with `ratelimited` when it would wait over 2 s, so daemons fall back to plain messages. |
 | Interactivity | Interactive envelopes wait up to 2.5 s for the daemon's ack and relay its payload. Message events are acked to Slack at once. |
 | Files | `url_private*` (and a voice clip's `vtt` transcript) in delivered events and `conversations.replies` are rewritten to `/files/<id>/<name>`; only the owner's daemon can fetch them. Uploads go straight to Slack's presigned URL (daemons need egress to `files.slack.com`). |
 | Working notice | While 👀 is on a message (the daemon's "turn running" reaction), posts a rotating status line (`🥧 *Baking…*`) in its thread, then "taking a while" lines with the elapsed time; deletes it when 👀 goes. |
 | Session preamble | A top-level DM starts a thread and a new agent session; the relay appends a context block with the user's name, email and local time, plus `SESSION_PREAMBLE` (default in `relay/src/main.ts`: the user sees only reply text, so acknowledge before using tools and quote tool output). Thread replies, edits and daemon commands (`/cmd`, `$cmd`, `!shell`) pass untouched. |
-| Offline | No daemon connected: every message gets `OFFLINE_MESSAGE` as a reply where it was written (top level or its thread). Nothing is held or replayed. |
+| Offline | No daemon connected: every message gets `OFFLINE_MESSAGE` as a reply where it was written (top level or its thread); the Home tab shows 🔴 Offline with it. Nothing is held or replayed. |
 | State | In memory. One replica. Slack redelivers unacked envelopes (deduplicated by `event_id`); daemons reconnect on their own. |
 
 ## Configuration
@@ -41,7 +41,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | `PORT` | Default `8080`. |
 
 Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, `app_home_opened` and
-`agent_session_stopped` events, interactivity, App Home messages tab, the `agent_view`
+`agent_session_stopped` events, interactivity, App Home Home and Messages tabs, the `agent_view`
 feature with `assistant:write`). After updating an existing app's manifest, reinstall it.
 
 ## Deploy
@@ -70,6 +70,7 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 | Status/Stop | `agents.sessions.setStatus` brackets each turn (Slack's "Working…" and native stop button); Slack's stop button and `/stop` in the thread both cancel the running turn. |
 | Retry | A failed turn (e.g. a model gateway error) ends with ⚠️ and a **Retry** button that sends the same message again. |
 | Feedback | A finished streamed reply ends with 👍/👎 (Slack `feedback_buttons`). A tap is logged by the daemon (`feedback`, with the session id); the agent never sees it. |
+| Home tab | Shows the agent (🟢 online, command, host, `BASE_DIR`), **Defaults for new sessions** (the agent's settings, e.g. model, as its latest session reported them; a choice is saved in `STATE_FILE` and applied to every new session) and the 5 most recent threads with links. |
 | Changes | A turn that edited files ends with one line above 👍/👎: `🌿 branch · N files changed +A −R`, from the edits the agent reported (shell-made changes are not counted; the branch only in a git repo). |
 | Done notice | A turn of 60 s or more ends with `✅ Done in <folder> · 3m 12s → Open thread` (or ❌ Failed, ⏹️ Stopped) in the DM's main view: it notifies, where the end of a stream does not, and links the thread. Every turn also gets ✅/❌/⏹️ on the message that asked for it. |
 | Commands | In a thread: `$model` (model and effort, with the context window use and cost so far; **Change** opens a modal), `$compact`, `$clear` (new session, same folder), `$fork` (a copy of the session in a new thread), `$stop`, `$help`, `! <cmd>` (runs in the session folder; the agent sees it with the next message). The agent's own commands (`session/available_commands`, e.g. opencode's `$review branch`) are sent to it as `/<name> <args>`. Slack swallows unregistered `/` commands, hence `$`. |

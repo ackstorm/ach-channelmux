@@ -7,7 +7,7 @@ import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -92,9 +92,10 @@ export function createDaemon(cfg: DaemonConfig) {
 
   let threads: Record<string, Thread> = {}; // thread ts -> session
   let waiting: [string, Pending][] = [];
+  let defaults: Record<string, string> = {}; // setting id -> value new sessions start with, chosen on the Home tab
   try {
     const state = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
-    ({ threads, pending: waiting = [] } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
+    ({ threads, pending: waiting = [], defaults = {} } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
   const pending = new Map<string, Pending>(waiting); // thread ts -> first message, until the picker starts a session
@@ -120,7 +121,7 @@ export function createDaemon(cfg: DaemonConfig) {
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
     // ponytail: only the 50 newest unanswered pickers survive a restart.
-    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50) }));
+    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), defaults }));
   }
 
   const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
@@ -803,7 +804,7 @@ export function createDaemon(cfg: DaemonConfig) {
     try {
       if (choice === "new") {
         const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
-        if (configOptions) configs.set(sessionId, configOptions);
+        await applyDefaults(sessionId, configOptions);
         t = { ...where, sessionId, cwd };
         loaded.set(sessionId, Promise.resolve());
         head = header(cwd, "New session", sessionId);
@@ -944,10 +945,63 @@ export function createDaemon(cfg: DaemonConfig) {
     };
   }
 
+  // A new session starts with the Home tab's defaults (e.g. the model), where the agent offers them.
+  async function applyDefaults(sessionId: string, options?: acp.SessionConfigOption[]) {
+    let current = options;
+    for (const [configId, value] of Object.entries(defaults)) {
+      const o: any = current?.find((x) => x.id === configId);
+      if (!o || o.currentValue === value || !choicesOf(o).some((c) => c.value === value)) continue;
+      const r = await agent.setSessionConfigOption({ sessionId, configId, value }).catch((err) => void log("default_failed", { configId, error: String(err) }));
+      if (r) current = r.configOptions;
+    }
+    if (current) configs.set(sessionId, current);
+  }
+
+  // ---------- Home tab: status, defaults for new sessions, recent threads ----------
+
+  async function homeView() {
+    // The settings the agent offers, as its latest session reported them.
+    const options = ([...configs.values()].at(-1) ?? []).filter((o) => o.type === "select" && o.category !== "mode") as any[];
+    const titles = new Map((await sessions().catch(() => [])).map((x) => [x.sessionId, x.title]));
+    const recent = Object.values(threads).sort((a, b) => Number(b.thread) - Number(a.thread)).slice(0, 5);
+    const rows = await Promise.all(recent.map(async (t) => {
+      const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
+      return `📁 \`${basename(t.cwd)}\` · ${titles.get(t.sessionId) || "Untitled"}${link ? ` · <${link}|Open>` : ""}`;
+    }));
+    const note = (text: string) => ({ type: "context", elements: [{ type: "mrkdwn", text }] });
+    return {
+      type: "home" as const,
+      blocks: [
+        section(`*Your agent*\n🟢 Online · \`${basename(cfg.agentCmd[0])}\` on \`${hostname()}\` · folders under \`${cfg.baseDir}\``),
+        { type: "divider" },
+        section("*Defaults for new sessions*"),
+        ...(options.length
+          ? options.map((o) => section(o.name, { ...settingMenu({ ...o, currentValue: defaults[o.id] }), action_id: `home_default:${o.id}`, placeholder: plain("The agent's default") }))
+          : [note("Start a thread first: the agent's settings show up here.")]),
+        { type: "divider" },
+        section(`*Recent threads*\n${rows.join("\n") || "None yet."}`),
+        { type: "divider" },
+        note("Message me to start · each thread is one agent session · `$help` in a thread lists its commands"),
+      ] as any[],
+    };
+  }
+  const publishHome = async (user: string) =>
+    slack.views.publish({ user_id: user, view: await homeView() }).catch((err) => log("home_failed", { error: String(err) }));
+  app.event("app_home_opened", async ({ event }) => {
+    if ((event as any).tab === "home") await publishHome((event as any).user);
+  });
+  app.action(/^home_default:/, async ({ ack, body, action }) => {
+    await ack();
+    const a = action as any;
+    defaults[a.action_id.slice("home_default:".length)] = a.selected_option.value;
+    save();
+    await publishHome((body as any).user.id);
+  });
+
   async function clear(t: Thread) {
     if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
     const { sessionId, configOptions } = await agent.newSession({ cwd: t.cwd, mcpServers: await tools(t.thread) });
-    if (configOptions) configs.set(sessionId, configOptions);
+    await applyDefaults(sessionId, configOptions);
     bySession.delete(t.sessionId);
     const fresh = { ...t, sessionId };
     threads[t.thread] = fresh;

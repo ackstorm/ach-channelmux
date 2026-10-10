@@ -45,6 +45,9 @@ async function daemon(name: string, token: string): Promise<Daemon> {
   app.event("agent_session_stopped", async ({ event }) => {
     d.got.push(event);
   });
+  app.event("app_home_opened", async ({ event }) => {
+    d.got.push(event);
+  });
   await app.start();
   daemons.push(d);
   return d;
@@ -248,6 +251,19 @@ test("agent sessions: streams and status are scoped to the owner's DM; stop even
   assert.equal(pepe1.got.at(-1).type, "agent_session_stopped");
 });
 
+test("Home tab: opening it reaches the owner's daemon, which may publish only the owner's Home", async () => {
+  const home = (user: string, tab: string, id: string) =>
+    slack.emit("events_api", { type: "event_callback", event_id: id, team_id: "T1", api_app_id: "A1", event: { type: "app_home_opened", user, channel: `D_${user}`, tab } });
+  const n = pepe1.got.length;
+  await home("UPEPE", "messages", "EvHome0"); // the Messages tab is not routed
+  await home("UPEPE", "home", "EvHome1");
+  await waitFor(() => pepe1.got.length > n);
+  assert.deepEqual([pepe1.got.length - n, pepe1.got.at(-1).type, pepe1.got.at(-1).tab], [1, "app_home_opened", "home"]);
+  const view = { type: "home" as const, blocks: [] };
+  assert.ok((await pepe1.app.client.views.publish({ user_id: "UPEPE", view })).ok);
+  await assert.rejects(pepe1.app.client.views.publish({ user_id: "UXAVI", view }), /restricted_action/);
+});
+
 test("criterion 4: a second daemon parks as standby and takes over when the first dies", async () => {
   const pepe2 = await daemon("pepe2", "gw-pepe");
   assert.deepEqual(gw.state(USERS.UPEPE), { primary: gw.state(USERS.UPEPE)!.primary, standby: 1 });
@@ -276,6 +292,11 @@ test("offline: every message gets OFFLINE_MESSAGE where it was written, and noth
   await waitFor(() => notice(undefined).length === 2); // top-level: answered top-level, no thread opened
   await slack.emit("events_api", slack.dm("UXAVI", "still?", { ts: "100.000004", thread_ts: "100.000003" }));
   await waitFor(() => notice("100.000003").length === 1);
+  // The Home tab, published by the relay itself.
+  await slack.emit("events_api", { type: "event_callback", event_id: "EvHomeOff", team_id: "T1", api_app_id: "A1", event: { type: "app_home_opened", user: "UXAVI", channel: "D_UXAVI", tab: "home" } });
+  await waitFor(() => slack.calls.some((c) => c.method === "views.publish" && c.params.user_id === "UXAVI"));
+  const published = JSON.parse(slack.calls.find((c) => c.method === "views.publish" && c.params.user_id === "UXAVI")!.params.view);
+  assert.match(published.blocks[0].text.text, /^\*Your agent\*\n🔴 Offline\nOffline\. Start it/);
   const xavi = await daemon("xavi", "gw-xavi");
   await slack.emit("events_api", slack.dm("UXAVI", "now?"));
   await waitFor(() => xavi.got.length === 1);

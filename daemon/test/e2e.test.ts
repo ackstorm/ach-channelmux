@@ -739,3 +739,31 @@ test("a folder the message names is offered first, starting there with one tap",
   assert.equal(msg.params.text, "👋 Hi Real! Work in one of these folders?");
   assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["▶ gamma/deep", "▶ alpha", "📂 Choose another"]); // last used first
 });
+
+test("the Home tab shows the agent, defaults for new sessions and recent threads; a default applies to the next new session", async () => {
+  const opened = () => slack.emit("events_api", { type: "event_callback", event_id: `EvHome${mark()}`, team_id: "T1", api_app_id: "A1", event: { type: "app_home_opened", user: "UPEPE", channel: DM, tab: "home" } });
+  const published = () => calls("views.publish");
+  let n = published().length;
+  await opened();
+  await waitFor(() => published().length > n);
+  let home = JSON.parse(published().at(-1)!.params.view);
+  assert.equal(published().at(-1)!.params.user_id, "UPEPE");
+  assert.match(home.blocks[0].text.text, /^\*Your agent\*\n🟢 Online · `node` on `.+` · folders under `.+`$/);
+  const model = home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model");
+  assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["Model", undefined, "The agent's default"]);
+  assert.match(home.blocks.find((b: any) => b.text?.text?.startsWith("*Recent threads*")).text.text, /\n📁 `deep` · .+ · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|Open>/);
+
+  n = published().length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, view: { id: "V_HOME", type: "home" }, actions: [{ type: "static_select", action_id: "home_default:model", selected_option: { value: "m2" } }] }, true);
+  await waitFor(() => published().length > n);
+  home = JSON.parse(published().at(-1)!.params.view);
+  assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").accessory.initial_option.value, "m2");
+  assert.deepEqual(JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).defaults, { model: "m2" });
+
+  // The next new session gets it.
+  await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
+  const msg = await pickerFor("930.000001");
+  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest", value: JSON.stringify({ thread: "930.000001", cwd: "alpha", choice: "new" }) });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
+  assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
+});

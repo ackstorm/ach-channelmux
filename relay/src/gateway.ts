@@ -474,6 +474,12 @@ export function createGateway(cfg: GatewayConfig) {
   async function goOffline(env: Envelope, channel: string) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
     const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
+    // The Home tab says so itself: the daemon that would draw it is not there.
+    if (ev.type === "app_home_opened") {
+      const text = `*Your agent*\n🔴 Offline\n${cfg.offlineMessage ?? "Your workspace is offline. Start it and try again."}`;
+      await slack("views.publish", { user_id: ev.user, view: JSON.stringify({ type: "home", blocks: [{ type: "section", text: { type: "mrkdwn", text } }] }) });
+      return;
+    }
     await slack("chat.postMessage", {
       channel,
       thread_ts: ev.thread_ts, // top-level stays top-level: no thread for a session that never started
@@ -487,6 +493,7 @@ export function createGateway(cfg: GatewayConfig) {
     if (type === "events_api") {
       const ev = body?.event;
       if (ev?.type === "agent_session_stopped") return ev.user ? { userId: ev.user, channel: ev.channel } : null;
+      if (ev?.type === "app_home_opened") return ev.tab === "home" && ev.user ? { userId: ev.user } : null;
       if (!ev || ev.type !== "message" || ev.channel_type !== "im") return null;
       // A user's edit: the author is inside. Bot edits (every chat.update) and unfurls (same text) stay out.
       if (ev.subtype === "message_changed") {
@@ -694,6 +701,10 @@ export function createGateway(cfg: GatewayConfig) {
     }
     if (method === "views.update") {
       if (!owner.views.has(params.view_id)) return { ok: false, error: "restricted_action" };
+      return slack(method, params);
+    }
+    if (method === "views.publish") {
+      if (params.user_id !== owner.slackUserId) return { ok: false, error: "restricted_action" }; // only the owner's Home tab
       return slack(method, params);
     }
     return { ok: false, error: "restricted_action" };
