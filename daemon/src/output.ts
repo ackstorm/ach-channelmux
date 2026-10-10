@@ -30,7 +30,7 @@ export interface ToolInfo {
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
-const lineCount = (s?: string | null) => (s ? s.split("\n").length : 0);
+export const lineCount = (s?: string | null) => (s ? s.split("\n").length : 0);
 // A card's output renders Markdown when expanded (```diff in colour, verified on Slack); fences
 // are closed after clipping so a cut never leaves one open.
 const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(body.replaceAll("\`\`\`", "ˋˋˋ"), max)}\n\`\`\``;

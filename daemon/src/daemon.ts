@@ -2,7 +2,7 @@
 // DM thread as an ACP session (e.g. `opencode acp`). A new message gets a picker in the DM's main
 // view (a Slack modal for the folder, then a new or existing session in it); its thread opens with both set.
 
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -11,9 +11,10 @@ import { tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { Readable, Writable } from "node:stream";
 import { setTimeout as sleep } from "node:timers/promises";
+import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { DIFF_IN_CARD, createOutput, describeTool, fullDiff, type Output } from "./output.ts";
+import { DIFF_IN_CARD, createOutput, describeTool, fullDiff, lineCount, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -113,6 +114,7 @@ export function createDaemon(cfg: DaemonConfig) {
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
   const usage = new Map<string, { used: number; size: number; cost?: { amount: number; currency: string } | null }>(); // session -> context use, cost so far
   const turnDiffs = new Map<string, string[]>(); // session -> full diffs of the running turn's edits
+  const turnEdits = new Map<string, Map<string, [number, number]>>(); // session -> path -> lines added, removed
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
   function save() {
@@ -169,7 +171,15 @@ export function createDaemon(cfg: DaemonConfig) {
         const cwd = bySession.get(sessionId)?.cwd ?? "";
         void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), cwd));
         const diff = fullDiff(update, cwd);
-        if (diff) turnDiffs.set(sessionId, [...(turnDiffs.get(sessionId) ?? []), diff]);
+        if (diff) {
+          turnDiffs.set(sessionId, [...(turnDiffs.get(sessionId) ?? []), diff]);
+          const files = turnEdits.get(sessionId) ?? new Map<string, [number, number]>();
+          for (const d of (update as any).content.filter((c: any) => c.type === "diff")) {
+            const [added, removed] = files.get(d.path) ?? [0, 0];
+            files.set(d.path, [added + lineCount(d.newText), removed + lineCount(d.oldText)]);
+          }
+          turnEdits.set(sessionId, files);
+        }
       }
     },
     async requestPermission({ sessionId, toolCall, options }) {
@@ -487,6 +497,16 @@ export function createDaemon(cfg: DaemonConfig) {
       negative_button: { text: { type: "plain_text", text: "👎" }, accessibility_label: "Bad response", value: "bad" },
     }],
   }];
+  // A turn's edits in one line under its reply: "🌿 `main` · 2 files changed +12 −3" (the branch only in a git repo).
+  // ponytail: counts the edits the agent reported; changes made by shell commands are not in it.
+  async function editLine(cwd: string, edits: Map<string, [number, number]>) {
+    const branch = await promisify(execFile)("git", ["-C", cwd, "branch", "--show-current"], { timeout: 5_000 }).then((r) => r.stdout.trim(), () => "");
+    let added = 0;
+    let removed = 0;
+    for (const [a, r] of edits.values()) [added, removed] = [added + a, removed + r];
+    const files = `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
+    return branch ? `🌿 \`${branch}\` · ${files}` : files;
+  }
   const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
@@ -522,7 +542,13 @@ export function createDaemon(cfg: DaemonConfig) {
         out.text(`\n\n⚠️ ${err?.message ?? err}`);
         outcome = "failed";
       } finally {
-        await out.end(outcome === "done" ? FEEDBACK : undefined);
+        const edits = turnEdits.get(t.sessionId);
+        turnEdits.delete(t.sessionId);
+        const blocks = [
+          ...(edits ? [{ type: "context", elements: [{ type: "mrkdwn", text: await editLine(t.cwd, edits) }] }] : []),
+          ...(outcome === "done" ? FEEDBACK : []),
+        ];
+        await out.end(blocks.length ? blocks : undefined);
         // Edits too long for their cards: the whole turn's changes as one diff snippet.
         const diffs = turnDiffs.get(t.sessionId);
         turnDiffs.delete(t.sessionId);

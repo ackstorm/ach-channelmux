@@ -3,6 +3,7 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
+import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -340,10 +341,15 @@ test("a subagent's own reply is not streamed as the agent's reply", async () => 
   assert.equal(text, "Parent reply.");
 });
 
-test("an edit too long for its card also comes as a changes.diff snippet at the end of the turn", async () => {
+test("a turn that edits ends with a line of its changes (branch, files, lines); an edit too long for its card also comes as a changes.diff snippet", async () => {
   const n = mark();
+  execFileSync("git", ["init", "-q", "-b", "work", join(base, "beta")]);
   await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
   const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
+  // The turn's edits, in one line under the reply, before 👍/👎.
+  const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "🌿 `work` · 1 file changed +30 −30" }] });
+  assert.equal(end[1].type, "context_actions");
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
   assert.equal(done.params.thread_ts, "100.000001");
