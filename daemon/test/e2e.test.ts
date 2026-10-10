@@ -710,3 +710,32 @@ test("editing the first message keeps the relay's context block", async () => {
   assert.match(p.text, /User: x\./);
   await turnEnded("800.000004");
 });
+
+test("a folder the message names is offered first, starting there with one tap", async () => {
+  const buttons = (msg: any) => JSON.parse(msg.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id, e.value]);
+  await slack.emit("events_api", slack.dm("UPEPE", "check the DEEP folder, please", { ts: "920.000001" }));
+  let msg = await pickerFor("920.000001");
+  assert.equal(msg.params.text, "👋 Hi Real! Work in `gamma/deep`?");
+  assert.deepEqual(buttons(msg), [
+    ["▶ New session there", "picker_suggest", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep", choice: "new" })],
+    ["📂 Choose another", "picker_open_modal", "920.000001"],
+  ]);
+  await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest", value: buttons(msg)[0][2] });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP folder, please"));
+  assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep")));
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep` · new session → <.*\|Open thread>$/.test(c.params.text)));
+
+  // A folder with sessions also offers to continue the latest; several folders, one button each.
+  await slack.emit("events_api", slack.dm("UPEPE", "deep again", { ts: "921.000001" }));
+  msg = await pickerFor("921.000001");
+  const [, cont] = buttons(msg);
+  assert.match(cont[0], /^↩ Continue “.+”$/);
+  const value = JSON.parse(cont[2]);
+  assert.deepEqual([value.thread, value.cwd], ["921.000001", "gamma/deep"]);
+  assert.match(value.choice, /^ses_/); // the session to continue
+  assert.match(JSON.parse(msg.params.blocks)[0].text.text, /\nFound in your message · 1 session there, last used /);
+  await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
+  msg = await pickerFor("922.000001");
+  assert.equal(msg.params.text, "👋 Hi Real! Work in one of these folders?");
+  assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["▶ gamma/deep", "▶ alpha", "📂 Choose another"]); // last used first
+});

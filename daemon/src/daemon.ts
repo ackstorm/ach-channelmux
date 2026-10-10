@@ -677,6 +677,16 @@ export function createDaemon(cfg: DaemonConfig) {
     return found;
   }
 
+  // Folders the message names, by whole folder name (any case, ignoring - _ .): last used first, then
+  // BASE_DIR three levels down. At most 3.
+  function named(text: string, list: { rel: string }[]) {
+    const norm = (w: string) => w.toLowerCase().replace(/[-_.]/g, "");
+    const words = new Set(text.split(/[^\p{L}\p{N}._-]+/u).map(norm).filter((w) => w.length >= 3));
+    // ponytail: the walk stops at search's 100 folders; a bigger tree may miss a named folder.
+    const rels = [...new Set([...list.map((x) => x.rel), ...search("")])];
+    return rels.filter((r) => r && words.has(norm(basename(r)))).slice(0, 3);
+  }
+
   // The agent's sessions under baseDir, newest first. The agent may store a session's real path,
   // so paths are mapped back through baseDir's own real path and its top-level symlinks.
   async function sessions() {
@@ -1033,10 +1043,35 @@ export function createDaemon(cfg: DaemonConfig) {
     save();
     // A greeting by first name, then what to do: this message is not the agent, it only opens one.
     const name = (await person(p.user)).name?.split(" ")[0];
-    const hi = `👋 Hi${name ? ` ${name}` : ""}! Pick where to work: a folder, then a new session or one you already have there.`;
+    const to = name ? ` ${name}` : "";
+    // Folders the message names are offered first, one tap to start there.
+    const list = await sessions();
+    const at = p.text.indexOf("\n\n[Context from the Slack relay");
+    const found = named(at >= 0 ? p.text.slice(0, at) : p.text, list);
+    const go = (text: string, cwd: string, choice: string) => button(text, "picker_suggest", JSON.stringify({ thread: p.ts, cwd, choice }));
+    const choose = button(found.length ? "📂 Choose another" : "📂 Choose folder", "picker_open_modal", p.ts);
+    let hi = `👋 Hi${to}! Pick where to work: a folder, then a new session or one you already have there.`;
+    let hint = "";
+    let buttons: any[] = [{ ...choose, style: "primary" }];
+    if (found.length === 1) {
+      const [cwd] = found;
+      const there = list.filter((x) => x.rel === cwd);
+      const when = there.length ? ago(there[0].updatedAt) : "";
+      hi = `👋 Hi${to}! Work in \`${cwd}\`?`;
+      hint = `Found in your message${there.length ? ` · ${there.length} session${there.length > 1 ? "s" : ""} there${when ? `, last used ${when}` : ""}` : ""}.\n`;
+      buttons = [
+        { ...go("▶ New session there", cwd, "new"), style: "primary" },
+        ...(there.length ? [go(`↩ Continue “${there[0].title || "Untitled"}”`, cwd, there[0].sessionId)] : []),
+        choose,
+      ];
+    } else if (found.length) {
+      hi = `👋 Hi${to}! Work in one of these folders?`;
+      hint = "Found in your message: each starts a new session there.\n";
+      buttons = [...found.map((cwd) => go(`▶ ${cwd}`, cwd, "new")), choose];
+    }
     return (await slack.chat.postMessage({ channel: p.channel, text: hi, blocks: [
-      section(`${hi}\nYour message goes to the agent once you start; its reply opens in a thread under it.`),
-      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", p.ts), style: "primary" }] },
+      section(`${hi}\n${hint}Your message goes to the agent once you start; its reply opens in a thread under it.`),
+      { type: "actions", elements: buttons },
     ] as any })) as any;
   }
 
@@ -1076,6 +1111,15 @@ export function createDaemon(cfg: DaemonConfig) {
     const first = pending.get(thread);
     if (!first) return void (await expired(b.channel.id));
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, picker: b.message.ts, cwd: "" }) });
+  });
+  // A folder the first message named: starts there without the modal.
+  app.action("picker_suggest", async ({ ack, body, action }) => {
+    await ack();
+    const b = body as any;
+    const { thread, cwd, choice } = JSON.parse((action as any).value);
+    if (!pending.has(thread)) return void (await expired(b.channel.id));
+    if (String(cwd).split("/").includes("..") || !isDir(abs(cwd))) return;
+    void start({ channel: b.channel.id, thread, picker: b.message.ts, cwd }, choice).catch((err) => log("session_start_failed", { error: String(err) }));
   });
   app.action("picker_open", async ({ ack, body, action }) => {
     await ack();
