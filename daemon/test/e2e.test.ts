@@ -107,7 +107,7 @@ const pickerFor = (thread: string) =>
   waitFor(() => posts.find((p) => !p.params.thread_ts && p.params.blocks?.includes("picker_open_modal") && p.params.blocks.includes(thread)));
 async function openPicker(thread: string) {
   const msg = await pickerFor(thread);
-  assert.equal(msg.params.text, "👋 Hi Real! Pick the folder to work in."); // Slack's real_name "Real UPEPE"
+  assert.equal(msg.params.text, "👋 Hi Mary Ann! Pick the folder to work in."); // Slack's first_name, whole, not the real name's first word
   const n = views().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
   await waitFor(() => views().length > n);
@@ -747,7 +747,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
   const buttons = (msg: any) => JSON.parse(msg.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id, e.value]);
   await slack.emit("events_api", slack.dm("UPEPE", "check the DEEP folder, please", { ts: "920.000001" }));
   let msg = await pickerFor("920.000001");
-  assert.equal(msg.params.text, "👋 Hi Real! Work in `gamma/deep`?");
+  assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in `gamma/deep`?");
   assert.deepEqual(buttons(msg), [
     ["📁 Use deep", "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep" })],
     ["📂 Choose folder", "picker_open_modal", "920.000001"],
@@ -761,7 +761,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
   // Several folders: one button each, last used first.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
   msg = await pickerFor("922.000001");
-  assert.equal(msg.params.text, "👋 Hi Real! Work in one of these folders?");
+  assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in one of these folders?");
   assert.deepEqual(buttons(msg).map((b: any) => b[0]), ["📁 Use deep", "📁 Use alpha", "📂 Choose folder"]);
 });
 

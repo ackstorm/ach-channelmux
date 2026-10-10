@@ -582,14 +582,20 @@ export function createDaemon(cfg: DaemonConfig) {
   }
 
   // Who wrote a message, for the <slack> envelope: name and time zone, fetched once per user.
-  type Person = { name?: string; tz?: string };
+  // first: how to greet them. Slack's first name field, else their display name, else the whole name: a full
+  // name's first word may be half a first name ("Juan" of "Juan Carlos Moreno").
+  type Person = { name?: string; first?: string; tz?: string };
   const people = new Map<string, Promise<Person>>();
   const person = (user?: string): Promise<Person> => {
     if (!user) return Promise.resolve({});
     if (!people.has(user)) {
       const info = slack.users
         .info({ user })
-        .then((r: any): Person => ({ name: r.user?.profile?.real_name || r.user?.real_name || r.user?.name, tz: r.user?.tz }))
+        .then((r: any): Person => {
+          const p = r.user?.profile ?? {};
+          const name = p.real_name || r.user?.real_name || r.user?.name;
+          return { name, first: p.first_name || p.display_name || name, tz: r.user?.tz };
+        })
         .catch((): Person => ({}));
       people.set(user, info);
     }
@@ -1133,7 +1139,7 @@ export function createDaemon(cfg: DaemonConfig) {
     pending.set(p.ts, p);
     save();
     // A greeting by first name, then what to do: this message is not the agent, it only opens one.
-    const name = (await person(p.user)).name?.split(" ")[0];
+    const name = (await person(p.user)).first;
     const to = name ? ` ${name}` : "";
     // Folders the message names are offered first: one tap chooses it.
     const at = p.text.indexOf("\n\n[Context from the Slack relay");
