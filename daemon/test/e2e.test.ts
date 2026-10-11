@@ -175,8 +175,13 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   let { msg, view } = await openPicker("100.000001");
   assert.deepEqual(browse(view), ["alpha", "beta", "gamma"]); // no hidden folders or node_modules; symlinks count
   assert.equal(view.blocks.some((b: any) => b.block_id === "recent"), false); // no sessions yet: no Recent
+  const at = (id: string) => view.blocks.findIndex((b: any) => b.block_id === id || b.elements?.some((e: any) => e.action_id === id));
+  assert.ok(at("picker_open_0") < at("search"), "browsing comes first, the search after");
+  assert.match(view.submit.text, /^Use .{1,20}$/); // the base folder's name, cut to Slack's 24 characters
   view = await tap(view, "picker_open_2", "gamma");
   assert.deepEqual(browse(view), ["deep"]);
+  assert.equal(at("search"), -1); // inside a folder it only browses
+  assert.equal(view.submit.text, "Use gamma");
   view = await tap(view, "picker_up", "up");
   view = await tap(view, "picker_open_1", "beta");
   assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "beta")}\``);
@@ -532,7 +537,9 @@ test("the picker searches folders under the base, and creates a new one where it
   assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "new one")}\``);
   assert.equal(view.blocks.at(-1).block_id, "mkdir:new one"); // a fresh input, not the name just typed
 
-  // "Use" with a searched folder takes it over the one being browsed.
+  // Back in the base folder, "Use" with a searched folder takes it over the base folder.
+  view = await tap(view, "picker_up", "up");
+  assert.ok(view.blocks.some((b: any) => b.block_id === "search"));
   assert.deepEqual(await submit(view, searched("gamma/deep")), { response_action: "clear" });
   assert.match((await questionIn("910.000001")).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
 });

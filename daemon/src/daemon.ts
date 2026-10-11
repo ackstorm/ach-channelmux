@@ -752,18 +752,13 @@ export function createDaemon(cfg: DaemonConfig) {
     blocks: blocks as any[],
   });
 
-  // One screen that only picks the folder: recent ones, a search, browsing, a new folder. "Use" takes the
-  // recent or searched one when set, else the folder being browsed.
+  // One screen that only picks the folder. Browsing comes first: the folders, then (in the base folder only) recent
+  // ones and a search. Inside a folder it only browses, and "Use <folder>" takes it.
   async function folderView(p: Pick, error?: string) {
-    const list = await sessions();
-    const recent = [...new Set(list.map((x) => x.rel))].slice(0, 10);
     const blocks: unknown[] = [section(`📁 \`${abs(p.cwd)}\``)];
-    // Slack rejects an empty option value: the base folder ("") goes as ".".
-    if (recent.length) blocks.push({ type: "input", block_id: "recent", optional: true, label: plain("Recent"), element: { type: "static_select", action_id: "recent", placeholder: plain("Pick a recent folder"), options: recent.map((r) => ({ text: plain(short(abs(r))), value: r || "." })) } });
-    blocks.push({ type: "input", block_id: "search", optional: true, label: plain("Or search all folders"), element: { type: "external_select", action_id: "picker_search", placeholder: plain("🔎 Type a name…"), min_query_length: 1 } });
     if (p.cwd) blocks.push({ type: "actions", elements: [button(`⬅️ Back to ${nameOf(parentOf(p.cwd))}`, "picker_up", "up")] });
     const subs = subfolders(p.cwd);
-    blocks.push(section(subs.length ? `*Or browse ${p.cwd ? nameOf(p.cwd) : "folders"}*` : "_No subfolders here._"));
+    blocks.push(section(subs.length ? `*Browse ${p.cwd ? nameOf(p.cwd) : "folders"}*` : "_No subfolders here._"));
     // Buttons in rows of 25 (Slack's limit per block), each action_id unique in its block.
     // ponytail: the first 100 subfolders only.
     for (let i = 0; i < Math.min(subs.length, 100); i += 25)
@@ -777,8 +772,17 @@ export function createDaemon(cfg: DaemonConfig) {
       label: plain(`➕ New folder in ${nameOf(p.cwd)}`),
       element: { type: "plain_text_input", action_id: "picker_mkdir", placeholder: plain("Name, then Enter"), dispatch_action_config: { trigger_actions_on: ["on_enter_pressed"] } },
     });
+    if (!p.cwd) {
+      const recent = [...new Set((await sessions()).map((x) => x.rel))].slice(0, 10);
+      // Slack rejects an empty option value: the base folder ("") goes as ".".
+      if (recent.length) blocks.push({ type: "input", block_id: "recent", optional: true, label: plain("Or a recent one"), element: { type: "static_select", action_id: "recent", placeholder: plain("Pick a recent folder"), options: recent.map((r) => ({ text: plain(short(abs(r))), value: r || "." })) } });
+      // No emoji in the placeholder: Slack's mobile app shows it as its :name:.
+      blocks.push({ type: "input", block_id: "search", optional: true, label: plain("Or search all folders"), element: { type: "external_select", action_id: "picker_search", placeholder: plain("Type a name…"), min_query_length: 1 } });
+    }
     if (error) blocks.push({ type: "context", elements: [{ type: "plain_text", text: `⚠️ ${error}` }] });
-    return modal("picker_folder", "Choose folder", "Use", p, blocks);
+    // Slack's submit label holds 24 characters.
+    const use = `Use ${nameOf(p.cwd)}`;
+    return modal("picker_folder", "Choose folder", use.length > 24 ? `${use.slice(0, 23)}…` : use, p, blocks);
   }
 
   // The thread's question once the folder is chosen. New session always; previous ones when there are.
