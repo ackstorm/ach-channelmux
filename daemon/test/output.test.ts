@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createOutput, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
+import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { changed, createOutput, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
   const calls: { method: string; params: any }[] = [];
@@ -114,10 +117,10 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   const read = describeTool({ title: "read", status: "completed", locations: [{ path: "/w/proj/calc.py" }], content: [{ type: "content", content: { type: "text", text: "1: def add(a, b):" } }] }, { path: "calc.py" }, cwd);
   assert.deepEqual(read, { title: "read calc.py", status: "completed", output: "```\n1: def add(a, b):\n```" });
   const edit = describeTool({ title: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Edited calc.py" } }, { type: "diff", path: "/w/proj/calc.py", oldText: "    return a - b", newText: "    return a + b\n" }] }, { path: "calc.py", oldString: "x", newString: "y" }, cwd);
-  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +1 −1\n```diff\n-    return a - b\n+    return a + b\n```" });
+  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +1 −1\n```diff\n@@ -1,1 +1,1 @@\n-    return a - b\n+    return a + b\n```" });
   // opencode's write reports no diff: its input stands for one (a new file's lines).
   const write = { title: "write", kind: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Created file successfully: hello.txt" } }] };
-  assert.equal(fullDiff(write, cwd, { filePath: "/w/proj/hello.txt", content: "hola\nadiós\n" }), "--- hello.txt\n+++ hello.txt\n+hola\n+adiós");
+  assert.equal(fullDiff(write, cwd, { filePath: "/w/proj/hello.txt", content: "hola\nadiós\n" }), "--- hello.txt\n+++ hello.txt\n@@ -1,0 +1,2 @@\n+hola\n+adiós");
   assert.equal(fullDiff({ ...write, status: "in_progress" }, cwd, { filePath: "/w/proj/hello.txt", content: "hola\n" }), undefined);
   const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
   assert.deepEqual(shell, { title: "python3 t.py", status: "failed", output: "exit 1\n```\nTraceback\n```" }); // shown as an error card
@@ -134,7 +137,7 @@ test("describeTool turns opencode's tool updates into card title, details and ou
   assert.equal(describeTool({ title: "Count txt files: read", kind: "read", status: "pending", _meta: meta }, { path: "a.txt" }, cwd).title, "↳ read a.txt");
   assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
   const code = describeTool({ title: "execute", kind: "other", status: "completed", rawOutput: { metadata: { error: true } }, content: [{ type: "content", content: { type: "text", text: "Unknown tool" } }] }, { code: "await x()" }, cwd);
-  assert.deepEqual(code, { title: "execute", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" });
+  assert.deepEqual(code, { title: "await x()", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" }); // no tool called: its first line
   const calls = 'await tools.slack["send_voice"]({ text: "hi" })\nawait tools.github.list_issues({})\nawait tools.slack.send_voice({})';
   assert.deepEqual(describeTool({ title: "execute", kind: "other", status: "pending" }, { code: calls }, cwd), { title: "slack.send_voice, github.list_issues", status: "pending", details: calls });
   const fetch = describeTool({ title: "webfetch", kind: "fetch", status: "pending" }, { url: "https://example.com/a", format: "markdown" }, cwd);
@@ -193,4 +196,86 @@ test("a card's sources, details and output go out once: Slack adds them to those
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
   assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined]]);
+});
+
+test("an edit reported as the whole file before and after shows only the lines it changed", () => {
+  const file = (mid: string) => ["a", "b", "c", mid, "e", "f"].join("\n") + "\n";
+  assert.deepEqual(changed(file("d"), file("D")), { at: 3, removed: ["d"], added: ["D"] });
+  assert.deepEqual(changed(file("d"), file("d").replace("e\n", "e\nnew\n")), { at: 5, removed: [], added: ["new"] });
+  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/proj/x.js", oldText: file("d"), newText: file("D") }] };
+  assert.equal(describeTool(edit, { path: "x.js" }, "/w/proj").output, "x.js  +1 −1\n```diff\n@@ -4,1 +4,1 @@\n-d\n+D\n```");
+  assert.equal(fullDiff(edit, "/w/proj"), "--- x.js\n+++ x.js\n@@ -4,1 +4,1 @@\n-d\n+D");
+});
+
+test("a path the agent reports under the folder's real path (a symlink) is shown relative to the folder", () => {
+  const base = mkdtempSync(join(tmpdir(), "output-test-"));
+  mkdirSync(join(base, "real", "proj"), { recursive: true });
+  symlinkSync(join(base, "real"), join(base, "link"));
+  const cwd = join(base, "link", "proj");
+  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: join(base, "real", "proj", "x.js"), oldText: "a\n", newText: "b\n" }] };
+  assert.equal(fullDiff(edit, cwd), "--- x.js\n+++ x.js\n@@ -1,1 +1,1 @@\n-a\n+b");
+});
+
+// A fake Slack whose next appendStream answers with the given error once.
+function failingOnce(error: string) {
+  const calls: { method: string; params: any }[] = [];
+  let n = 0;
+  let fail = "";
+  const api = async (method: string, params: any) => {
+    calls.push({ method, params });
+    if (method === "chat.appendStream" && fail) {
+      const e = fail;
+      fail = "";
+      throw new Error(`An API error occurred: ${e}`);
+    }
+    return { ok: true, ts: `9.${++n}` };
+  };
+  return { api, calls, failNext: () => (fail = error) };
+}
+const texts = (calls: { method: string; params: any }[], method: string) =>
+  calls.filter((c) => c.method === method).map((c) => (c.params.chunks ?? []).filter((x: any) => x.type === "markdown_text").map((x: any) => x.text).join("") || c.params.markdown_text);
+
+test("a stream message full to Slack's size limit goes on in a new one, reopening the code fence it was in", async () => {
+  const { api, calls, failNext } = failingOnce("msg_too_long");
+  const out = createOutput(api, where);
+  await out.begin();
+  out.text("The diff:\n\n```diff\n+a\n");
+  await out.tool("t1", { title: "ls", status: "in_progress" }); // flushes the text into the stream
+  failNext();
+  out.text("+b\n```\nDone.");
+  await out.end();
+  assert.deepEqual(calls.map((c) => c.method).filter((m) => m.startsWith("chat.")), [
+    "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.startStream", "chat.stopStream",
+  ]);
+  const second = calls.filter((c) => c.method === "chat.startStream")[1].params.chunks;
+  assert.deepEqual(second.map((c: any) => c.type), ["task_update", "markdown_text", "markdown_text"]); // the running card comes along
+  assert.equal(texts(calls, "chat.startStream")[1], "```diff\n\n\n+b\n```\nDone.");
+});
+
+test("a stream rolled over for its age closes an open code fence and the next message reopens it", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.begin();
+  out.text("```ts\nconst a = 1;\n");
+  t.mock.timers.tick(1_000);
+  await out.tool("t1", { title: "ls", status: "completed" });
+  t.mock.timers.tick(300_000);
+  out.text("const b = 2;\n```");
+  await out.end();
+  const streamed = calls.filter((c) => c.method === "chat.appendStream" || c.method === "chat.startStream").map((c) => c.params.chunks.filter((x: any) => x.type === "markdown_text").map((x: any) => x.text).join(""));
+  assert.ok(streamed.includes("\n```"), "the old message's fence is closed");
+  assert.equal(texts(calls, "chat.startStream")[1], "```ts\n\n\nconst b = 2;\n```");
+});
+
+test("when the stream breaks inside a code fence, the plain message that follows reopens it", async () => {
+  const { api, calls, failNext } = failingOnce("ratelimited");
+  const out = createOutput(api, where);
+  await out.begin();
+  out.text("```diff\n+a\n");
+  await out.tool("t1", { title: "ls", status: "completed" });
+  failNext();
+  out.text("+b\n```");
+  await out.end();
+  assert.deepEqual(texts(calls, "chat.postMessage"), ["```diff\n+b\n```"]);
 });

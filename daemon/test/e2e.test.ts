@@ -335,6 +335,13 @@ test("a turn that ends after its tools with no reply gets one nudge, and the rep
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /Here is the result\./);
 });
 
+test("when the nudge gets no reply either, the thread says the agent ended without one", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "mute", { ts: "100.000039", thread_ts: "100.000001" }));
+  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /_The agent ended its turn without a reply\._$/);
+});
+
 test("the model's thinking shows as a Thinking card", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "think", { ts: "100.000017", thread_ts: "100.000001" }));
@@ -391,7 +398,7 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
   assert.equal(done.params.thread_ts, "100.000001");
   const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
-  assert.match(body, /^--- big\.py\n\+\+\+ big\.py\n-old line 0/);
+  assert.match(body, /^--- big\.py\n\+\+\+ big\.py\n@@ -1,30 \+1,30 @@\n-old line 0/);
   assert.match(body, /\+new line 29$/);
 });
 

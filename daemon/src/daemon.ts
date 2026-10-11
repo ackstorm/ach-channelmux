@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { DIFF_IN_CARD, createOutput, describeTool, editsOf, fullDiff, lineCount, type Output } from "./output.ts";
+import { DIFF_IN_CARD, changed, createOutput, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -194,7 +194,8 @@ export function createDaemon(cfg: DaemonConfig) {
           const files = turnEdits.get(sessionId) ?? new Map<string, [number, number]>();
           for (const d of editsOf(update, inputs.get(update.toolCallId))) {
             const [added, removed] = files.get(d.path) ?? [0, 0];
-            files.set(d.path, [added + lineCount(d.newText), removed + lineCount(d.oldText)]);
+            const c = changed(d.oldText, d.newText);
+            files.set(d.path, [added + c.added.length, removed + c.removed.length]);
           }
           turnEdits.set(sessionId, files);
         }
@@ -435,8 +436,10 @@ export function createDaemon(cfg: DaemonConfig) {
 
   const mcp = createServer(async (req, res) => {
     const [, root, key, thread] = (req.url ?? "").split("/");
+    // The agent may connect while it creates the session, before the thread is known (opencode 2.0.26 does,
+    // and drops a server that refuses it): only a tool call needs the thread, looked up when it comes.
     const t = threads[thread];
-    if (root !== "mcp" || key !== secret || !t) return void res.writeHead(404).end();
+    if (root !== "mcp" || key !== secret || !thread) return void res.writeHead(404).end();
     if (req.method !== "POST") return void res.writeHead(405).end(); // no server-initiated stream
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -552,6 +555,8 @@ export function createDaemon(cfg: DaemonConfig) {
         if (r.stopReason === "end_turn" && out.quiet) {
           log("nudged", { session: t.sessionId });
           r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
+          // Still nothing (some models end with an empty reply): say so, or the turn looks finished and answered.
+          if (r.stopReason === "end_turn" && out.quiet) out.text("_The agent ended its turn without a reply._");
         }
         if (r.stopReason === "cancelled") out.text("\n\n_Stopped._");
         outcome = r.stopReason === "cancelled" ? "stopped" : "done";

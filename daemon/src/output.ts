@@ -5,6 +5,8 @@
 // tool calls), split to Slack's 12k limit. The session status (Slack's "Working…" and stop
 // button) brackets the turn.
 
+import { realpathSync } from "node:fs";
+
 export const MAX_TEXT = 12_000;
 // chat.appendStream is Tier 4 (100+/min) shared by every user: at most one append a second.
 const FLUSH_MS = 1_000;
@@ -32,12 +34,37 @@ export interface ToolInfo {
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
 // A text's lines; its final newline ends the last line, it does not start another.
 const linesOf = (s?: string | null) => (s ? s.replace(/\n$/, "").split("\n") : []);
-export const lineCount = (s?: string | null) => linesOf(s).length;
 // A card's output renders Markdown when expanded (```diff in colour, verified on Slack); fences
 // are closed after clipping so a cut never leaves one open.
 const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(body.replaceAll("\`\`\`", "ˋˋˋ"), max)}\n\`\`\``;
-const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) =>
-  [...linesOf(oldText).map((l) => `-${l}`), ...linesOf(newText).map((l) => `+${l}`)].join("\n");
+/** What an edit changed: the lines left once those both versions share at the start and end are set aside.
+ * opencode reports a whole file before and after each edit. */
+export function changed(oldText: string | null | undefined, newText: string | null | undefined) {
+  const a = linesOf(oldText);
+  const b = linesOf(newText);
+  let at = 0;
+  while (at < a.length && at < b.length && a[at] === b[at]) at++;
+  let end = 0;
+  while (end < a.length - at && end < b.length - at && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
+  // ponytail: one hunk from the first to the last change; edits far apart show the lines between them too.
+  return { at, removed: a.slice(at, a.length - end), added: b.slice(at, b.length - end) };
+}
+const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) => {
+  const { at, removed, added } = changed(oldText, newText);
+  return [`@@ -${at + 1},${removed.length} +${at + 1},${added.length} @@`, ...removed.map((l) => `-${l}`), ...added.map((l) => `+${l}`)].join("\n");
+};
+
+// A path relative to the folder; the agent may report it under the folder's real path (a symlink resolved).
+const relTo = (cwd: string) => {
+  let real = cwd;
+  try {
+    real = realpathSync(cwd);
+  } catch {}
+  return (p: string) => {
+    for (const root of [cwd, real]) if (p.startsWith(`${root}/`)) return p.slice(root.length + 1);
+    return p;
+  };
+};
 
 /** Turn diffs longer than this (what a card shows) also go to the thread as a changes.diff snippet. */
 export const DIFF_IN_CARD = 400;
@@ -54,7 +81,7 @@ export function editsOf(u: any, input: any): { path: string; oldText?: string | 
 
 /** The full diff of a finished edit, or undefined: "--- path / +++ path" then -/+ lines per file. */
 export function fullDiff(u: any, cwd: string, input?: any): string | undefined {
-  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+  const rel = relTo(cwd);
   const diffs = editsOf(u, input);
   if (!diffs.length) return undefined;
   return diffs.map((d: any) => `--- ${rel(d.path)}\n+++ ${rel(d.path)}\n${diffLines(d.oldText, d.newText)}`).join("\n");
@@ -62,7 +89,7 @@ export function fullDiff(u: any, cwd: string, input?: any): string | undefined {
 
 /** Describes an ACP tool_call / tool_call_update for a card. `input` is the tool's latest rawInput. */
 export function describeTool(u: any, input: any, cwd: string): ToolInfo {
-  const rel = (p: string) => (p.startsWith(`${cwd}/`) ? p.slice(cwd.length + 1) : p);
+  const rel = relTo(cwd);
   const i = input ?? {};
   const path: string | undefined = i.filePath ?? i.path ?? u.locations?.[0]?.path;
   const command = typeof i.command === "string" ? i.command : undefined;
@@ -79,6 +106,7 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   // opencode's code tool ("execute") runs code that calls MCP tools: titled by the tools it calls.
   const called = typeof i.code === "string" ? [...i.code.matchAll(/\btools\.(\w+)(?:\.(\w+)|\[["'](\w+)["']\])/g)].map((m) => `${m[1]}.${m[2] ?? m[3]}`) : [];
   if (called.length) title = [...new Set(called)].join(", ");
+  else if (typeof i.code === "string" && i.code.trim()) title = i.code.trim().split("\n")[0]; // no tool called: its first line
   if (child && title) title = `↳ ${title}`;
   const sources = typeof i.url === "string" && /^https?:\/\//.test(i.url) ? [{ type: "url" as const, text: clip(i.url, DETAILS_MAX), url: i.url }] : undefined;
   let details: string | undefined;
@@ -99,7 +127,10 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
     if (failed || u.rawOutput?.metadata?.error === true) status = "failed";
     const room = OUTPUT_MAX - 40; // headers and fences
     if (diffs.length) {
-      const head = diffs.map((d) => `${rel(d.path)}  +${lineCount(d.newText)} −${lineCount(d.oldText)}`).join("\n");
+      const head = diffs.map((d) => {
+        const { added, removed } = changed(d.oldText, d.newText);
+        return `${rel(d.path)}  +${added.length} −${removed.length}`;
+      }).join("\n");
       output = `${head}\n${fence(diffs.map((d) => diffLines(d.oldText, d.newText)).join("\n"), room - head.length, "diff")}`;
     } else if (text) output = `${failed}${fence(text, room)}`;
     else if (failed) output = failed.trim();
@@ -117,6 +148,12 @@ type Api = (method: string, params: Record<string, unknown>) => Promise<any>;
 type Log = (msg: string, extra?: unknown) => void;
 type Chunk = { type: string; [k: string]: unknown };
 
+/** The code fence a Markdown text leaves open ("```diff"), or "". */
+const openFence = (text: string) => {
+  const fences = text.match(/^```.*$/gm) ?? [];
+  return fences.length % 2 === 1 ? fences[fences.length - 1] : "";
+};
+
 /** Splits Markdown into parts of at most `max` characters, closing and reopening code fences at the cuts. */
 export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
   const parts: string[] = [];
@@ -128,8 +165,7 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
     if (cut <= 0) cut = budget;
     let part = reopen + rest.slice(0, cut);
     rest = rest.slice(cut).replace(/^\n/, "");
-    const fences = part.match(/^```.*$/gm) ?? [];
-    const open = fences.length % 2 === 1 ? fences[fences.length - 1] : "";
+    const open = openFence(part);
     if (open) part += "\n```";
     reopen = open ? `${open}\n` : "";
     parts.push(part);
@@ -143,6 +179,10 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   const { channel, thread } = where;
   let streaming = true; // until a stream call fails, for the rest of this turn
   let stream: { ts: string; started: number } | null = null;
+  // Text can go on in a new message (Slack's size or age limit, or plain messages): the Markdown sent into
+  // the current one tells whether it ends inside a code fence, which the next one then reopens.
+  let sent = "";
+  let reopen = "";
   let pending = "";
   let afterTool = false;
   let quiet = false; // a tool ran and no text has come since
@@ -168,22 +208,49 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     await api("chat.stopStream", { channel, ts, ...(blocks && { blocks }) }); // also sets the session back to active
   }
 
+  const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
+
+  // A new stream message carries the cards still running and, before text, the fence the last one left open.
+  async function start(chunks: Chunk[]) {
+    const open = [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
+    const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
+    reopen = "";
+    const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
+    stream = { ts: r.ts, started: Date.now() };
+    sent = textOf(lead);
+  }
+
+  // Ends the stream message for a new one to go on; a fence left open is closed when the message still takes it.
+  async function roll(close: boolean) {
+    const fence = openFence(sent);
+    if (fence && close && stream) await api("chat.appendStream", { channel, ts: stream.ts, chunks: [{ type: "markdown_text", text: "\n```" }] }).catch(() => {});
+    await stopStream();
+    reopen = fence;
+  }
+
   async function send(chunks: Chunk[]): Promise<boolean> {
     if (!streaming) return false;
     try {
-      if (stream && Date.now() - stream.started > STREAM_MAX_AGE_MS) await stopStream();
+      if (stream && Date.now() - stream.started > STREAM_MAX_AGE_MS) await roll(true);
       if (stream) {
-        await api("chat.appendStream", { channel, ts: stream.ts, chunks });
+        try {
+          await api("chat.appendStream", { channel, ts: stream.ts, chunks });
+        } catch (err) {
+          // A message full to Slack's size limit: the turn goes on in a new one.
+          if (!String(err).includes("msg_too_long")) throw err;
+          await roll(false);
+          await start(chunks);
+        }
       } else {
-        const open = [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
-        const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...chunks] });
-        stream = { ts: r.ts, started: Date.now() };
+        await start(chunks);
       }
+      sent += textOf(chunks);
       for (const c of chunks) if (c.type === "task_update") sentTasks.set(c.id as string, c);
       return true;
     } catch (err) {
       log("stream_fallback", { error: String(err) });
       streaming = false;
+      reopen ||= openFence(sent);
       await stopStream().catch(() => {});
       await status("processing");
       return false;
@@ -198,7 +265,10 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     if (!text.trim()) return;
     const pieces = text.match(/[\s\S]{1,12000}/g)!;
     if (await send(pieces.map((t) => ({ type: "markdown_text", text: t })))) return;
-    for (const part of splitMarkdown(text.trim())) await api("chat.postMessage", { channel, thread_ts: thread, markdown_text: part });
+    // Plain messages from here; the first one reopens a fence the stream left open.
+    const body = reopen ? `${reopen}\n${text.replace(/^\n+/, "")}` : text.trim();
+    reopen = "";
+    for (const part of splitMarkdown(body)) await api("chat.postMessage", { channel, thread_ts: thread, markdown_text: part });
   }
 
   function tool(id: string, info: ToolInfo) {

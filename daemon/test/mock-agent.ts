@@ -2,6 +2,7 @@
 //   prompt containing "perm": asks for permission, then reports the chosen option
 //   prompt "silent": runs a tool and ends the turn without replying; the daemon's nudge
 //     ("...without replying...") gets "Here is the result."
+//   prompt "mute": like "silent", and the nudge gets no reply either
 //   prompt containing "upload": writes report.txt in the session folder and sends it with the
 //     daemon's send_file MCP tool
 //   any other prompt: "On it, " "checking." <tool call> "Done."
@@ -16,6 +17,7 @@ const log = (entry: unknown) => appendFileSync(process.env.MOCK_AGENT_LOG!, JSON
 let n = existsSync(process.env.MOCK_AGENT_LOG!) ? readFileSync(process.env.MOCK_AGENT_LOG!, "utf8").split("\n").filter((l) => l.includes('"m":"new"')).length : 0;
 const cancels = new Map<string, () => void>();
 let flaky = 0; // prompt "flaky" fails the first time
+const mute = new Set<string>(); // sessions whose next nudge gets no reply either
 const sessions = new Map<string, { cwd: string; mcpServers: acp.McpServer[]; updated?: number; titled?: boolean }>();
 let clock = Date.now(); // strictly increasing "last used" times
 const touch = (sessionId: string) => {
@@ -26,6 +28,19 @@ const models = (currentValue: string): acp.SessionConfigOption[] => [
   { id: "model", name: "Model", category: "model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
   { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "Build" }, { value: "plan", name: "Plan" }] },
 ];
+
+// Like opencode (2.0.26): it connects to a session's MCP servers as it creates or loads the session,
+// and drops one that does not answer for the rest of the session.
+async function connect(servers: acp.McpServer[] = []) {
+  const ok: acp.McpServer[] = [];
+  for (const s of servers) {
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "1" } } });
+    const r = await fetch((s as any).url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(() => undefined);
+    if (r?.ok) ok.push(s);
+    else log({ m: "mcp_failed", status: r?.status });
+  }
+  return ok;
+}
 
 // Like opencode: its own commands, sent right after a session is created or loaded.
 const commands: acp.AvailableCommand[] = [
@@ -52,7 +67,7 @@ new acp.AgentSideConnection(
       },
       async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers });
+        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers) });
         touch(sessionId);
         log({ m: "new", sessionId, cwd });
         announce(sessionId);
@@ -60,12 +75,12 @@ new acp.AgentSideConnection(
       },
       async unstable_forkSession({ sessionId: from, cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers: mcpServers ?? [], titled: true });
+        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers), titled: true });
         log({ m: "new", sessionId, cwd, from });
         return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
-        sessions.set(sessionId, { cwd, mcpServers, titled: true }); // it has a history
+        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers), titled: true }); // it has a history
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
@@ -131,7 +146,8 @@ new acp.AgentSideConnection(
           const _meta = { "opencode/child-session": { id: "ses_child", title: "Count" } };
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "CHILD REPLY" }, _meta } });
           await say(sessionId, "Parent reply.");
-        } else if (text === "silent") {
+        } else if (text === "silent" || text === "mute" || (text.includes("without replying") && mute.delete(sessionId))) {
+          if (text === "mute") mute.add(sessionId);
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "s1", status: "completed" } });
         } else if (text.includes("without replying")) {
