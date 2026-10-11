@@ -495,6 +495,12 @@ export function createGateway(cfg: GatewayConfig) {
       if (ev?.type === "agent_session_stopped") return ev.user ? { userId: ev.user, channel: ev.channel } : null;
       if (ev?.type === "app_home_opened") return ev.tab === "home" && ev.user ? { userId: ev.user } : null;
       if (!ev || ev.type !== "message" || ev.channel_type !== "im") return null;
+      // A user's edit: the author is inside. Bot edits (every chat.update) and unfurls (same text) stay out.
+      if (ev.subtype === "message_changed") {
+        const m = ev.message;
+        if (!m?.user || m.bot_id || m.text === ev.previous_message?.text) return null;
+        return { userId: m.user, channel: ev.channel };
+      }
       if (ev.bot_id || !ev.user) return null;
       if (ev.subtype && ev.subtype !== "file_share") return null;
       return { userId: ev.user, channel: ev.channel };

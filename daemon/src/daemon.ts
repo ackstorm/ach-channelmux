@@ -1160,6 +1160,11 @@ export function createDaemon(cfg: DaemonConfig) {
 
   app.message(async ({ message }) => {
     const m = message as any;
+    if (m.subtype === "message_changed") {
+      // Edits never reach the agent: only their author sees this, in the message's thread.
+      const e = m.message;
+      return void (await slack.chat.postEphemeral({ channel: m.channel, user: e.user, thread_ts: e.thread_ts ?? e.ts, text: "✏️ Edits don't reach the agent. Send a new message instead." }).catch(() => {}));
+    }
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts && /^\s*\$[a-z][\w-]*\s*(\n|$)/i.test(m.text ?? "")) {
       // A command outside a thread: there is no session to run it on.

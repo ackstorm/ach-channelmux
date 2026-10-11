@@ -720,7 +720,7 @@ test("a session the agent has not titled yet shows as Untitled, not opencode's t
   assert.equal(option.text.text, "Untitled");
 });
 
-test("edits are ignored, before the picker and in a session", async () => {
+test("an edit never reaches the agent; its author gets a notice in the thread", async () => {
   const edit = (ts: string, text: string, thread_ts?: string) =>
     slack.dm("UPEPE", "", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts, thread_ts, text }, previous_message: { text: "old" } });
   await slack.emit("events_api", slack.dm("UPEPE", "lsit files", { ts: "700.000001" }));
@@ -730,7 +730,10 @@ test("edits are ignored, before the picker and in a session", async () => {
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "lsit files"));
   await turnEnded("700.000001");
   await slack.emit("events_api", edit("700.000001", "list all files"));
-  await sleep(200);
+  await waitFor(() => calls("chat.postEphemeral").filter((c) => c.params.thread_ts === "700.000001").length === 2);
+  const notice = calls("chat.postEphemeral").at(-1)!.params;
+  assert.equal(notice.user, "UPEPE");
+  assert.equal(notice.text, "✏️ Edits don't reach the agent. Send a new message instead.");
   assert.equal(agentLog().some((e) => e.m === "prompt" && /list (all )?files/.test(e.text)), false);
 });
 
