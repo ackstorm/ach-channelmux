@@ -210,9 +210,11 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
 
+  const running = () => [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
+
   // A new stream message carries the cards still running and, before text, the fence the last one left open.
   async function start(chunks: Chunk[]) {
-    const open = [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
+    const open = running();
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
     const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
@@ -224,8 +226,18 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   async function roll(close: boolean) {
     const fence = openFence(sent);
     if (fence && close && stream) await api("chat.appendStream", { channel, ts: stream.ts, chunks: [{ type: "markdown_text", text: "\n```" }] }).catch(() => {});
+    if (close) await settle();
     await stopStream();
     reopen = fence;
+  }
+
+  // A card still running when its message ends would stay unfinished there (red after a pause, a spinner
+  // after a rollover): it is closed with a pointer, and the next message shows it running again.
+  async function settle() {
+    const open = running();
+    if (!stream || !open.length) return;
+    const chunks = open.map((t) => ({ type: "task_update", id: t.id, title: t.title, status: "complete", output: "↓ continues below" }));
+    await api("chat.appendStream", { channel, ts: stream.ts, chunks }).catch(() => {});
   }
 
   async function send(chunks: Chunk[]): Promise<boolean> {
@@ -344,6 +356,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
       suspended = true;
       return run(async () => {
         await flush();
+        await settle();
         await stopStream().catch(() => {});
         await status("suspended");
       });

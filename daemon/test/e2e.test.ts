@@ -283,11 +283,12 @@ test("Slack's stop button cancels the running turn; a message meanwhile is queue
   await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000005", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait"));
   await slack.emit("events_api", slack.dm("UPEPE", "and then this", { ts: "100.000006", thread_ts: "100.000001" }));
-  await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")));
+  const notice = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")));
   await sleep(150); // past doneNoticeMs
   await slack.emit("events_api", stopEvent("100.000001"));
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === notice.ts && c.params.text === "📬 Queued, now running." && c.params.blocks === "[]")); // no Send now left
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
   // A long turn ends with a notice in the main view, which notifies, linking its thread.
   await waitFor(() => posts.find((p) => !p.params.thread_ts && /^⏹️ Stopped in `beta` · \d+s → <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p100000001\|Open thread>$/.test(p.params.text ?? "")));
@@ -599,7 +600,7 @@ test("Recent folders in the modal; the thread offers previous sessions, continue
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 *Session ses_1* · \`ses_1\`\n↩️ <https://example.slack.com/archives/D_UPEPE/p100000001|previous thread>`);
   // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
   const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.markdown_text?.includes("Session recap"))!.params.markdown_text;
-  assert.equal(recap, "**📜 Session recap**\n\n> **You:** fix the bug\n>\n> **Agent:** OLD HISTORY");
+  assert.equal(recap, "**📜 Session recap**\n\n> **You:** fix the bug\n>\n> **Agent:** OLD HISTORY [code] That ran.");
   await slack.emit("events_api", slack.dm("UPEPE", "hello?", { ts: "100.000099", thread_ts: "100.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /no agent session/.test(p.params.text)));
 });
@@ -767,26 +768,31 @@ test("editing the first message keeps the relay's context block", async () => {
 });
 
 test("a folder the message names is offered first: one tap chooses it, then the thread asks for the session", async () => {
+  mkdirSync(join(elsewhere, "deep-sea"));
+  mkdirSync(join(base, "alpha", "snake_game"));
   const buttons = (msg: any) => JSON.parse(msg.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id, e.value]);
-  await slack.emit("events_api", slack.dm("UPEPE", "check the DEEP folder, please", { ts: "920.000001" }));
+  // A short plain name ("deep") is too often just a word in the sentence: not offered.
+  await slack.emit("events_api", slack.dm("UPEPE", "go deep on this", { ts: "919.000001" }));
+  assert.equal((await pickerFor("919.000001")).params.text, "👋 Hi Mary Ann! Pick the folder to work in.");
+  await slack.emit("events_api", slack.dm("UPEPE", "check the DEEP-SEA folder, please", { ts: "920.000001" }));
   let msg = await pickerFor("920.000001");
-  assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in `gamma/deep`?");
+  assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in `gamma/deep-sea`?");
   assert.deepEqual(buttons(msg), [
-    [`📁 ${join(base, "gamma/deep")}`, "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep" })],
+    [`📁 ${join(base, "gamma/deep-sea")}`, "picker_suggest_0", JSON.stringify({ thread: "920.000001", cwd: "gamma/deep-sea" })],
     ["📂 Choose folder", "picker_open_modal", "920.000001"],
   ]);
   await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: buttons(msg)[0][2] });
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep` → <.*\|Open thread>$/.test(c.params.text)));
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep-sea` → <.*\|Open thread>$/.test(c.params.text)));
   await answerNew("920.000001");
-  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP folder, please"));
-  assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep")));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP-SEA folder, please"));
+  assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep-sea")));
   await turnEnded("920.000001");
 
   // Several folders: one button each, last used first.
-  await slack.emit("events_api", slack.dm("UPEPE", "alpha or deep?", { ts: "922.000001" }));
+  await slack.emit("events_api", slack.dm("UPEPE", "Snake-Game or deep-sea?", { ts: "922.000001" }));
   msg = await pickerFor("922.000001");
   assert.equal(msg.params.text, "👋 Hi Mary Ann! Work in one of these folders?");
-  assert.deepEqual(buttons(msg).map((b: any) => b[0]), [`📁 ${join(base, "gamma/deep")}`, `📁 ${join(base, "alpha")}`, "📂 Choose folder"]);
+  assert.deepEqual(buttons(msg).map((b: any) => b[0]), [`📁 ${join(base, "gamma/deep-sea")}`, `📁 ${join(base, "alpha/snake_game")}`, "📂 Choose folder"]);
 });
 
 test("the Home tab shows the agent, defaults for new sessions and recent threads; a default applies to the next new session", async () => {
@@ -802,7 +808,7 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   const model = home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model");
   assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["*Model*   agent default", undefined, "Change…"]);
   const recent = home.blocks[home.blocks.findIndex((b: any) => b.text?.text === "Recent threads") + 1].text.text;
-  assert.match(recent, /📁 \*deep\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|[^>]+>/); // the title is the link
+  assert.match(recent, /📁 \*deep-sea\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|[^>]+>/); // the title is the link
 
   n = published().length;
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, view: { id: "V_HOME", type: "home" }, actions: [{ type: "static_select", action_id: "home_default:model", selected_option: { value: "m2" } }] }, true);

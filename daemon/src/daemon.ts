@@ -539,12 +539,15 @@ export function createDaemon(cfg: DaemonConfig) {
   // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
   function prompt(t: Thread, content: acp.ContentBlock[] | Promise<acp.ContentBlock[]>, opts: { title?: string; ts?: string } = {}) {
     const { title, ts } = opts;
+    let notice: Promise<any> | undefined;
     if (outputs.has(t.sessionId)) {
       const queued = "📬 Queued: I'll start on this when the current turn ends.";
       // The button stops only the turn running now, not whichever runs when it is tapped.
-      void say(t, queued, [section(queued, button("Send now", "queue_now", JSON.stringify({ thread: t.thread, turn: turnOf.get(t.sessionId) })))]);
+      notice = say(t, queued, [section(queued, button("Send now", "queue_now", JSON.stringify({ thread: t.thread, turn: turnOf.get(t.sessionId) })))]);
     }
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
+      // Its turn has come: the notice loses its button.
+      void notice?.then((m) => slack.chat.update({ channel: t.channel, ts: m.ts, text: "📬 Queued, now running.", blocks: [] })).catch(() => {});
       const started = Date.now();
       const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
@@ -712,13 +715,15 @@ export function createDaemon(cfg: DaemonConfig) {
   }
 
   // Folders the message names, by whole folder name (any case, ignoring - _ .): last used first, then
-  // BASE_DIR three levels down. At most 3.
+  // BASE_DIR three levels down. At most 3. A short plain name ("test", "snake") is too often just a word
+  // in the sentence: only names of 6+ characters, or with - _ . or a digit, count.
+  const nameable = (name: string) => name.length >= 6 || /[-_.\d]/.test(name);
   function named(text: string, list: { rel: string }[]) {
     const norm = (w: string) => w.toLowerCase().replace(/[-_.]/g, "");
     const words = new Set(text.split(/[^\p{L}\p{N}._-]+/u).map(norm).filter((w) => w.length >= 3));
     // ponytail: the walk stops at search's 100 folders; a bigger tree may miss a named folder.
     const rels = [...new Set([...list.map((x) => x.rel), ...search("")])];
-    return rels.filter((r) => r && words.has(norm(basename(r)))).slice(0, 3);
+    return rels.filter((r) => r && nameable(basename(r)) && words.has(norm(basename(r)))).slice(0, 3);
   }
 
   // The agent's sessions under baseDir, newest first. The agent may store a session's real path,
@@ -872,7 +877,8 @@ export function createDaemon(cfg: DaemonConfig) {
         await open(t);
         // The last exchanges, one paragraph each, out of the envelopes and context blocks we added.
         const lines = (history.get(choice) ?? []).flatMap(({ who, text }) => {
-          let s = text.replace(/<\/?slack[^>]*>/g, "").replace(/\[Context from the Slack relay[\s\S]*?\[End of relay context\]/g, "").replace(/\s+/g, " ").trim();
+          // Code reads badly on one line: a block shows as [code].
+          let s = text.replace(/<\/?slack[^>]*>/g, "").replace(/```[\s\S]*?(```|$)/g, " [code] ").replace(/\[Context from the Slack relay[\s\S]*?\[End of relay context\]/g, "").replace(/\s+/g, " ").trim();
           if (!s) return [];
           if (s.length > 300) s = `${s.slice(0, 300)}…`;
           for (const mark of ["**", "`"]) if (s.split(mark).length % 2 === 0) s += mark; // a cut never leaves one open

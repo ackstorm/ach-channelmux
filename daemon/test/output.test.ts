@@ -99,6 +99,24 @@ test("pause ends the stream and suspends the session; later text opens a new str
   ]);
 });
 
+test("a card running when the stream pauses is closed there with a pointer and runs on in the next message", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.tool("t1", { title: "execute", status: "in_progress" }); // e.g. waiting for the user's answer
+  await out.pause();
+  await out.resume();
+  await out.tool("t1", { title: "slack.ask_user", status: "completed" });
+  await out.end();
+  const cards = calls.filter((c) => c.method.startsWith("chat.")).map((c) => [c.method, ...(c.params.chunks ?? []).map((x: any) => `${x.title}:${x.status}${x.output ? `:${x.output}` : ""}`)]);
+  assert.deepEqual(cards, [
+    ["chat.startStream", "execute:in_progress"],
+    ["chat.appendStream", "execute:complete:↓ continues below"],
+    ["chat.stopStream"],
+    ["chat.startStream", "execute:in_progress", "slack.ask_user:complete"],
+    ["chat.stopStream"],
+  ]);
+});
+
 test("task cards get short ids and repeated identical updates are not sent", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
