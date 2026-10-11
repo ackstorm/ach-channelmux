@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { changed, createOutput, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
+import { changed, createOutput, describePermission, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
   const calls: { method: string; params: any }[] = [];
@@ -127,6 +127,17 @@ test("task cards get short ids and repeated identical updates are not sent", asy
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
   assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["t1", "in_progress"], ["t1", "complete"]]);
+});
+
+test("describePermission says what the agent wants to do to what", () => {
+  const cwd = "/w/app";
+  // opencode's write: kind edit, the new content shown
+  assert.equal(describePermission({ title: "notes.txt", kind: "edit" }, { path: "/w/app/notes.txt", content: "hello" }, cwd), "🔐 The agent wants to edit `notes.txt`\n```\nhello\n```");
+  // a path outside the folder comes as kind "other"
+  assert.equal(describePermission({ title: "/tmp/x.png", kind: "other" }, { path: "/tmp/x.png" }, cwd), "🔐 The agent wants to access `/tmp/x.png`");
+  assert.equal(describePermission({ title: "calc.py", kind: "read" }, { filePath: "/w/app/calc.py" }, cwd), "🔐 The agent wants to read `calc.py`");
+  // anything else: the tool's title and its input as JSON
+  assert.equal(describePermission({ title: "todo", kind: "other" }, { items: 2 }, cwd), '🔐 The agent wants to use *todo*\n```\n{"items":2}\n```');
 });
 
 test("describeTool turns opencode's tool updates into card title, details and output", () => {

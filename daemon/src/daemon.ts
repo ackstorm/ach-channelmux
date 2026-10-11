@@ -14,7 +14,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { DIFF_IN_CARD, changed, createOutput, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
+import { DIFF_IN_CARD, changed, createOutput, describePermission, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -206,10 +206,7 @@ export function createDaemon(cfg: DaemonConfig) {
       if (!t) return { outcome: { outcome: "cancelled" } };
       await outputs.get(sessionId)?.pause();
       const id = randomUUID();
-      const input = toolCall.rawInput ?? inputs.get(toolCall.toolCallId);
-      const i = (input ?? {}) as Record<string, unknown>;
-      const shown = typeof i.command === "string" ? i.command : typeof i.filePath === "string" ? i.filePath : input ? JSON.stringify(input) : "";
-      const what = `🔐 The agent wants to run *${toolCall.title ?? toolCall.kind ?? "a tool"}*${shown ? `\n\`\`\`\n${shown.slice(0, 500)}\n\`\`\`` : ""}`;
+      const what = describePermission(toolCall, toolCall.rawInput ?? inputs.get(toolCall.toolCallId), t.cwd);
       permissionTexts.set(id, what);
       const chosen = new Promise<string | undefined>((resolve) => permissions.set(id, { sessionId, resolve }));
       await say(t, what, [
@@ -668,12 +665,11 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // A Slack message for the agent, wrapped so the session shows what came from Slack, from whom
   // and when (the relay preamble explains the envelope). Attachment notes go inside.
-  async function blocksFor(m: Where & { text?: string; files?: any[]; user?: string }, edited = false): Promise<acp.ContentBlock[]> {
+  async function blocksFor(m: Where & { text?: string; files?: any[]; user?: string }): Promise<acp.ContentBlock[]> {
     const [notes, who] = await Promise.all([attachments(m.files, m), person(m.user)]);
     const body = [m.text, ...notes].filter(Boolean).join("\n\n").replaceAll("</slack>", "<\\/slack>");
     const from = who.name ? ` from="${attr(who.name)}"` : "";
-    const edit = edited ? ` edited="true"` : "";
-    return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}"${edit}>\n${body}\n</slack>` }];
+    return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}">\n${body}\n</slack>` }];
   }
 
   // ---------- picker: the folder in the main view, then a new or previous session in the thread ----------
@@ -1164,7 +1160,6 @@ export function createDaemon(cfg: DaemonConfig) {
 
   app.message(async ({ message }) => {
     const m = message as any;
-    if (m.subtype === "message_changed") return edited(m.message);
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
     if (!m.thread_ts && /^\s*\$[a-z][\w-]*\s*(\n|$)/i.test(m.text ?? "")) {
       // A command outside a thread: there is no session to run it on.
@@ -1186,21 +1181,6 @@ export function createDaemon(cfg: DaemonConfig) {
     if (held) return void (await say(where, held.cwd === undefined ? "Choose a folder above first." : "Choose a new or previous session above first."));
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
-
-  // An edited message: before the picker it just changes the first prompt; in a session it goes to
-  // the agent as a correction. Edited commands do not run again.
-  async function edited(m: any) {
-    const p = pending.get(m.ts);
-    if (p) {
-      // Keep the context block the relay appended to the original (it does not add it to edits).
-      const context = p.text.indexOf("\n\n[Context from the Slack relay");
-      p.text = m.text + (context >= 0 ? p.text.slice(context) : "");
-      return save();
-    }
-    const t = threads[m.thread_ts ?? m.ts];
-    if (!t || !m.text || /^\s*[$!]/.test(m.text)) return;
-    void prompt(t, blocksFor({ ...m, files: undefined }, true), { ts: m.ts });
-  }
 
   // A new message waits for the picker, in the DM's main view: its button (re)opens the modal.
   // The thread opens once a session starts.
@@ -1395,7 +1375,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const what = permissionTexts.get(id) ?? "🔐 Permission request";
     permissionTexts.delete(id);
     resolve?.(optionId);
-    const text = resolve ? `${what}: ${name}` : `${what}: expired`;
+    const text = `${what}\n→ *${resolve ? name : "expired"}*`;
     await slack.chat.update({ channel: b.channel.id, ts: b.message.ts, text, blocks: [] });
   });
 

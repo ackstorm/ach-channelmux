@@ -66,6 +66,20 @@ const relTo = (cwd: string) => {
   };
 };
 
+// ACP tool kinds as verbs; opencode sends "other" for a path outside the folder.
+const VERBS: Record<string, string> = { read: "read", edit: "edit", delete: "delete", move: "move", execute: "run", fetch: "fetch", search: "search" };
+/** A permission request in words: what the agent wants to do to what, plus the command or the new content. */
+export function describePermission(toolCall: any, input: any, cwd: string) {
+  const i = input ?? {};
+  const path: string | undefined = i.filePath ?? i.path ?? toolCall.locations?.[0]?.path;
+  if (typeof i.command === "string") return `🔐 The agent wants to run:\n${fence(i.command, 500)}`;
+  const verb = VERBS[toolCall.kind] ?? (path ? "access" : "use");
+  const subject = path ? `\`${relTo(cwd)(path)}\`` : `*${toolCall.title ?? "a tool"}*`;
+  const content = typeof i.content === "string" ? i.content : typeof i.newString === "string" ? i.newString : undefined;
+  const shown = content ?? (path || !input ? "" : JSON.stringify(input));
+  return `🔐 The agent wants to ${verb} ${subject}${shown ? `\n${fence(shown, 500)}` : ""}`;
+}
+
 /** Turn diffs longer than this (what a card shows) also go to the thread as a changes.diff snippet. */
 export const DIFF_IN_CARD = 400;
 
