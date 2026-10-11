@@ -435,7 +435,7 @@ export function createDaemon(cfg: DaemonConfig) {
   }
 
   const mcp = createServer(async (req, res) => {
-    const [, root, key, thread] = (req.url ?? "").split("/");
+    const [, root, key, thread] = new URL(req.url ?? "/", "http://mcp").pathname.split("/");
     // The agent may connect while it creates the session, before the thread is known (opencode 2.0.26 does,
     // and drops a server that refuses it): only a tool call needs the thread, looked up when it comes.
     const t = threads[thread];
@@ -455,6 +455,7 @@ export function createDaemon(cfg: DaemonConfig) {
       res.end(JSON.stringify({ jsonrpc: "2.0", id: msg.id, ...body }));
     };
     const p = msg.params ?? {};
+    if (msg.method === "tools/call" && !t) log("mcp_unknown_thread", { thread, tool: p.name });
     if (msg.method === "initialize") {
       return reply({ result: { protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "slack", version: "1" } } });
     }
