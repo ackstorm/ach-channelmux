@@ -203,6 +203,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   let timer: ReturnType<typeof setTimeout> | undefined;
   let refresh: ReturnType<typeof setInterval> | undefined;
   let suspended = false;
+  const held = new Set<string>(); // cards updated during a pause: a new message would show them running under the question
   let thinking: { id: string; text: string } | null = null; // the model's thinking since its last text or tool
   let thoughts = 0;
   const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
@@ -228,7 +229,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
 
   // A new stream message carries the cards still running and, before text, the fence the last one left open.
   async function start(chunks: Chunk[]) {
-    const open = running();
+    const open = running().filter((t) => !chunks.some((c) => c.id === t.id));
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
     const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
@@ -323,9 +324,16 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     const chunk = { ...task };
     for (const k of ["details", "output", "sources"]) if (same(k)) delete chunk[k];
     return run(async () => {
+      if (suspended) return void held.add(id);
       await flush();
       await send([chunk]);
     });
+  }
+  // The held cards, whole: the message they go to has not shown them yet.
+  async function release() {
+    const cards = [...held].map((id) => tasks.get(id)!);
+    held.clear();
+    if (cards.length) await send(cards);
   }
 
   // The model's thinking is one folded card per stretch: opened when it starts, filled with its
@@ -377,13 +385,18 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     },
     resume: () => {
       suspended = false;
-      return run(() => status("processing"));
+      return run(async () => {
+        await status("processing");
+        await release();
+      });
     },
     /** Blocks (e.g. feedback buttons) go under the streamed reply; without a stream they are dropped. */
     end: (blocks?: unknown[]) => {
       clearInterval(refresh);
       endThought();
+      suspended = false;
       return run(async () => {
+        await release();
         await flush();
         if (stream) await stopStream(blocks).catch(() => status("active"));
         else await status("active");

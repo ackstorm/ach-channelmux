@@ -112,7 +112,26 @@ test("a card running when the stream pauses is closed there with a pointer and r
     ["chat.startStream", "execute:in_progress"],
     ["chat.appendStream", "execute:complete:↓ continues below"],
     ["chat.stopStream"],
-    ["chat.startStream", "execute:in_progress", "slack.ask_user:complete"],
+    ["chat.startStream", "slack.ask_user:complete"],
+    ["chat.stopStream"],
+  ]);
+});
+
+test("a card updated while paused for the user waits for the resume: no message shows it running under the question", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.tool("t1", { title: "execute", status: "in_progress" });
+  await out.pause();
+  const paused = calls.length;
+  await out.tool("t1", { title: "slack.ask_user", status: "in_progress", details: "Which colour?" });
+  assert.equal(calls.length, paused); // no new stream, and the session stays suspended
+  await out.resume();
+  await out.tool("t1", { title: "slack.ask_user", status: "completed" });
+  await out.end();
+  const after = calls.slice(paused).filter((c) => c.method.startsWith("chat.")).map((c) => [c.method, ...(c.params.chunks ?? []).map((x: any) => `${x.title}:${x.status}${x.details ? `:${x.details}` : ""}`)]);
+  assert.deepEqual(after, [
+    ["chat.startStream", "slack.ask_user:in_progress:Which colour?"],
+    ["chat.appendStream", "slack.ask_user:complete"],
     ["chat.stopStream"],
   ]);
 });
