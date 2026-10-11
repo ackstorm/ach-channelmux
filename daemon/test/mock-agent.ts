@@ -31,16 +31,20 @@ const models = (currentValue: string): acp.SessionConfigOption[] => [
 
 // Like opencode (2.0.26): it connects to a session's MCP servers as it creates or loads the session,
 // and drops one that does not answer for the rest of the session. It keeps them per folder, not per
-// session: every session in a folder calls the server the last one registered.
+// session: every session in a folder calls the server the last one registered. A folder it has not
+// used yet in this process ("cold") gets its servers a moment after session/load has answered.
 const byFolder = new Map<string, acp.McpServer[]>();
 const mcpUrl = (sessionId: string) => (byFolder.get(sessions.get(sessionId)!.cwd)?.[0] as any)?.url;
 async function connect(cwd: string, servers: acp.McpServer[] = []) {
   const ok: acp.McpServer[] = [];
   for (const s of servers) {
     const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "1" } } });
-    const r = await fetch((s as any).url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(() => undefined);
-    if (r?.ok) ok.push(s);
-    else log({ m: "mcp_failed", status: r?.status });
+    const post = (body: string) => fetch((s as any).url, { method: "POST", headers: { "content-type": "application/json" }, body }).catch(() => undefined);
+    const r = await post(body);
+    if (r?.ok) {
+      ok.push(s);
+      await post(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })); // "mcp connected tools=3"
+    } else log({ m: "mcp_failed", status: r?.status });
   }
   if (ok.length) byFolder.set(cwd, ok);
   return ok;
@@ -84,7 +88,9 @@ new acp.AgentSideConnection(
         return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
-        sessions.set(sessionId, { cwd, mcpServers: await connect(cwd, mcpServers), titled: true }); // it has a history
+        const cold = !byFolder.has(cwd);
+        sessions.set(sessionId, { cwd, mcpServers: cold ? [] : await connect(cwd, mcpServers), titled: true }); // it has a history
+        if (cold) setTimeout(() => void connect(cwd, mcpServers).then((ok) => (sessions.get(sessionId)!.mcpServers = ok)), 300);
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
@@ -150,6 +156,10 @@ new acp.AgentSideConnection(
           const _meta = { "opencode/child-session": { id: "ses_child", title: "Count" } };
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "CHILD REPLY" }, _meta } });
           await say(sessionId, "Parent reply.");
+        } else if (text === "tools?") {
+          // Whether the daemon's tools were there when the turn started.
+          log({ m: "tools", ready: Boolean(mcpUrl(sessionId)) });
+          await say(sessionId, "Checked.");
         } else if (text === "silent" || text === "mute" || (text.includes("without replying") && mute.delete(sessionId))) {
           if (text === "mute") mute.add(sessionId);
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });

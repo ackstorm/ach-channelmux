@@ -465,6 +465,11 @@ export function createDaemon(cfg: DaemonConfig) {
       return reply({ result: { protocolVersion: p.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: "slack", version: "1" } } });
     }
     if (msg.method === "ping") return reply({ result: {} });
+    if (msg.method === "tools/list") {
+      const waiting = listed.get(thread);
+      for (const cwd of [waiting?.cwd, named?.cwd]) if (cwd) warm.add(cwd);
+      waiting?.done();
+    }
     if (msg.method === "tools/list") return reply({ result: { tools: [SEND_FILE, ASK_USER, ...(cfg.tts ? [SEND_VOICE] : [])] } });
     if (msg.method === "tools/call" && p.name === "ask_user") {
       try {
@@ -496,14 +501,33 @@ export function createDaemon(cfg: DaemonConfig) {
   const tools = async (thread: string): Promise<acp.McpServer[]> =>
     (await mcpHttp) ? [{ type: "http", name: "slack", url: `http://127.0.0.1:${mcpPort}/mcp/${secret}/${thread}`, headers: [] }] : [];
 
+  // opencode connects a folder's MCP servers as the folder warms up, which can be after it has answered
+  // session/new or session/load: a turn sent then starts without our tools. The first session in a folder
+  // (per run) waits until the agent lists them, at most a few seconds.
+  const warm = new Set<string>(); // folders where the agent has listed our tools this run
+  const listed = new Map<string, { cwd: string; done: () => void }>(); // thread -> waiting for that list
+  async function withTools<T>(thread: string, cwd: string, call: (mcpServers: acp.McpServer[]) => Promise<T>): Promise<T> {
+    const mcpServers = await tools(thread);
+    if (!mcpServers.length || warm.has(cwd)) return call(mcpServers);
+    const ready = new Promise<void>((done) => {
+      listed.set(thread, { cwd, done });
+      setTimeout(done, 5_000).unref?.(); // an agent that never lists them only costs the wait
+    });
+    try {
+      return await call(mcpServers);
+    } finally {
+      await ready;
+      listed.delete(thread);
+    }
+  }
+
   // Opens a session from an earlier process; the history it replays is not re-posted.
   function open(t: Thread) {
     let p = loaded.get(t.sessionId);
     if (!p) {
       replaying.add(t.sessionId);
       history.delete(t.sessionId);
-      p = tools(t.thread)
-        .then((mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
+      p = withTools(t.thread, t.cwd, (mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
         .then((r) => r?.configOptions && !configs.has(t.sessionId) && setConfigs(t.sessionId, r.configOptions));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
@@ -860,7 +884,7 @@ export function createDaemon(cfg: DaemonConfig) {
     let status = "new session";
     try {
       if (choice === "new") {
-        const { sessionId, configOptions } = await agent.newSession({ cwd, mcpServers: await tools(p.thread) });
+        const { sessionId, configOptions } = await withTools(p.thread, cwd, (mcpServers) => agent.newSession({ cwd, mcpServers }));
         await applyDefaults(sessionId, configOptions);
         t = { ...where, sessionId, cwd };
         loaded.set(sessionId, Promise.resolve());
@@ -1084,7 +1108,7 @@ export function createDaemon(cfg: DaemonConfig) {
 
   async function clear(t: Thread) {
     if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
-    const { sessionId, configOptions } = await agent.newSession({ cwd: t.cwd, mcpServers: await tools(t.thread) });
+    const { sessionId, configOptions } = await withTools(t.thread, t.cwd, (mcpServers) => agent.newSession({ cwd: t.cwd, mcpServers }));
     await applyDefaults(sessionId, configOptions);
     bySession.delete(t.sessionId);
     const fresh = { ...t, sessionId };
@@ -1102,7 +1126,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const title = (await sessions()).find((x) => x.sessionId === t.sessionId)?.title;
     const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of ${title ? `*${title}*` : "a session"} in \`${t.cwd}\`. Reply in this thread to continue it.` });
     try {
-      const { sessionId, configOptions } = await agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers: await tools(root.ts) });
+      const { sessionId, configOptions } = await withTools(root.ts, t.cwd, (mcpServers) => agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
       if (configOptions) setConfigs(sessionId, configOptions);
       const copy = { channel: t.channel, thread: root.ts, sessionId, cwd: t.cwd };
       threads[root.ts] = copy;

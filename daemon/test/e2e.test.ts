@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import { createServer as createHttpServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
@@ -441,6 +441,16 @@ test("the agent sends a file to the thread with the send_file tool, without our 
   assert.deepEqual(slack.uploads.get(id), { body: "report body", auth: undefined });
 });
 
+test("after a restart, a turn in a folder whose tools the agent connects late waits until it lists them", async () => {
+  await daemon.stop(); // a new agent process: every folder is cold again
+  daemon = newDaemon();
+  await daemon.start();
+  await slack.emit("events_api", slack.dm("UPEPE", "tools?", { ts: "100.000043", thread_ts: "100.000001" }));
+  const seen = await waitFor(() => agentLog().filter((e) => e.m === "tools").at(-1));
+  assert.equal(seen.ready, true);
+  await turnEnded("100.000043");
+});
+
 test("with one MCP server per folder (opencode), a tool call goes to the thread whose turn runs there", async () => {
   await turnEnded("100.000011"); // the upload above: $fork refuses while a turn runs
   // A fork of the thread, in the same folder, registers its own URL last.
@@ -819,8 +829,13 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
   assert.deepEqual(JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).defaults, { model: "m2" });
 
-  // After a restart, before any session loads, the Home tab still knows the agent's settings.
+  // After a restart, before any session loads, the Home tab still knows the agent's settings: those saved,
+  // here with a model the agent no longer offers.
   await daemon.stop();
+  const stateFile = join(base, ".state", "threads.json");
+  const state = JSON.parse(readFileSync(stateFile, "utf8"));
+  state.settings.find((o: any) => o.id === "model").options.push({ value: "m9", name: "Model nine" });
+  writeFileSync(stateFile, JSON.stringify(state));
   daemon = newDaemon();
   await daemon.start();
   n = published().length;
@@ -828,12 +843,11 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => published().length > n);
   assert.equal(JSON.parse(published().at(-1)!.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
 
-  // Settings that change its menus redraw the open Home tab: a loaded session's provisional list, then the full one.
+  // Settings that change its menus redraw the open Home tab: a loaded session's list drops the old model.
   const menu = (c: any) => JSON.parse(c.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").accessory.options.map((o: any) => o.text.text);
-  n = published().length;
+  assert.ok(menu(published().at(-1)).includes("Model nine"));
   await slack.emit("events_api", slack.dm("UPEPE", "$model", { ts: "920.000009", thread_ts: "920.000001" }));
-  await waitFor(() => published().slice(n).some((c) => menu(c).includes("Model zero")));
-  await waitFor(() => menu(published().at(-1)).includes("Model two"));
+  await waitFor(() => !menu(published().at(-1)).includes("Model nine") && menu(published().at(-1)).includes("Model two"));
 
   // The next new session gets it.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
