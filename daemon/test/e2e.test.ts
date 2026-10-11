@@ -442,6 +442,7 @@ test("the agent sends a file to the thread with the send_file tool, without our 
 });
 
 test("with one MCP server per folder (opencode), a tool call goes to the thread whose turn runs there", async () => {
+  await turnEnded("100.000011"); // the upload above: $fork refuses while a turn runs
   // A fork of the thread, in the same folder, registers its own URL last.
   const forks = agentLog().filter((e) => e.m === "new" && e.from).length;
   await slack.emit("events_api", slack.dm("UPEPE", "$fork", { ts: "100.000041", thread_ts: "100.000001" }));
@@ -450,6 +451,7 @@ test("with one MCP server per folder (opencode), a tool call goes to the thread 
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000042", thread_ts: "100.000001" }));
   await waitFor(() => calls("files.completeUploadExternal").length > before);
   assert.equal(calls("files.completeUploadExternal").at(-1)!.params.thread_ts, "100.000001");
+  await turnEnded("100.000042");
 });
 
 test("the agent's ask_user question is answered with a button or a reply in the thread", async () => {
