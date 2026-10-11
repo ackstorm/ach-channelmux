@@ -503,14 +503,17 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // opencode connects a folder's MCP servers as the folder warms up, which can be after it has answered
   // session/new or session/load: a turn sent then starts without our tools. The first session in a folder
-  // (per run) waits until the agent lists them, at most a few seconds.
+  // (per run) waits until the agent lists them, at most a few seconds, then until opencode has refreshed
+  // its tool catalog with them (it debounces that by 100 ms, then reloads its tools).
+  // ponytail: a fixed margin for that refresh; the agent does not say when its catalog is ready.
+  const CATALOG_SETTLE_MS = 500;
   const warm = new Set<string>(); // folders where the agent has listed our tools this run
   const listed = new Map<string, { cwd: string; done: () => void }>(); // thread -> waiting for that list
   async function withTools<T>(thread: string, cwd: string, call: (mcpServers: acp.McpServer[]) => Promise<T>): Promise<T> {
     const mcpServers = await tools(thread);
     if (!mcpServers.length || warm.has(cwd)) return call(mcpServers);
     const ready = new Promise<void>((done) => {
-      listed.set(thread, { cwd, done });
+      listed.set(thread, { cwd, done: () => setTimeout(done, CATALOG_SETTLE_MS) });
       setTimeout(done, 5_000).unref?.(); // an agent that never lists them only costs the wait
     });
     try {

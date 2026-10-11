@@ -32,10 +32,11 @@ const models = (currentValue: string): acp.SessionConfigOption[] => [
 // Like opencode (2.0.26): it connects to a session's MCP servers as it creates or loads the session,
 // and drops one that does not answer for the rest of the session. It keeps them per folder, not per
 // session: every session in a folder calls the server the last one registered. A folder it has not
-// used yet in this process ("cold") gets its servers a moment after session/load has answered.
+// used yet in this process ("cold") gets its servers a moment after session/load has answered, and its
+// tool catalog shows them 100 ms after it has listed their tools (opencode debounces that refresh).
 const byFolder = new Map<string, acp.McpServer[]>();
 const mcpUrl = (sessionId: string) => (byFolder.get(sessions.get(sessionId)!.cwd)?.[0] as any)?.url;
-async function connect(cwd: string, servers: acp.McpServer[] = []) {
+async function connect(cwd: string, servers: acp.McpServer[] = [], catalogDelay = 0) {
   const ok: acp.McpServer[] = [];
   for (const s of servers) {
     const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "1" } } });
@@ -46,7 +47,10 @@ async function connect(cwd: string, servers: acp.McpServer[] = []) {
       await post(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list", params: {} })); // "mcp connected tools=3"
     } else log({ m: "mcp_failed", status: r?.status });
   }
-  if (ok.length) byFolder.set(cwd, ok);
+  if (ok.length) {
+    if (catalogDelay) setTimeout(() => byFolder.set(cwd, ok), catalogDelay);
+    else byFolder.set(cwd, ok);
+  }
   return ok;
 }
 
@@ -90,7 +94,7 @@ new acp.AgentSideConnection(
       async loadSession({ sessionId, cwd, mcpServers }) {
         const cold = !byFolder.has(cwd);
         sessions.set(sessionId, { cwd, mcpServers: cold ? [] : await connect(cwd, mcpServers), titled: true }); // it has a history
-        if (cold) setTimeout(() => void connect(cwd, mcpServers).then((ok) => (sessions.get(sessionId)!.mcpServers = ok)), 300);
+        if (cold) setTimeout(() => void connect(cwd, mcpServers, 100).then((ok) => (sessions.get(sessionId)!.mcpServers = ok)), 300);
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
