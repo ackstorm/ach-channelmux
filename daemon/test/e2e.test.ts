@@ -440,6 +440,17 @@ test("the agent sends a file to the thread with the send_file tool, without our 
   assert.deepEqual(slack.uploads.get(id), { body: "report body", auth: undefined });
 });
 
+test("with one MCP server per folder (opencode), a tool call goes to the thread whose turn runs there", async () => {
+  // A fork of the thread, in the same folder, registers its own URL last.
+  const forks = agentLog().filter((e) => e.m === "new" && e.from).length;
+  await slack.emit("events_api", slack.dm("UPEPE", "$fork", { ts: "100.000041", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().filter((e) => e.m === "new" && e.from).length > forks);
+  const before = calls("files.completeUploadExternal").length;
+  await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000042", thread_ts: "100.000001" }));
+  await waitFor(() => calls("files.completeUploadExternal").length > before);
+  assert.equal(calls("files.completeUploadExternal").at(-1)!.params.thread_ts, "100.000001");
+});
+
 test("the agent's ask_user question is answered with a button or a reply in the thread", async () => {
   const replied = (n: number) => streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join("");
   let n = mark();
@@ -673,8 +684,9 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await say("hello again", "500.000008");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "hello again" && e.sessionId === fresh.sessionId));
 
+  const m = posts.length; // an earlier test forks too
   await say("$fork", "500.000013"); // a copy of the session in a new thread, rooted at our message
-  const root = await waitFor(() => posts.find((p) => !p.params.thread_ts && /^🍴 Fork of \*Session ses_\d+\* in /.test(p.params.text ?? "")));
+  const root = await waitFor(() => posts.slice(m).find((p) => !p.params.thread_ts && /^🍴 Fork of \*Session ses_\d+\* in /.test(p.params.text ?? "")));
   const forked = await waitFor(() => agentLog().find((e) => e.m === "new" && e.from === fresh.sessionId));
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.text?.includes(`<https://example.slack.com/archives/${DM}/p${root.ts.replace(".", "")}|the copy>`)));
   await slack.emit("events_api", slack.dm("UPEPE", "in the fork", { ts: "600.000001", thread_ts: root.ts }));

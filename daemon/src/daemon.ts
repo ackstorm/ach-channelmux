@@ -438,7 +438,12 @@ export function createDaemon(cfg: DaemonConfig) {
     const [, root, key, thread] = new URL(req.url ?? "/", "http://mcp").pathname.split("/");
     // The agent may connect while it creates the session, before the thread is known (opencode 2.0.26 does,
     // and drops a server that refuses it): only a tool call needs the thread, looked up when it comes.
-    const t = threads[thread];
+    // opencode also keeps one server per folder, not per session: every session there calls the URL the
+    // last one registered. A call belongs to the thread whose turn is running in that folder.
+    // ponytail: two turns at once in one folder go to the URL's thread; per-session routing needs the agent's help.
+    const named = threads[thread];
+    const running = named ? Object.values(threads).filter((x) => x.cwd === named.cwd && outputs.has(x.sessionId)) : [];
+    const t = running.length === 1 ? running[0] : named;
     if (root !== "mcp" || key !== secret || !thread) return void res.writeHead(404).end();
     if (req.method !== "POST") return void res.writeHead(405).end(); // no server-initiated stream
     const chunks: Buffer[] = [];

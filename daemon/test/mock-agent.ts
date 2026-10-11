@@ -30,8 +30,11 @@ const models = (currentValue: string): acp.SessionConfigOption[] => [
 ];
 
 // Like opencode (2.0.26): it connects to a session's MCP servers as it creates or loads the session,
-// and drops one that does not answer for the rest of the session.
-async function connect(servers: acp.McpServer[] = []) {
+// and drops one that does not answer for the rest of the session. It keeps them per folder, not per
+// session: every session in a folder calls the server the last one registered.
+const byFolder = new Map<string, acp.McpServer[]>();
+const mcpUrl = (sessionId: string) => (byFolder.get(sessions.get(sessionId)!.cwd)?.[0] as any)?.url;
+async function connect(cwd: string, servers: acp.McpServer[] = []) {
   const ok: acp.McpServer[] = [];
   for (const s of servers) {
     const body = JSON.stringify({ jsonrpc: "2.0", id: 0, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "mock", version: "1" } } });
@@ -39,6 +42,7 @@ async function connect(servers: acp.McpServer[] = []) {
     if (r?.ok) ok.push(s);
     else log({ m: "mcp_failed", status: r?.status });
   }
+  if (ok.length) byFolder.set(cwd, ok);
   return ok;
 }
 
@@ -67,7 +71,7 @@ new acp.AgentSideConnection(
       },
       async newSession({ cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers) });
+        sessions.set(sessionId, { cwd, mcpServers: await connect(cwd, mcpServers) });
         touch(sessionId);
         log({ m: "new", sessionId, cwd });
         announce(sessionId);
@@ -75,12 +79,12 @@ new acp.AgentSideConnection(
       },
       async unstable_forkSession({ sessionId: from, cwd, mcpServers }) {
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers), titled: true });
+        sessions.set(sessionId, { cwd, mcpServers: await connect(cwd, mcpServers), titled: true });
         log({ m: "new", sessionId, cwd, from });
         return { sessionId, configOptions: models("m1") };
       },
       async loadSession({ sessionId, cwd, mcpServers }) {
-        sessions.set(sessionId, { cwd, mcpServers: await connect(mcpServers), titled: true }); // it has a history
+        sessions.set(sessionId, { cwd, mcpServers: await connect(cwd, mcpServers), titled: true }); // it has a history
         log({ m: "load", sessionId, cwd });
         announce(sessionId);
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: '<slack from="Real UPEPE" at="2026-01-01 10:00 UTC">\nfix the bug\n</slack>' } } });
@@ -116,7 +120,7 @@ new acp.AgentSideConnection(
           await say(sessionId, "Edited.");
         } else if (text === "ask twice") {
           // Two questions at once (e.g. two subagents): the second is refused, the first still gets its answer.
-          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const url = mcpUrl(sessionId);
           const call = async (question: string, options: string[]) =>
             (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask_user", arguments: { question, options } } }) })).json()).result;
           const first = call("First?", ["Yes", " "]);
@@ -126,12 +130,12 @@ new acp.AgentSideConnection(
           await say(sessionId, `answer: ${(await first).content[0].text}`);
         } else if (text === "ask") {
           // Like an agent calling the daemon's ask_user MCP tool; the call returns the user's answer.
-          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const url = mcpUrl(sessionId);
           const r = await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "ask_user", arguments: { question: "Which one?", options: ["Red", "Blue"] } } }) });
           await say(sessionId, `answer: ${(await r.json()).result.content[0].text}`);
         } else if (text.startsWith("speak ")) {
           // Like an agent calling the daemon's send_voice MCP tool, when the daemon offers it.
-          const url = (sessions.get(sessionId)!.mcpServers[0] as any).url;
+          const url = mcpUrl(sessionId);
           const rpc = async (method: string, params: unknown) =>
             (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()).result;
           const tools = (await rpc("tools/list", {})).tools.map((t: any) => t.name);
@@ -153,9 +157,9 @@ new acp.AgentSideConnection(
         } else if (text.includes("without replying")) {
           await say(sessionId, "Here is the result.");
         } else if (text.includes("upload")) {
-          const { cwd, mcpServers } = sessions.get(sessionId)!;
+          const { cwd } = sessions.get(sessionId)!;
           writeFileSync(join(cwd, "report.txt"), "report body");
-          const url = (mcpServers[0] as any).url;
+          const url = mcpUrl(sessionId);
           const rpc = async (method: string, params: unknown) =>
             (await (await fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).json()).result;
           const tools = (await rpc("tools/list", {})).tools.map((t: any) => t.name);
