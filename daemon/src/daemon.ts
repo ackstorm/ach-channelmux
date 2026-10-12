@@ -548,16 +548,6 @@ export function createDaemon(cfg: DaemonConfig) {
   // How a turn ended, as a reaction on the message that asked for it.
   const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
   const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
-  // 👍/👎 under a finished reply: logged for whoever runs the daemon, never sent to the agent.
-  const FEEDBACK = [{
-    type: "context_actions",
-    elements: [{
-      type: "feedback_buttons",
-      action_id: "feedback",
-      positive_button: { text: { type: "plain_text", text: "👍" }, accessibility_label: "Good response", value: "good" },
-      negative_button: { text: { type: "plain_text", text: "👎" }, accessibility_label: "Bad response", value: "bad" },
-    }],
-  }];
   // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3" (the branch only in a
   // git repo, the counts only after edits). A code channel's context bar shows the rest: there only the counts.
   // ponytail: counts the edits the agent reported; changes made by shell commands are not in it.
@@ -644,11 +634,7 @@ export function createDaemon(cfg: DaemonConfig) {
         const edits = turnEdits.get(t.sessionId);
         turnEdits.delete(t.sessionId);
         const line = await footer(t, edits);
-        const blocks = [
-          ...(line ? [{ type: "context", elements: [{ type: "mrkdwn", text: line }] }] : []),
-          ...(outcome === "done" ? FEEDBACK : []),
-        ];
-        await out.end(blocks.length ? blocks : undefined);
+        await out.end(line ? [{ type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
         // Edits too long for their cards: the whole turn's changes as one diff snippet.
         const diffs = turnDiffs.get(t.sessionId);
         turnDiffs.delete(t.sessionId);
@@ -877,15 +863,14 @@ export function createDaemon(cfg: DaemonConfig) {
   const previous = async (p: Pick) =>
     (await sessions()).filter((x) => x.rel === p.cwd && (isDM(p.channel) || bySession.get(x.sessionId)?.channel === p.channel));
 
-  // The thread's question once the folder is chosen. New session always; previous ones when there are.
-  async function question(p: Pick) {
-    const any = (await previous(p)).length > 0;
-    const text = `📁 \`${abs(p.cwd)}\`\n${any ? "New session, or continue one?" : "No sessions here yet."}`;
+  // The thread's question once the folder is chosen, when it has sessions to continue.
+  function question(p: Pick) {
+    const text = `📁 \`${abs(p.cwd)}\`\nNew session, or continue one?`;
     return {
       text,
       blocks: [
         section(text),
-        { type: "actions", elements: [{ ...button("🆕 New session", "session_new", p.thread), style: "primary" }, ...(any ? [button("↩ Previous session…", "session_previous", p.thread)] : [])] },
+        { type: "actions", elements: [{ ...button("🆕 New session", "session_new", p.thread), style: "primary" }, button("↩ Previous session…", "session_previous", p.thread)] },
       ],
     };
   }
@@ -911,7 +896,9 @@ export function createDaemon(cfg: DaemonConfig) {
     if (first.cwd !== undefined) return; // a second tap
     Object.assign(first, { cwd: p.cwd, picker: p.picker });
     save();
-    const q: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread({ thread: p.thread, top: first.top }), ...(await question(p)) } as any);
+    // No session to continue there: a new one starts, nothing to ask.
+    if (!(await previous(p)).length) return void start(p, "new").catch((err) => log("session_start_failed", { error: String(err) }));
+    const q: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread({ thread: p.thread, top: first.top }), ...question(p) } as any);
     first.question = q.ts;
     save();
     // In a channel the greeting is in the thread already: it only loses its buttons.
@@ -1460,13 +1447,6 @@ export function createDaemon(cfg: DaemonConfig) {
     await stop(t);
     const b = body as any;
     await slack.chat.update({ channel: t.channel, ts: b.message.ts, text: "📬 Sent now: the previous turn was stopped.", blocks: [] });
-  });
-
-  app.action("feedback", async ({ ack, body, action }) => {
-    await ack();
-    const b = body as any;
-    const t = threads[b.message?.thread_ts ?? b.container?.thread_ts ?? b.channel?.id];
-    log("feedback", { value: (action as any).value, session: t?.sessionId, message: b.message?.ts });
   });
 
   app.action("retry", async ({ ack, body, action }) => {

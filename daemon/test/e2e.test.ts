@@ -119,9 +119,10 @@ async function openPicker(thread: string) {
 const searched = (rel: string) => ({ search: { picker_search: { type: "external_select", selected_option: { value: rel } } } });
 // The session question the thread gets once its folder is chosen.
 const questionIn = (thread: string) => waitFor(() => posts.find((p) => p.params.thread_ts === thread && p.params.blocks?.includes("session_new")));
+// A new session: the question's button when the folder has sessions to continue; without, it starts on its own.
 async function answerNew(thread: string) {
-  const q = await questionIn(thread);
-  await click({ ts: q.ts, thread_ts: thread }, { type: "button", action_id: "session_new", value: thread });
+  const q = await waitFor(() => posts.find((p) => p.params.thread_ts === thread && (p.params.blocks?.includes("session_new") || p.params.text?.includes("💬"))));
+  if (q.params.blocks?.includes("session_new")) await click({ ts: q.ts, thread_ts: thread }, { type: "button", action_id: "session_new", value: thread });
 }
 async function openPrevious(thread: string) {
   const q = await questionIn(thread);
@@ -190,21 +191,14 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   assert.equal(view.blocks[0].text.text, `📁 \`${join(base, "beta")}\``);
   assert.deepEqual(await submit(view), { response_action: "clear" }); // "Use": the folder being browsed
 
-  // The folder is chosen: the greeting links to the thread, which asks for the session. Nothing reached the agent yet.
-  const q = await questionIn("100.000001");
-  assert.equal(q.params.text, `📁 \`${join(base, "beta")}\`\nNo sessions here yet.`);
-  assert.deepEqual(JSON.parse(q.params.blocks)[1].elements.map((e: any) => [e.text.text, e.action_id]), [["🆕 New session", "session_new"]]); // no previous ones
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && c.params.text === `📁 \`beta\` → <https://example.slack.com/archives/${DM}/p${q.ts.replace(".", "")}|Open thread>`));
-  assert.ok(!existsSync(process.env.MOCK_AGENT_LOG!) || !agentLog().some((e) => e.m === "prompt"));
-
+  // The folder is chosen and has no sessions to continue: a new one starts, without asking.
   const n = mark();
-  await answerNew("100.000001");
   await waitFor(() => calls("chat.stopStream").length > 0);
+  assert.ok(!posts.some((p) => p.params.blocks?.includes("session_new")));
   assert.deepEqual(agentLog().slice(0, 2), [
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  assert.ok(calls("chat.delete").some((c) => c.params.ts === q.ts)); // the question gives way to the header
   const header = posts.find((p) => p.params.thread_ts === "100.000001" && p.params.text?.startsWith("📁") && p.params.text.includes("💬"))!;
   assert.equal(header.params.reply_broadcast, undefined); // the header stays in the thread
   assert.equal(header.params.unfurl_links, "false"); // the previous thread's link stays a link, not a preview
@@ -363,23 +357,6 @@ test("a failed turn offers Retry, which sends the same message again", async () 
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "white_check_mark"));
 });
 
-test("a finished reply ends with 👍/👎, logged on click; a failed or stopped one does not", async () => {
-  const n = mark();
-  await slack.emit("events_api", slack.dm("UPEPE", "ok?", { ts: "100.000024", thread_ts: "100.000001" }));
-  const stop = await waitFor(() => since(n).find((c) => c.method === "chat.stopStream"));
-  const buttons = JSON.parse(stop.params.blocks).find((b: any) => b.type === "context_actions").elements[0]; // under the footer
-  assert.equal(buttons.type, "feedback_buttons");
-  await click({ ts: stop.params.ts, thread_ts: "100.000001" }, { type: "feedback_buttons", action_id: "feedback", value: "bad" });
-  const entry = await waitFor(() => logged.find((l) => l.msg === "feedback"));
-  assert.deepEqual(entry, { msg: "feedback", value: "bad", session: "ses_1", message: stop.params.ts });
-  assert.ok(!agentLog().some((e) => e.m === "prompt" && /bad/.test(e.text))); // never reaches the agent
-  const failed = mark();
-  await slack.emit("events_api", slack.dm("UPEPE", "broken", { ts: "100.000025", thread_ts: "100.000001" }));
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000025"));
-  const stops = since(failed).filter((c) => c.method === "chat.stopStream");
-  assert.ok(stops.every((c) => !c.params.blocks?.includes("feedback")));
-});
-
 test("a subagent's own reply is not streamed as the agent's reply", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "subagent", { ts: "100.000013", thread_ts: "100.000001" }));
@@ -393,10 +370,10 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   execFileSync("git", ["init", "-q", "-b", "work", join(base, "beta")]);
   await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
   const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
-  // The turn's edits, in one line under the reply, before 👍/👎.
+  // The turn's edits, in one line under the reply: the only block there.
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
   assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30" }] });
-  assert.equal(end[1].type, "context_actions");
+  assert.equal(end.length, 1);
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
   assert.equal(done.params.thread_ts, "100.000001");
@@ -577,7 +554,8 @@ test("the picker searches folders under the base, and creates a new one where it
   view = await tap(view, "picker_up", "up");
   assert.ok(view.blocks.some((b: any) => b.block_id === "search"));
   assert.deepEqual(await submit(view, searched("gamma/deep")), { response_action: "clear" });
-  assert.match((await questionIn("910.000001")).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
+  assert.match((await waitFor(() => posts.find((p) => p.params.thread_ts === "910.000001" && p.params.text?.includes("💬")))).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
+  await turnEnded("910.000001");
 });
 
 test("a $command as a new message gets help, not the folder picker", async () => {
@@ -599,8 +577,8 @@ test("Recent folders in the modal; the thread offers previous sessions, continue
   await slack.emit("events_api", slack.dm("UPEPE", "carry on", { ts: "300.000001" }));
   const { msg, view } = await openPicker("300.000001");
   const recent = view.blocks.find((b: any) => b.block_id === "recent").element.options;
-  assert.deepEqual(recent.map((o: any) => o.value), ["beta"]);
-  assert.equal(recent[0].text.text, join(base, "beta")); // the full path, no time
+  assert.deepEqual(recent.map((o: any) => o.value), ["gamma/deep", "beta"]);
+  assert.equal(recent[1].text.text, join(base, "beta")); // the full path, no time
   assert.deepEqual(await submit(view, { recent: { recent: { type: "static_select", selected_option: { value: "beta" } } } }), { response_action: "clear" });
   const q = await questionIn("300.000001");
   assert.equal(q.params.text, `📁 \`${join(base, "beta")}\`\nNew session, or continue one?`);
@@ -636,7 +614,7 @@ test("a session in the base folder itself shows up in Recent and can be picked a
   assert.match((await questionIn("400.000002")).params.text, /\nNew session, or continue one\?$/);
 });
 
-test("the picker and the session question still work after the daemon restarts", async () => {
+test("the picker still works after the daemon restarts", async () => {
   const restart = async () => {
     await daemon.stop();
     daemon = newDaemon();
@@ -646,9 +624,7 @@ test("the picker and the session question still work after the daemon restarts",
   await pickerFor("500.000001");
   await restart();
   const { view } = await openPicker("500.000001");
-  await submit(view);
-  await questionIn("500.000001");
-  await restart();
+  await submit(view); // the restarted agent has no sessions: a new one starts
   await answerNew("500.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "before the restart"));
 });
@@ -788,7 +764,7 @@ test("a folder the message names is offered first: one tap chooses it, then the 
     ["📂 Choose folder", "picker_open_modal", "920.000001"],
   ]);
   await click({ ts: msg.ts }, { type: "button", action_id: "picker_suggest_0", value: buttons(msg)[0][2] });
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep-sea` → <.*\|Open thread>$/.test(c.params.text)));
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === msg.ts && /^📁 `deep-sea` · new session → <.*\|Open thread>$/.test(c.params.text)));
   await answerNew("920.000001");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "check the DEEP-SEA folder, please"));
   assert.ok(agentLog().some((e) => e.m === "new" && e.cwd === join(base, "gamma/deep-sea")));
@@ -858,8 +834,7 @@ test("a reply without edits ends with its folder and model, not in a git repo no
   await slack.emit("events_api", slack.dm("UPEPE", "hi again", { ts: "930.000002", thread_ts: "930.000001" }));
   await turnEnded("930.000002");
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two" }] });
-  assert.equal(end[1].type, "context_actions");
+  assert.deepEqual(end, [{ type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two" }] }]);
 });
 
 // A message in #dev, and a tap in a channel.
@@ -876,15 +851,13 @@ test("a mention in a channel opens the picker in its thread and the reply runs t
   const n = views().length;
   await clickIn(DEV, { ts: greeting.ts, thread_ts: "950.000001" }, { type: "button", action_id: "picker_open_modal", value: "950.000001" });
   await waitFor(() => views().length > n);
-  await submit(lastView(), searched("alpha")); // a folder with a session in the DM
-  const q = await questionIn("950.000001");
-  assert.equal(q.params.blocks.includes("session_previous"), false); // the DM's sessions in this folder stay out of the channel
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === greeting.ts && c.params.text === "📁 `alpha`")); // no link: it is in the thread
-  await clickIn(DEV, { ts: q.ts, thread_ts: "950.000001" }, { type: "button", action_id: "session_new", value: "950.000001" });
+  // A folder with a session in the DM: those stay out of the channel, so there is none to continue and a new one starts.
+  await submit(lastView(), searched("alpha"));
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("look at the logs")));
   assert.equal(p.text, "look at the logs"); // without the mention
   await turnEnded("950.000001");
-  assert.equal(calls("chat.update").filter((c) => c.params.ts === greeting.ts).at(-1)!.params.text, "📁 `alpha` · new session");
+  assert.ok(!posts.some((p) => p.params.thread_ts === "950.000001" && p.params.blocks?.includes("session_new")));
+  assert.equal(calls("chat.update").filter((c) => c.params.ts === greeting.ts).at(-1)!.params.text, "📁 `alpha` · new session"); // no link: it is in the thread
 
   // Replies need no mention. A long turn's notice stays out of the channel's main view.
   await inDev("wait", { ts: "950.000002", thread_ts: "950.000001" });
@@ -942,11 +915,8 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   const n = views().length;
   await clickIn(cc, { ts: greeting.ts }, { type: "button", action_id: "picker_open_modal", value: cc });
   await waitFor(() => views().length > n);
-  await submit(lastView(), searched("delta"));
-  const q = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("session_new")));
-  assert.equal(q.params.thread_ts, undefined);
   const m = mark();
-  await clickIn(cc, { ts: q.ts }, { type: "button", action_id: "session_new", value: cc });
+  await submit(lastView(), searched("delta")); // no sessions there: a new one starts
   ccSession = (await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text === "refactor the parser"))).sessionId;
   await waitFor(() => since(m).some((c) => c.method === "chat.stopStream"));
   assert.equal(posts.find((p) => p.params.channel === cc && p.params.text?.includes("💬"))!.params.thread_ts, undefined); // the header
@@ -961,7 +931,7 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and the tests" && e.sessionId === ccSession));
   await turnEnded("960.000002");
   // The context bar shows folder, branch and model: no footer under a reply without edits.
-  assert.deepEqual(JSON.parse(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks).map((b: any) => b.type), ["context_actions"]);
+  assert.equal(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks, undefined);
   await inCode(cc, "in a thread", { ts: "960.000003", thread_ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in a thread" && e.sessionId === ccSession));
   await turnEnded("960.000003");
