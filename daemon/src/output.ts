@@ -188,6 +188,27 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
   return parts;
 }
 
+// A card's text as rich_text elements: fenced code preformatted, the rest plain.
+const rich = (s: string) =>
+  s.split(/```\w*\n?([\s\S]*?)\n?```/).flatMap((part, i) =>
+    part.trim() ? [{ type: i % 2 ? "rich_text_preformatted" : "rich_text_section", elements: [{ type: "text", text: i % 2 ? part : part.trim() }] }] : []);
+const taskCard = (id: string, title: string, status: string, fields: Record<string, unknown>) => ({
+  type: "task_card", task_id: id, title, status: status === "complete" || status === "error" ? status : "in_progress", ...fields,
+});
+// A tool's card folded into its run's card: its title, then a clip of what it showed.
+const IN_RUN_MAX = 300;
+function inRun(t: Chunk) {
+  let body = clip([t.details, t.output].filter(Boolean).join("\n"), IN_RUN_MAX);
+  if (openFence(body)) body += "\n```";
+  const mark = t.status === "complete" ? "✓" : t.status === "error" ? "✗" : "◦";
+  const links = ((t.sources as { url: string; text: string }[] | undefined) ?? []).map((x) => ({ type: "link", url: x.url, text: x.text }));
+  return [
+    { type: "rich_text_section", elements: [{ type: "text", text: `${mark} ` }, { type: "text", text: t.title, style: { bold: true } }] },
+    ...rich(body),
+    ...(links.length ? [{ type: "rich_text_section", elements: links }] : []),
+  ];
+}
+
 export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
@@ -208,6 +229,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let thoughts = 0;
   const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
   const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
+  let layout: ({ text: string } | { card: string })[] = []; // the current stream message as sent, in order
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
     (chain = chain.then(fn).catch((err) => log("output_failed", { error: String(err) })));
@@ -221,6 +243,61 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const ts = stream.ts;
     stream = null;
     await api("chat.stopStream", { channel, ts, ...(blocks && { blocks }) }); // also sets the session back to active
+    await rewrite(ts, blocks);
+  }
+
+  // A stopped message is sent again with each run of tools (no text between them) folded into one card that
+  // counts them and holds each one's title and a clip of its card: fewer cards, less space between them.
+  // A live stream cannot remove cards; a stopped one can be rewritten whole (verified on Slack).
+  // ponytail: a rewrite Slack refuses (size, more than 50 blocks) leaves the message as streamed.
+  async function rewrite(ts: string, extra: unknown[] = []) {
+    // Each card whole (sentTasks keeps only what each update changed), with the status this message got: one
+    // still running here goes on in the next message, as settle() says.
+    const byId = new Map([...tasks].map(([key, t]) => {
+      const status = sentTasks.get(t.id as string)?.status as string;
+      const done = status === "complete" || status === "error";
+      return [t.id as string, { thought: key.startsWith("thought"), t: { ...t, ...(done ? { status } : { status: "complete", output: "↓ continues below" }) } }];
+    }));
+    const items: ({ text: string } | { card: Chunk } | { run: Chunk[] })[] = [];
+    let run: Chunk[] | null = null;
+    for (const x of layout) {
+      if ("text" in x) {
+        if (x.text.trim()) items.push(x), (run = null);
+        continue;
+      }
+      const { thought, t } = byId.get(x.card)!;
+      if (thought) items.push({ card: t }); // Thinking keeps its own card, and the run goes on past it
+      else if (run) run.push(t);
+      else items.push({ run: (run = [t]) });
+    }
+    if (!items.some((x) => "run" in x && x.run.length > 1)) return;
+    const card = (t: Chunk) =>
+      taskCard(t.id as string, t.title as string, t.status as string, {
+        ...(t.details ? { details: { type: "rich_text", elements: rich(t.details as string) } } : {}),
+        ...(t.output ? { output: { type: "rich_text", elements: rich(t.output as string) } } : {}),
+        ...(t.sources ? { sources: t.sources } : {}),
+      });
+    const blocks = items.map((x) => {
+      if ("text" in x) return { type: "markdown", text: openFence(x.text) ? `${x.text.trim()}\n\`\`\`` : x.text.trim() };
+      if ("card" in x || x.run.length === 1) return card("card" in x ? x.card : x.run[0]);
+      const failed = x.run.filter((t) => t.status === "error").length;
+      const done = x.run.every((t) => t.status === "complete" || t.status === "error");
+      const title = `🔧 ${x.run.length} tools used${failed ? ` · ${failed} failed` : ""}`;
+      return taskCard(x.run[0].id as string, title, done ? "complete" : "in_progress", { output: { type: "rich_text", elements: x.run.flatMap(inRun) } });
+    });
+    await api("chat.update", { channel, ts, text: sent.trim().slice(0, 3000) || "🔧", blocks: [...blocks, ...extra] })
+      .catch((err) => log("rewrite_failed", { error: String(err) }));
+  }
+
+  // What the stream message got, in order, for its rewrite.
+  function record(chunks: Chunk[]) {
+    for (const c of chunks) {
+      const last = layout.at(-1);
+      if (c.type === "markdown_text") {
+        if (last && "text" in last) last.text += c.text;
+        else layout.push({ text: c.text as string });
+      } else if (!layout.some((x) => "card" in x && x.card === c.id)) layout.push({ card: c.id as string });
+    }
   }
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
@@ -232,15 +309,17 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const open = running().filter((t) => !chunks.some((c) => c.id === t.id));
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
-    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "plan", chunks: [...open, ...lead, ...chunks] });
+    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
     stream = { ts: r.ts, started: Date.now() };
     sent = textOf(lead);
+    layout = [];
+    record([...open, ...lead]);
   }
 
   // Ends the stream message for a new one to go on; a fence left open is closed when the message still takes it.
   async function roll(close: boolean) {
     const fence = openFence(sent);
-    if (fence && close && stream) await api("chat.appendStream", { channel, ts: stream.ts, chunks: [{ type: "markdown_text", text: "\n```" }] }).catch(() => {});
+    if (fence && close && stream) await api("chat.appendStream", { channel, ts: stream.ts, chunks: [{ type: "markdown_text", text: "\n```" }] }).then(() => record([{ type: "markdown_text", text: "\n```" }]), () => {});
     if (close) await settle();
     await stopStream();
     reopen = fence;
@@ -272,6 +351,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         await start(chunks);
       }
       sent += textOf(chunks);
+      record(chunks);
       for (const c of chunks) if (c.type === "task_update") sentTasks.set(c.id as string, c);
       return true;
     } catch (err) {
@@ -390,7 +470,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         await release();
       });
     },
-    /** Blocks (e.g. feedback buttons) go under the streamed reply; without a stream they are dropped. */
+    /** Blocks (e.g. the footer line) go under the streamed reply; without a stream they are dropped. */
     end: (blocks?: unknown[]) => {
       clearInterval(refresh);
       endThought();

@@ -136,6 +136,32 @@ test("a card updated while paused for the user waits for the resume: no message 
   ]);
 });
 
+test("once its message stops, a run of tools folds into one card that holds each tool; text and Thinking stay apart", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  out.thought("hmm");
+  await out.tool("a", { title: "ls", status: "completed", output: "```\nsrc\n```" });
+  await out.tool("b", { title: "cat x", status: "failed", output: "exit 1" });
+  out.text("Found it.");
+  await out.tool("c", { title: "read y", status: "completed" });
+  out.text("Done.");
+  await out.end([{ type: "context", elements: [] }]);
+  const update = calls.at(-1)!;
+  assert.equal(update.method, "chat.update");
+  assert.equal(update.params.ts, "9.1");
+  const row = (b: any) => (b.type === "task_card" ? `${b.title}:${b.status}` : b.text ?? b.type);
+  assert.deepEqual(update.params.blocks.map(row), ["Thinking:complete", "🔧 2 tools used · 1 failed:complete", "Found it.", "read y:complete", "Done.", "context"]);
+  const run = update.params.blocks[1].output.elements.map((e: any) => [e.type, e.elements.map((x: any) => x.text).join("")]);
+  assert.deepEqual(run, [["rich_text_section", "✓ ls"], ["rich_text_preformatted", "src"], ["rich_text_section", "✗ cat x"], ["rich_text_section", "exit 1"]]);
+  // a message with no run of two tools is left as streamed
+  const one = fakeApi();
+  const out2 = createOutput(one.api, where);
+  await out2.tool("a", { title: "ls", status: "completed" });
+  out2.text("Done.");
+  await out2.end();
+  assert.ok(one.calls.every((c) => c.method !== "chat.update"));
+});
+
 test("task cards get short ids and repeated identical updates are not sent", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
