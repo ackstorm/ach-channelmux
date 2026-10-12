@@ -558,16 +558,23 @@ export function createDaemon(cfg: DaemonConfig) {
       negative_button: { text: { type: "plain_text", text: "👎" }, accessibility_label: "Bad response", value: "bad" },
     }],
   }];
-  // A turn's edits in one line under its reply: "🌿 `main` · 2 files changed +12 −3" (the branch only in a git repo).
+  // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3" (the branch only in a
+  // git repo, the counts only after edits). A code channel's context bar shows the rest: there only the counts.
   // ponytail: counts the edits the agent reported; changes made by shell commands are not in it.
-  async function editLine(cwd: string, edits: Map<string, [number, number]>) {
-    const branch = await branchOf(cwd);
+  async function footer(t: Thread, edits?: Map<string, [number, number]>) {
     let added = 0;
     let removed = 0;
-    for (const [a, r] of edits.values()) [added, removed] = [added + a, removed + r];
-    const files = `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
-    return branch ? `🌿 \`${branch}\` · ${files}` : files;
+    for (const [a, r] of edits?.values() ?? []) [added, removed] = [added + a, removed + r];
+    const files = edits && `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
+    if (t.top) return files ?? "";
+    const branch = await branchOf(t.cwd);
+    return [`📁 \`${basename(t.cwd)}\``, branch && `🌿 \`${branch}\``, modelName(t), files].filter(Boolean).join(" · ");
   }
+  // The session's model by its short name (no provider prefix); undefined when the agent has no model setting.
+  const modelName = (t: Thread) => {
+    const o = (configs.get(t.sessionId) ?? []).find((x) => x.category === "model");
+    return o && currentName(o).replace(/^[^/]+\//, "");
+  };
   // The folder's git branch; "" outside a git repo.
   const branchOf = (cwd: string) => promisify(execFile)("git", ["-C", cwd, "branch", "--show-current"], { timeout: 5_000 }).then((r) => r.stdout.trim(), () => "");
 
@@ -575,11 +582,11 @@ export function createDaemon(cfg: DaemonConfig) {
   async function contextBar(t: Thread) {
     if (!t.top) return;
     const branch = await branchOf(t.cwd);
-    const model = (configs.get(t.sessionId) ?? []).find((o) => o.category === "model");
+    const model = modelName(t);
     const items = [
       { key: "folder", label: short(t.cwd), icon: "folder" },
       ...(branch ? [{ key: "branch", label: branch, icon: "branch" }] : []),
-      ...(model ? [{ key: "model", label: currentName(model).replace(/^[^/]+\//, ""), icon: "terminal" }] : []),
+      ...(model ? [{ key: "model", label: model, icon: "terminal" }] : []),
     ];
     await slack.apiCall("agents.conversations.setProperties", { channel_id: t.channel, code_channel: { context_bar_items: items } }).catch((err) => log("context_bar_failed", { error: String(err) }));
   }
@@ -636,8 +643,9 @@ export function createDaemon(cfg: DaemonConfig) {
       } finally {
         const edits = turnEdits.get(t.sessionId);
         turnEdits.delete(t.sessionId);
+        const line = await footer(t, edits);
         const blocks = [
-          ...(edits ? [{ type: "context", elements: [{ type: "mrkdwn", text: await editLine(t.cwd, edits) }] }] : []),
+          ...(line ? [{ type: "context", elements: [{ type: "mrkdwn", text: line }] }] : []),
           ...(outcome === "done" ? FEEDBACK : []),
         ];
         await out.end(blocks.length ? blocks : undefined);

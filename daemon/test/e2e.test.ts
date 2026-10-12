@@ -367,7 +367,7 @@ test("a finished reply ends with 👍/👎, logged on click; a failed or stopped
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "ok?", { ts: "100.000024", thread_ts: "100.000001" }));
   const stop = await waitFor(() => since(n).find((c) => c.method === "chat.stopStream"));
-  const buttons = JSON.parse(stop.params.blocks)[0].elements[0];
+  const buttons = JSON.parse(stop.params.blocks).find((b: any) => b.type === "context_actions").elements[0]; // under the footer
   assert.equal(buttons.type, "feedback_buttons");
   await click({ ts: stop.params.ts, thread_ts: "100.000001" }, { type: "feedback_buttons", action_id: "feedback", value: "bad" });
   const entry = await waitFor(() => logged.find((l) => l.msg === "feedback"));
@@ -395,7 +395,7 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
   // The turn's edits, in one line under the reply, before 👍/👎.
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "🌿 `work` · 1 file changed +30 −30" }] });
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30" }] });
   assert.equal(end[1].type, "context_actions");
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
@@ -850,6 +850,15 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
 
+test("a reply without edits ends with its folder and model, not in a git repo no branch", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "hi again", { ts: "930.000002", thread_ts: "930.000001" }));
+  await turnEnded("930.000002");
+  const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two" }] });
+  assert.equal(end[1].type, "context_actions");
+});
+
 // A message in #dev, and a tap in a channel.
 const inDev = (text: string, extra: Record<string, unknown>) =>
   slack.emit("events_api", slack.dm("UPEPE", text, { channel: DEV, channel_type: "channel", ...extra }));
@@ -942,9 +951,12 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   assert.ok(statuses.length && statuses.every((c) => c.params.channel_id === cc && c.params.thread_ts === undefined));
 
   // Its messages need no mention, top-level or in a thread inside it; its buttons and stop find the session.
+  const plain = mark();
   await inCode(cc, "and the tests", { ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and the tests" && e.sessionId === ccSession));
   await turnEnded("960.000002");
+  // The context bar shows folder, branch and model: no footer under a reply without edits.
+  assert.deepEqual(JSON.parse(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks).map((b: any) => b.type), ["context_actions"]);
   await inCode(cc, "in a thread", { ts: "960.000003", thread_ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in a thread" && e.sessionId === ccSession));
   await turnEnded("960.000003");
@@ -996,12 +1008,15 @@ test("a code channel's context bar shows its folder, branch and model, and follo
 test("a turn that edits in a git folder sets the code channel's Changes tab to the diff", async () => {
   assert.equal(calls("agents.conversations.setView").length, 0); // the turns so far edited nothing
   writeFileSync(join(repo, "big.py"), "new\n"); // the mock agent only reports its edit
+  const n = mark();
   await inCode(cc, "big edit", { ts: "963.000001" });
   const view = await waitFor(() => calls("agents.conversations.setView")[0]);
   const { channel_id, view_key, type, base_branch, head_branch, content } = view.params;
   assert.deepEqual([channel_id, view_key, type, base_branch, head_branch], [cc, "changes", "diff", "main", "main"]);
   assert.match(content, /^diff --git a\/big\.py b\/big\.py\n[\s\S]*\n-old\n\+new\n$/);
   await turnEnded("963.000001");
+  const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "1 file changed +30 −30" }] }); // the counts only: the bar has the rest
 });
 
 test("$done closes a code channel: a summary, then the channel archived with it; elsewhere it explains", async () => {
