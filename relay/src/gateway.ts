@@ -463,18 +463,27 @@ export function createGateway(cfg: GatewayConfig) {
     return ownerFor(email, r.user);
   }
 
+  const codeChannels = new Map<string, Owner>(); // code channel id -> the owner whose daemon opened it
+
   // Channel id -> its CHANNELS entry, null when unmapped. A failed lookup is not cached.
+  // A code channel the relay did not see opened (e.g. before a restart) is recorded in codeChannels,
+  // and is null here: it belongs to the owner of the CODE_CHANNELS channel it was opened from.
   const channelEntries = new Map<string, { email: string; code: boolean } | null>();
   async function channelEntry(id: string) {
     if (channelEntries.has(id)) return channelEntries.get(id);
     const r = await slack("conversations.info", { channel: id });
     if (!r.ok) return undefined;
-    const entry = cfg.channels?.[r.channel?.name] ?? null;
+    const origin = r.channel?.properties?.agent_session?.origin_link?.channel_id;
+    const from = origin ? await channelEntry(origin) : null;
+    if (from?.code) {
+      const owner = await ownerFor(from.email);
+      if (!owner) return undefined;
+      codeChannels.set(id, owner);
+    }
+    const entry = from?.code ? null : cfg.channels?.[r.channel?.name] ?? null;
     channelEntries.set(id, entry);
     return entry;
   }
-
-  const codeChannels = new Map<string, Owner>(); // code channel id -> the owner whose daemon opened it
   const viewOwner = new Map<string, Owner>(); // view id -> the owner whose daemon it was delivered to or opened by
 
   // A channel message's author, for its context block. A failed lookup is not cached.
@@ -496,8 +505,9 @@ export function createGateway(cfg: GatewayConfig) {
   async function mayWrite(owner: Owner, id: string) {
     if (!id) return false;
     if (id === owner.dm || id === owner.slackUserId) return true;
+    const entry = codeChannels.has(id) ? undefined : await channelEntry(id); // may find a code channel
     if (codeChannels.has(id)) return codeChannels.get(id) === owner; // never in CHANNELS
-    return (await channelEntry(id))?.email === owner.email;
+    return entry?.email === owner.email;
   }
 
   async function ownerForToken(token: string | undefined): Promise<Owner | null> {
@@ -614,8 +624,8 @@ export function createGateway(cfg: GatewayConfig) {
     // Shortcuts stay personal: they go to whoever used them.
     const byChannel = type === "interactive" && ["block_actions", "view_submission", "view_closed"].includes(body.type);
     const where = inChannel ? key.channel! : byChannel ? body.channel?.id ?? body.container?.channel_id : undefined;
+    const entry = where && !codeChannels.has(where) && !where.startsWith("D") ? await channelEntry(where) : undefined; // may find a code channel
     const codeOwner = where ? codeChannels.get(where) : undefined; // never in CHANNELS
-    const entry = where && !codeOwner && !where.startsWith("D") ? await channelEntry(where) : undefined;
     if (inChannel && !codeOwner && !entry) {
       if (entry === null) log("channel_unmapped", { channel: key.channel });
       return;

@@ -21,6 +21,7 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
   let socket: WebSocket | null = null;
   let lastTs = 0;
   let codeChannels = 0;
+  const origins = new Map<string, string>(); // code channel id -> the channel it was opened from
   let port = 0;
 
   const server = http.createServer(async (req, res) => {
@@ -85,10 +86,17 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
           ? { ok: true, user: { id: params.user, tz: "Europe/Madrid", profile: { email: users[params.user], real_name: `Real ${params.user}`, first_name: "Mary Ann" } } }
           : { ok: false, error: "user_not_found" });
       case "conversations.info":
+        if (origins.has(params.channel)) {
+          const origin_link = { channel_id: origins.get(params.channel), ts: "1.0" };
+          return send({ ok: true, channel: { id: params.channel, name: "a session title", properties: { agent_session: { origin_link } } } });
+        }
         if (channels[params.channel]) return send({ ok: true, channel: { id: params.channel, name: channels[params.channel] } });
         return send(/^D/.test(params.channel ?? "") ? { ok: true, channel: { id: params.channel, is_im: true } } : { ok: false, error: "channel_not_found" });
-      case "agents.conversations.create":
-        return send({ ok: true, channel_id: `CCODE${++codeChannels}` });
+      case "agents.conversations.create": {
+        const id = `CCODE${++codeChannels}`;
+        if (params.origin_channel_id) origins.set(id, params.origin_channel_id);
+        return send({ ok: true, channel_id: id });
+      }
       case "agents.conversations.setProperties":
       case "agents.conversations.setView":
       case "agents.conversations.archive":
@@ -124,6 +132,9 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
   const wss = new WebSocketServer({ server, path: "/link" });
   wss.on("connection", (ws) => {
     socket = ws;
+    ws.on("close", () => {
+      if (socket === ws) socket = [...wss.clients].find((c) => c !== ws) ?? null; // a second gateway left: back to the first
+    });
     ws.on("message", (raw) => {
       const msg = JSON.parse(raw.toString());
       acks.get(msg.envelope_id)?.(msg.payload);

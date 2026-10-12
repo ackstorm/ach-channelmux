@@ -13,13 +13,16 @@ const { App, LogLevel } = bolt;
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com", UANA: "ana@example.com" };
 const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
 const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops" };
+const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false } };
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
-const GW_PORT = await new Promise<number>((r) => {
-  const s = createServer().listen(0, () => {
-    const p = (s.address() as any).port;
-    s.close(() => r(p));
+const freePort = () =>
+  new Promise<number>((r) => {
+    const s = createServer().listen(0, () => {
+      const p = (s.address() as any).port;
+      s.close(() => r(p));
+    });
   });
-});
+const GW_PORT = await freePort();
 const GW = `http://127.0.0.1:${GW_PORT}`;
 
 const slack = createMockSlack(USERS, CHANNEL_NAMES);
@@ -29,12 +32,12 @@ let sessionPreamble: string | undefined; // set by a test, read by the gateway o
 type Daemon = { app: InstanceType<typeof App>; got: any[]; name: string };
 const daemons: Daemon[] = [];
 
-async function daemon(name: string, token: string): Promise<Daemon> {
+async function daemon(name: string, token: string, gwUrl = GW): Promise<Daemon> {
   const app = new App({
     socketMode: true,
     appToken: token,
     token,
-    clientOptions: { slackApiUrl: `${GW}/api/` },
+    clientOptions: { slackApiUrl: `${gwUrl}/api/` },
     logLevel: LogLevel.ERROR,
   });
   const d: Daemon = { app, got: [], name };
@@ -91,7 +94,7 @@ before(async () => {
     get sessionPreamble() {
       return sessionPreamble;
     },
-    channels: { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false } },
+    channels: CHANNELS,
     log: () => {},
   });
   await gw.start();
@@ -200,6 +203,28 @@ test("a code channel can be created only from a CODE_CHANNELS origin, and is the
   await waitFor(() => pepe1.got.length === before + 1);
   assert.equal(pepe1.got.at(-1).text, "also check Safari");
   assert.equal(slack.calls.some((x) => x.method === "conversations.info" && x.params.channel === "CCODE1"), false);
+});
+
+test("after a relay restart a code channel's messages still reach its owner, and its daemon may still write there", async () => {
+  const { channel_id: id } = await pepe1.app.client.apiCall("agents.conversations.create", { origin_channel_id: "C_CODE", name: "fix-signup" });
+  // A fresh relay: it knows no code channel, Slack's conversations.info says where this one came from.
+  const port = await freePort();
+  const url = `http://127.0.0.1:${port}`;
+  const gw2 = createGateway({ port, publicUrl: url, upstreamApiUrl: `${slack.url}/api/`, appToken: APP_TOKEN, botToken: BOT_TOKEN, resolveToken: async (t) => TOKENS[t] ?? null, rates: {}, workingNoticeMs: 0, channels: CHANNELS, log: () => {} });
+  await gw2.start();
+  const [pepe, bot2] = [await daemon("pepe-r", "gw-pepe", url), await daemon("bot-r", "gw-bot", url)];
+  try {
+    await slack.emit("events_api", inChannel(id as string, "UXAVI", "still there?", { channel_type: "group" }));
+    await waitFor(() => pepe.got.length === 1);
+    assert.equal(pepe.got[0].text, "still there?");
+    assert.equal(pepe.got[0].code_channel_origin, undefined);
+    assert.ok((await pepe.app.client.apiCall("agents.conversations.setProperties", { channel_id: id, title: "Fix signup" })).ok);
+    await assert.rejects(bot2.app.client.apiCall("agents.conversations.setProperties", { channel_id: id }), /restricted_action/);
+    assert.equal(slack.calls.filter((c) => c.method === "conversations.info" && c.params.channel === id).length, 1);
+  } finally {
+    for (const d of [pepe, bot2]) await d.app.stop();
+    await gw2.stop();
+  }
 });
 
 test("ephemeral notices in a channel may go to any member; in the DM only to the owner", async () => {
