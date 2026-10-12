@@ -11,7 +11,8 @@ import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 const { App, LogLevel } = bolt;
 
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com" };
-const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI };
+const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
+const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales" };
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
 const GW_PORT = await new Promise<number>((r) => {
   const s = createServer().listen(0, () => {
@@ -21,7 +22,7 @@ const GW_PORT = await new Promise<number>((r) => {
 });
 const GW = `http://127.0.0.1:${GW_PORT}`;
 
-const slack = createMockSlack(USERS);
+const slack = createMockSlack(USERS, CHANNEL_NAMES);
 let gw: ReturnType<typeof createGateway>;
 
 type Daemon = { app: InstanceType<typeof App>; got: any[]; name: string };
@@ -78,6 +79,7 @@ before(async () => {
     slowWorkingNoticeMs: 150,
     rates: {},
     offlineMessage: "Offline. Start it at <https://example.com|your workspace>.",
+    channels: { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false } },
     log: () => {},
   });
   await gw.start();
@@ -99,13 +101,62 @@ test("criterion 1: a DM reaches only its owner's daemon", async () => {
   assert.equal(gw.state(USERS.UXAVI), null); // xavi never connected, never routed to
 });
 
-test("criterion 3: channels, group DMs and bot messages are not routed", async () => {
+test("criterion 3: unmapped channels, group DMs and bot messages are not routed", async () => {
   const before = pepe1.got.length;
   await slack.emit("events_api", { event_id: "EvC1", event: { type: "message", channel_type: "channel", channel: "C1", user: "UPEPE", text: "x" } });
   await slack.emit("events_api", { event_id: "EvC2", event: { type: "message", channel_type: "mpim", channel: "G1", user: "UPEPE", text: "x" } });
   await slack.emit("events_api", slack.dm("UPEPE", "from a bot", { bot_id: "BOTHER" }));
   await sleep(200);
   assert.equal(pepe1.got.length, before);
+});
+
+const inChannel = (channel: string, user: string, text: string, extra: Record<string, unknown> = {}) =>
+  slack.dm(user, text, { channel_type: "channel", channel, ...extra });
+
+test("a message in a configured channel reaches the channel's owner, with code_channel_origin only in CODE_CHANNELS", async () => {
+  const before = pepe1.got.length;
+  await slack.emit("events_api", inChannel("C_DEV", "UPEPE", "in dev"));
+  await slack.emit("events_api", inChannel("C_CODE", "UPEPE", "in code"));
+  await slack.emit("events_api", inChannel("C_OTHER", "UPEPE", "in other"));
+  await slack.emit("events_api", inChannel("C_DEV", "UBOT", "from a bot", { bot_id: "BOTHER" }));
+  await waitFor(() => pepe1.got.length === before + 2);
+  await sleep(200);
+  const got = pepe1.got.slice(before);
+  assert.equal(got.length, 2);
+  const dev = got.find((m) => m.channel === "C_DEV");
+  const code = got.find((m) => m.channel === "C_CODE");
+  assert.equal(dev.text, "in dev");
+  assert.equal(dev.code_channel_origin, undefined);
+  assert.equal(code.text, "in code");
+  assert.equal(code.code_channel_origin, true);
+});
+
+test("a message in a channel goes to the owner's daemon even when someone else wrote it", async () => {
+  const before = pepe1.got.length;
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "from xavi"));
+  await waitFor(() => pepe1.got.length === before + 1);
+  assert.equal(pepe1.got.at(-1).text, "from xavi");
+  // So do their edits and a stop of the agent session in the channel.
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "", { user: undefined, subtype: "message_changed", message: { type: "message", ts: "1.1", user: "UXAVI", text: "fixed" }, previous_message: { text: "old" } }));
+  await waitFor(() => pepe1.got.length === before + 2);
+  assert.equal(pepe1.got.at(-1).message.text, "fixed");
+  await slack.emit("events_api", { type: "event_callback", event_id: "EvStopC", team_id: "T1", api_app_id: "A1", event: { type: "agent_session_stopped", channel: "C_DEV", thread_ts: "90.0", user: "UXAVI" } });
+  await waitFor(() => pepe1.got.length === before + 3);
+  assert.equal(pepe1.got.at(-1).type, "agent_session_stopped");
+  // The channel's name is looked up once.
+  assert.equal(slack.calls.filter((c) => c.method === "conversations.info" && c.params.channel === "C_DEV").length, 1);
+});
+
+test("a service account without a Slack user connects when it owns a channel; other unknown emails do not", async () => {
+  // Offline: the notice goes in the message's thread, not the channel's main view.
+  await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "anyone?", { ts: "200.000001" }));
+  await waitFor(() => slack.calls.some((c) => c.method === "chat.postMessage" && c.params.channel === "C_SALES" && c.params.thread_ts === "200.000001" && /^Offline\. Start it/.test(c.params.text)));
+  const bot = await daemon("bot", "gw-bot");
+  await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "a lead"));
+  await waitFor(() => bot.got.length === 1);
+  assert.equal(bot.got[0].text, "a lead");
+  const res = await fetch(`${GW}/api/apps.connections.open`, { method: "POST", headers: { authorization: "Bearer gw-nobody" } });
+  assert.deepEqual(await res.json(), { ok: false, error: "invalid_auth" });
 });
 
 test("a user's edit reaches its owner; bot edits and unfurls do not", async () => {

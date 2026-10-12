@@ -13,8 +13,8 @@ export interface Call {
   params: Record<string, string>;
 }
 
-export function createMockSlack(users: Record<string, string>) {
-  // users: slack user id -> email
+export function createMockSlack(users: Record<string, string>, channels: Record<string, string> = {}) {
+  // users: slack user id -> email; channels: channel id -> name
   const calls: Call[] = [];
   const windows = new Map<string, number[]>();
   const acks = new Map<string, (payload: unknown) => void>();
@@ -83,6 +83,9 @@ export function createMockSlack(users: Record<string, string>) {
         return send(users[params.user]
           ? { ok: true, user: { id: params.user, tz: "Europe/Madrid", profile: { email: users[params.user], real_name: `Real ${params.user}`, first_name: "Mary Ann" } } }
           : { ok: false, error: "user_not_found" });
+      case "conversations.info":
+        if (channels[params.channel]) return send({ ok: true, channel: { id: params.channel, name: channels[params.channel] } });
+        return send(/^D/.test(params.channel ?? "") ? { ok: true, channel: { id: params.channel, is_im: true } } : { ok: false, error: "channel_not_found" });
       case "conversations.open":
         return send({ ok: true, channel: { id: `D_${params.users}` } });
       case "files.getUploadURLExternal": {

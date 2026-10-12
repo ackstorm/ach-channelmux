@@ -417,17 +417,22 @@ export function createGateway(cfg: GatewayConfig) {
     let user = knownUser;
     if (!user) {
       const r = await slack("users.lookupByEmail", { email });
-      if (!r.ok) return null;
-      user = r.user as SlackUser;
+      if (r.ok) user = r.user as SlackUser;
+      // No Slack user: only a service account that owns a channel, which serves just its channels (no DM).
+      else if (r.error !== "users_not_found" || !Object.values(cfg.channels ?? {}).some((c) => c.email === email)) return null;
     }
-    const im = await slack("conversations.open", { users: user.id });
-    if (!im.ok) return null;
+    let dm = "";
+    if (user) {
+      const im = await slack("conversations.open", { users: user.id });
+      if (!im.ok) return null;
+      dm = im.channel.id;
+    }
     const owner: Owner = {
-      slackUserId: user.id,
+      slackUserId: user?.id ?? "",
       email,
-      name: user.profile?.real_name || user.real_name || undefined,
-      tz: user.tz,
-      dm: im.channel.id,
+      name: user?.profile?.real_name || user?.real_name || undefined,
+      tz: user?.tz,
+      dm,
       primary: null,
       standby: [],
       triggers: new Set(),
@@ -436,7 +441,7 @@ export function createGateway(cfg: GatewayConfig) {
       threadOf: new Map(),
       working: new Map(),
     };
-    owners.set(user.id, owner);
+    if (user) owners.set(user.id, owner);
     ownerByEmail.set(email, owner);
     return owner;
   }
@@ -448,6 +453,17 @@ export function createGateway(cfg: GatewayConfig) {
     const email = r.ok ? r.user?.profile?.email : undefined;
     if (!email) return null;
     return ownerFor(email, r.user);
+  }
+
+  // Channel id -> its CHANNELS entry, null when unmapped. A failed lookup is not cached.
+  const channelEntries = new Map<string, { email: string; code: boolean } | null>();
+  async function channelEntry(id: string) {
+    if (channelEntries.has(id)) return channelEntries.get(id);
+    const r = await slack("conversations.info", { channel: id });
+    if (!r.ok) return undefined;
+    const entry = cfg.channels?.[r.channel?.name] ?? null;
+    channelEntries.set(id, entry);
+    return entry;
   }
 
   async function ownerForToken(token: string | undefined): Promise<Owner | null> {
@@ -489,7 +505,7 @@ export function createGateway(cfg: GatewayConfig) {
   }
 
   // Nothing is held while offline: every message gets the notice, where it was written.
-  async function goOffline(env: Envelope, channel: string) {
+  async function goOffline(env: Envelope, channel: string, inChannel: boolean) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
     const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
     // The Home tab says so itself: the daemon that would draw it is not there.
@@ -500,28 +516,36 @@ export function createGateway(cfg: GatewayConfig) {
     }
     await slack("chat.postMessage", {
       channel,
-      thread_ts: ev.thread_ts, // top-level stays top-level: no thread for a session that never started
+      // A top-level DM stays top-level: no thread for a session that never started. In a channel it goes
+      // in the message's thread, out of the channel's main view.
+      thread_ts: inChannel ? ev.thread_ts ?? ev.ts : ev.thread_ts,
       text: cfg.offlineMessage ?? "Your workspace is offline. Start it and try again.",
     });
   }
 
   // ---------- upstream event intake ----------
 
-  function routeKey(type: string, body: any): { userId: string; channel?: string } | null {
+  // A DM is routed by its author; a channel (no userId) by its CHANNELS owner, whoever wrote in it.
+  function routeKey(type: string, body: any): { userId?: string; channel?: string } | null {
     if (type === "events_api") {
       const ev = body?.event;
-      if (ev?.type === "agent_session_stopped") return ev.user ? { userId: ev.user, channel: ev.channel } : null;
+      if (ev?.type === "agent_session_stopped") {
+        if (ev.channel && !ev.channel.startsWith("D")) return { channel: ev.channel };
+        return ev.user ? { userId: ev.user, channel: ev.channel } : null;
+      }
       if (ev?.type === "app_home_opened") return ev.tab === "home" && ev.user ? { userId: ev.user } : null;
-      if (!ev || ev.type !== "message" || ev.channel_type !== "im") return null;
+      const inChannel = ev?.channel_type === "channel" || ev?.channel_type === "group";
+      if (!ev || ev.type !== "message" || (ev.channel_type !== "im" && !inChannel)) return null;
+      const to = (userId: string) => (inChannel ? { channel: ev.channel } : { userId, channel: ev.channel });
       // A user's edit: the author is inside. Bot edits (every chat.update) and unfurls (same text) stay out.
       if (ev.subtype === "message_changed") {
         const m = ev.message;
         if (!m?.user || m.bot_id || m.text === ev.previous_message?.text) return null;
-        return { userId: m.user, channel: ev.channel };
+        return to(m.user);
       }
       if (ev.bot_id || !ev.user) return null;
       if (ev.subtype && ev.subtype !== "file_share") return null;
-      return { userId: ev.user, channel: ev.channel };
+      return to(ev.user);
     }
     if (type === "interactive") {
       const userId = body?.user?.id;
@@ -551,13 +575,19 @@ export function createGateway(cfg: GatewayConfig) {
       await evt.ack(); // message events never carry a response payload
     }
 
-    const owner = await ownerForSlackUser(key.userId);
+    const inChannel = !key.userId;
+    const entry = inChannel ? await channelEntry(key.channel!) : undefined;
+    if (inChannel && !entry) {
+      if (entry === null) log("channel_unmapped", { channel: key.channel });
+      return;
+    }
+    const owner = entry ? await ownerFor(entry.email) : await ownerForSlackUser(key.userId!);
     if (!owner) {
-      log("unknown_owner", { user: key.userId });
+      log("unknown_owner", { user: key.userId, channel: key.channel });
       if (type !== "events_api") await evt.ack();
       return;
     }
-    if (key.channel && key.channel !== owner.dm) {
+    if (!inChannel && key.channel && key.channel !== owner.dm) {
       log("dm_mismatch", { owner: owner.email, channel: key.channel });
       if (type !== "events_api") await evt.ack();
       return;
@@ -571,6 +601,7 @@ export function createGateway(cfg: GatewayConfig) {
     rewriteFiles(owner, body?.event?.files);
     if (type === "events_api") {
       const ev = body.event;
+      if (entry?.code) ev.code_channel_origin = true; // the daemon's only hint: it never sees CHANNELS
       if (ev.type === "message") {
         addPreamble(ev, cfg.sessionPreamble, owner);
         owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
@@ -589,7 +620,7 @@ export function createGateway(cfg: GatewayConfig) {
 
     if (!owner.primary) {
       if (type !== "events_api") await evt.ack();
-      return goOffline(env, key.channel ?? owner.dm);
+      return goOffline(env, key.channel ?? owner.dm, inChannel);
     }
 
     if (type === "events_api") {
@@ -819,7 +850,7 @@ export function createGateway(cfg: GatewayConfig) {
   }
 
   const pinger = setInterval(() => {
-    for (const owner of owners.values()) {
+    for (const owner of ownerByEmail.values()) {
       for (const c of [owner.primary, ...owner.standby]) {
         if (!c) continue;
         if (!c.alive) {
@@ -850,7 +881,7 @@ export function createGateway(cfg: GatewayConfig) {
     },
     async stop() {
       clearInterval(pinger);
-      for (const o of owners.values()) for (const ts of [...o.working.keys()]) stopWorking(o, ts);
+      for (const o of ownerByEmail.values()) for (const ts of [...o.working.keys()]) stopWorking(o, ts);
       await upstreamClient.disconnect();
       for (const ws of wss.clients) ws.terminate();
       await new Promise<void>((r) => server.close(() => r()));
