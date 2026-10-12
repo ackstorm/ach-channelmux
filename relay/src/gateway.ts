@@ -469,7 +469,7 @@ export function createGateway(cfg: GatewayConfig) {
   // A code channel the relay did not see opened (e.g. before a restart) is recorded in codeChannels,
   // and is null here: it belongs to the owner of the CODE_CHANNELS channel it was opened from.
   const channelEntries = new Map<string, { email: string; code: boolean } | null>();
-  async function channelEntry(id: string) {
+  async function channelEntry(id: string): Promise<{ email: string; code: boolean } | null | undefined> {
     if (channelEntries.has(id)) return channelEntries.get(id);
     const r = await slack("conversations.info", { channel: id });
     if (!r.ok) return undefined;
@@ -788,7 +788,7 @@ export function createGateway(cfg: GatewayConfig) {
       const targets = scoped.flatMap((f) => channelsOf(f, params[f]));
       // users.info: anyone once the owner serves a channel (the daemon names who wrote each message).
       const hasChannels = Object.values(cfg.channels ?? {}).some((c) => c.email === owner.email);
-      const mine = method === "users.info" && hasChannels ? () => true : (c: string) => mayWrite(owner, c);
+      const mine = (c: string) => (method === "users.info" && hasChannels) || mayWrite(owner, c);
       if (targets.length === 0 || !(await Promise.all(targets.map(mine))).every(Boolean)) {
         return { ok: false, error: "restricted_action" };
       }

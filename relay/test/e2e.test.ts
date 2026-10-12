@@ -192,7 +192,7 @@ test("a code channel can be created only from a CODE_CHANNELS origin, and is the
   await assert.rejects(create("C_DEV"), /restricted_action/);
   await assert.rejects(create(), /restricted_action/);
   await assert.rejects(bot.app.client.apiCall("agents.conversations.create", { origin_channel_id: "C_CODE" }), /restricted_action/);
-  const r = await create("C_CODE");
+  const r = (await create("C_CODE")) as { channel_id?: string };
   assert.equal(r.channel_id, "CCODE1");
   assert.ok((await c.apiCall("agents.conversations.setProperties", { channel_id: "CCODE1", title: "Fix login" })).ok);
   assert.ok((await c.chat.postMessage({ channel: "CCODE1", text: "on it" })).ok);
@@ -206,7 +206,7 @@ test("a code channel can be created only from a CODE_CHANNELS origin, and is the
 });
 
 test("after a relay restart a code channel's messages still reach its owner, and its daemon may still write there", async () => {
-  const { channel_id: id } = await pepe1.app.client.apiCall("agents.conversations.create", { origin_channel_id: "C_CODE", name: "fix-signup" });
+  const { channel_id: id } = (await pepe1.app.client.apiCall("agents.conversations.create", { origin_channel_id: "C_CODE", name: "fix-signup" })) as { channel_id?: string };
   // A fresh relay: it knows no code channel, Slack's conversations.info says where this one came from.
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
