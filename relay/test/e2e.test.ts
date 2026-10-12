@@ -12,7 +12,7 @@ const { App, LogLevel } = bolt;
 
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com" };
 const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
-const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales" };
+const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops" };
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
 const GW_PORT = await new Promise<number>((r) => {
   const s = createServer().listen(0, () => {
@@ -79,7 +79,7 @@ before(async () => {
     slowWorkingNoticeMs: 150,
     rates: {},
     offlineMessage: "Offline. Start it at <https://example.com|your workspace>.",
-    channels: { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false } },
+    channels: { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false } },
     log: () => {},
   });
   await gw.start();
@@ -147,16 +147,63 @@ test("a message in a channel goes to the owner's daemon even when someone else w
   assert.equal(slack.calls.filter((c) => c.method === "conversations.info" && c.params.channel === "C_DEV").length, 1);
 });
 
+let bot: Daemon;
 test("a service account without a Slack user connects when it owns a channel; other unknown emails do not", async () => {
   // Offline: the notice goes in the message's thread, not the channel's main view.
   await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "anyone?", { ts: "200.000001" }));
   await waitFor(() => slack.calls.some((c) => c.method === "chat.postMessage" && c.params.channel === "C_SALES" && c.params.thread_ts === "200.000001" && /^Offline\. Start it/.test(c.params.text)));
-  const bot = await daemon("bot", "gw-bot");
+  bot = await daemon("bot", "gw-bot");
   await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "a lead"));
   await waitFor(() => bot.got.length === 1);
   assert.equal(bot.got[0].text, "a lead");
   const res = await fetch(`${GW}/api/apps.connections.open`, { method: "POST", headers: { authorization: "Bearer gw-nobody" } });
   assert.deepEqual(await res.json(), { ok: false, error: "invalid_auth" });
+});
+
+test("an owner's daemon posts in its channel and not in another", async () => {
+  const c = pepe1.app.client;
+  assert.ok((await c.chat.postMessage({ channel: "C_DEV", text: "warm" })).ok); // C_DEV seen in an event
+  assert.ok((await c.chat.postMessage({ channel: "C_OPS", text: "cold" })).ok); // looked up on the way
+  await assert.rejects(c.chat.postMessage({ channel: "C_OTHER", text: "x" }), /restricted_action/);
+  await assert.rejects(c.chat.postMessage({ channel: "C_SALES", text: "x" }), /restricted_action/); // the bot's
+  await assert.rejects(bot.app.client.chat.postMessage({ channel: "C_DEV", text: "x" }), /restricted_action/);
+  assert.ok((await bot.app.client.chat.postMessage({ channel: "C_SALES", text: "hi" })).ok);
+  await assert.rejects(bot.app.client.chat.postMessage({ channel: "", text: "x" }), /restricted_action/); // its empty DM is nobody's
+});
+
+test("a code channel can be created only from a CODE_CHANNELS origin, and is then the owner's", async () => {
+  const c = pepe1.app.client;
+  const create = (origin?: string) => c.apiCall("agents.conversations.create", { origin_channel_id: origin, name: "fix-login" });
+  await assert.rejects(create("C_DEV"), /restricted_action/);
+  await assert.rejects(create(), /restricted_action/);
+  await assert.rejects(bot.app.client.apiCall("agents.conversations.create", { origin_channel_id: "C_CODE" }), /restricted_action/);
+  const r = await create("C_CODE");
+  assert.equal(r.channel_id, "CCODE1");
+  assert.ok((await c.apiCall("agents.conversations.setProperties", { channel_id: "CCODE1", title: "Fix login" })).ok);
+  assert.ok((await c.chat.postMessage({ channel: "CCODE1", text: "on it" })).ok);
+  await assert.rejects(bot.app.client.chat.postMessage({ channel: "CCODE1", text: "x" }), /restricted_action/);
+  await assert.rejects(bot.app.client.apiCall("agents.conversations.archive", { channel_id: "CCODE1" }), /restricted_action/);
+  const before = pepe1.got.length;
+  await slack.emit("events_api", inChannel("CCODE1", "UXAVI", "also check Safari", { channel_type: "group" }));
+  await waitFor(() => pepe1.got.length === before + 1);
+  assert.equal(pepe1.got.at(-1).text, "also check Safari");
+  assert.equal(slack.calls.some((x) => x.method === "conversations.info" && x.params.channel === "CCODE1"), false);
+});
+
+test("ephemeral notices in a channel may go to any member; in the DM only to the owner", async () => {
+  const c = pepe1.app.client;
+  assert.ok((await c.chat.postEphemeral({ channel: "C_DEV", user: "UXAVI", text: "only you" })).ok);
+  assert.ok((await c.chat.postEphemeral({ channel: "D_UPEPE", user: "UPEPE", text: "only you" })).ok);
+  await assert.rejects(c.chat.postEphemeral({ channel: "D_UPEPE", user: "UXAVI", text: "x" }), /restricted_action/);
+  await assert.rejects(c.chat.postEphemeral({ channel: "UPEPE", user: "UXAVI", text: "x" }), /restricted_action/);
+});
+
+test("users.info for any user once the owner has a channel", async () => {
+  assert.ok((await pepe1.app.client.users.info({ user: "UXAVI" })).ok);
+  // xavi owns no channel: only himself.
+  const info = async (user: string) => (await (await fetch(`${GW}/api/users.info?user=${user}`, { method: "POST", headers: { authorization: "Bearer gw-xavi" } })).json()).error;
+  assert.equal(await info("UXAVI"), undefined);
+  assert.equal(await info("UPEPE"), "restricted_action");
 });
 
 test("a user's edit reaches its owner; bot edits and unfurls do not", async () => {
@@ -202,7 +249,6 @@ test("a daemon can read its own user and DM and remove its reactions, nobody els
   assert.equal((await c.users.info({ user: "UPEPE" })).ok, true);
   assert.equal((await c.conversations.info({ channel: "D_UPEPE" })).ok, true);
   assert.equal((await c.reactions.remove({ channel: "D_UPEPE", timestamp: "1.0", name: "eyes" })).ok, true);
-  await assert.rejects(c.users.info({ user: "UXAVI" }), /restricted_action/);
   await assert.rejects(c.conversations.info({ channel: "D_UXAVI" }), /restricted_action/);
   await assert.rejects(c.reactions.remove({ channel: "D_UXAVI", timestamp: "1.0", name: "eyes" }), /restricted_action/);
 });

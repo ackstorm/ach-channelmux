@@ -84,7 +84,8 @@ interface Owner {
   working: Map<string, { timer: NodeJS.Timeout; notice?: string }>; // message ts -> running working notice
 }
 
-// Methods whose target (channel, or user for users.info) must be the owner's DM or the owner.
+// Methods whose target (channel, or user for users.info) must be the owner's DM or the owner, one of its
+// CHANNELS or a code channel it opened.
 const CHANNEL_SCOPED: Record<string, string[]> = {
   "chat.postMessage": ["channel"],
   "chat.update": ["channel"],
@@ -103,6 +104,9 @@ const CHANNEL_SCOPED: Record<string, string[]> = {
   "chat.stopStream": ["channel"],
   "agents.sessions.setStatus": ["channel_id"],
   "agents.sessions.rename": ["channel_id"],
+  "agents.conversations.setProperties": ["channel_id"],
+  "agents.conversations.setView": ["channel_id"],
+  "agents.conversations.archive": ["channel_id"],
 };
 const PASSTHROUGH = new Set(["auth.test", "team.info", "files.getUploadURLExternal"]);
 // cc-connect's progress reactions (👀 plus its heartbeat emoji), replaced by the working notice.
@@ -466,6 +470,16 @@ export function createGateway(cfg: GatewayConfig) {
     return entry;
   }
 
+  const codeChannels = new Map<string, Owner>(); // code channel id -> the owner whose daemon opened it
+
+  // "" (a service account's DM and user) is nobody's.
+  async function mayWrite(owner: Owner, id: string) {
+    if (!id) return false;
+    if (id === owner.dm || id === owner.slackUserId) return true;
+    if (codeChannels.has(id)) return codeChannels.get(id) === owner; // never in CHANNELS
+    return (await channelEntry(id))?.email === owner.email;
+  }
+
   async function ownerForToken(token: string | undefined): Promise<Owner | null> {
     if (!token) return null;
     const email = await cfg.resolveToken(token);
@@ -576,12 +590,13 @@ export function createGateway(cfg: GatewayConfig) {
     }
 
     const inChannel = !key.userId;
-    const entry = inChannel ? await channelEntry(key.channel!) : undefined;
-    if (inChannel && !entry) {
+    const codeOwner = inChannel ? codeChannels.get(key.channel!) : undefined; // never in CHANNELS
+    const entry = inChannel && !codeOwner ? await channelEntry(key.channel!) : undefined;
+    if (inChannel && !codeOwner && !entry) {
       if (entry === null) log("channel_unmapped", { channel: key.channel });
       return;
     }
-    const owner = entry ? await ownerFor(entry.email) : await ownerForSlackUser(key.userId!);
+    const owner = codeOwner ?? (entry ? await ownerFor(entry.email) : await ownerForSlackUser(key.userId!));
     if (!owner) {
       log("unknown_owner", { user: key.userId, channel: key.channel });
       if (type !== "events_api") await evt.ack();
@@ -722,11 +737,15 @@ export function createGateway(cfg: GatewayConfig) {
     const scoped = CHANNEL_SCOPED[method];
     if (scoped) {
       const targets = scoped.flatMap((f) => channelsOf(f, params[f]));
-      const allowed = new Set([owner.dm, owner.slackUserId]);
-      if (targets.length === 0 || !targets.every((c) => allowed.has(c))) {
+      // users.info: anyone once the owner serves a channel (the daemon names who wrote each message).
+      const hasChannels = Object.values(cfg.channels ?? {}).some((c) => c.email === owner.email);
+      const mine = method === "users.info" && hasChannels ? () => true : (c: string) => mayWrite(owner, c);
+      if (targets.length === 0 || !(await Promise.all(targets.map(mine))).every(Boolean)) {
         return { ok: false, error: "restricted_action" };
       }
-      if (method === "chat.postEphemeral" && params.user !== owner.slackUserId) {
+      // In the DM only to the owner; in a channel to anyone (e.g. an edit's author).
+      const inDm = params.channel === owner.dm || params.channel === owner.slackUserId;
+      if (method === "chat.postEphemeral" && inDm && params.user !== owner.slackUserId) {
         return { ok: false, error: "restricted_action" };
       }
       // The working notice replaces cc-connect's progress reactions (👀, 🕐, …): they stay off
@@ -740,6 +759,14 @@ export function createGateway(cfg: GatewayConfig) {
       }
       const r = await slack(method, params);
       if (method === "conversations.replies") for (const m of r.messages ?? []) rewriteFiles(owner, m.files); // e.g. a clip's finished transcript
+      return r;
+    }
+    if (method === "agents.conversations.create") {
+      // Only from one of the owner's CODE_CHANNELS; the new channel is then the owner's.
+      const origin = params.origin_channel_id ? await channelEntry(params.origin_channel_id) : undefined;
+      if (!origin?.code || origin.email !== owner.email) return { ok: false, error: "restricted_action" };
+      const r = await slack(method, params);
+      if (r.ok) codeChannels.set(r.channel_id, owner);
       return r;
     }
     if (method === "views.open") {

@@ -20,6 +20,7 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
   const acks = new Map<string, (payload: unknown) => void>();
   let socket: WebSocket | null = null;
   let lastTs = 0;
+  let codeChannels = 0;
   let port = 0;
 
   const server = http.createServer(async (req, res) => {
@@ -86,6 +87,12 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
       case "conversations.info":
         if (channels[params.channel]) return send({ ok: true, channel: { id: params.channel, name: channels[params.channel] } });
         return send(/^D/.test(params.channel ?? "") ? { ok: true, channel: { id: params.channel, is_im: true } } : { ok: false, error: "channel_not_found" });
+      case "agents.conversations.create":
+        return send({ ok: true, channel_id: `CCODE${++codeChannels}` });
+      case "agents.conversations.setProperties":
+      case "agents.conversations.setView":
+      case "agents.conversations.archive":
+        return send({ ok: true });
       case "conversations.open":
         return send({ ok: true, channel: { id: `D_${params.users}` } });
       case "files.getUploadURLExternal": {
