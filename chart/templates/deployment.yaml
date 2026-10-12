@@ -59,6 +59,14 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.slackSecretRef.name | quote }}
                   key: {{ required "slackSecretRef.botTokenKey is required" .Values.slackSecretRef.botTokenKey | quote }}
+            {{- with .Values.channels }}
+            - name: CHANNELS
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.codeChannels }}
+            - name: CODE_CHANNELS
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

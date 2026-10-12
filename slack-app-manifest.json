@@ -18,6 +18,9 @@
       "agent_description": "Your coding agent, in your own workspace.",
       "suggested_prompts": []
     },
+    "code_channels": {
+      "enabled": true
+    },
     "shortcuts": [
       {
         "name": "Send to agent",
@@ -40,13 +43,18 @@
         "users:read",
         "users:read.email",
         "assistant:write",
-        "commands"
+        "commands",
+        "code_channels:manage",
+        "channels:history",
+        "groups:history",
+        "channels:read",
+        "groups:read"
       ]
     }
   },
   "settings": {
     "event_subscriptions": {
-      "bot_events": ["message.im", "agent_session_stopped", "app_home_opened"]
+      "bot_events": ["message.im", "message.channels", "message.groups", "agent_session_stopped", "app_home_opened"]
     },
     "interactivity": {
       "is_enabled": true
