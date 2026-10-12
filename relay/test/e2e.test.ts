@@ -5,7 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
-import { createGateway, addPreamble, addShortcutPreamble, localTime, WORKING_MESSAGES, SLOW_WORKING_MESSAGES } from "../src/gateway.ts";
+import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime, WORKING_MESSAGES, SLOW_WORKING_MESSAGES } from "../src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
@@ -344,6 +344,16 @@ test("session preamble: only a new top-level message, never commands, edits or o
   addPreamble(files, "P", { email: "x@a.com" }); // no name, no tz: email and UTC
   assert.match(files.text, /\nUser: x@a\.com\. Local time: 2026-10-03 16:40 \(UTC\)\.\n/);
   assert.equal(localTime(new Date(0), "Not/AZone"), "1970-01-01 00:00 (UTC)");
+});
+
+test("CHANNELS maps channel names to owners; CODE_CHANNELS must be among them", () => {
+  assert.deepEqual(parseChannels("#_tmp_jcm = Pepe@Example.com, sales=bot@example.com", "_tmp_jcm"), {
+    _tmp_jcm: { email: "pepe@example.com", code: true },
+    sales: { email: "bot@example.com", code: false },
+  });
+  assert.deepEqual(parseChannels("", ""), {});
+  assert.throws(() => parseChannels("sales=bot@example.com", "other"), /CODE_CHANNELS: other is not in CHANNELS/);
+  assert.throws(() => parseChannels("sales", ""), /CHANNELS: "sales" is not name=email/);
 });
 
 test("unknown daemon token is rejected", async () => {

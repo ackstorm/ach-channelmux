@@ -8,8 +8,10 @@
 //   PORT                               default 8080
 //   SESSION_PREAMBLE                   optional; added to each thread's first message (default below, "" disables)
 //   OFFLINE_MESSAGE                    optional; reply while the user's daemon is not connected
+//   CHANNELS                           optional; name=owner email,… channels whose mentions go to that owner's daemon (default: DMs only)
+//   CODE_CHANNELS                      optional; of those, the channels where a mention opens a Slack code channel
 
-import { createGateway } from "./gateway.ts";
+import { createGateway, parseChannels } from "./gateway.ts";
 import { tokenResolver } from "./resolver.ts";
 
 // The daemon wraps each Slack message in <slack ...> and streams the reply text plus a card per
@@ -47,6 +49,7 @@ const gw = createGateway({
   }),
   sessionPreamble: env("SESSION_PREAMBLE", SLACK_PREAMBLE),
   offlineMessage: process.env.OFFLINE_MESSAGE || undefined,
+  channels: parseChannels(process.env.CHANNELS ?? "", process.env.CODE_CHANNELS ?? ""),
 });
 
 await gw.start();

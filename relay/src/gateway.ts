@@ -37,6 +37,8 @@ export interface GatewayConfig {
   sessionPreamble?: string;
   /** Reply to a message while no daemon is connected (e.g. how to start the workspace). */
   offlineMessage?: string;
+  /** Channel name -> the owner whose daemon serves its mentions; code channels open a Slack code channel. Default: DMs only. */
+  channels?: Record<string, { email: string; code: boolean }>;
   /** Slack calls per minute per method (default RATES in limiter.ts); {} disables pacing. */
   rates?: Record<string, number>;
   /** chat.startStream is refused when it would wait longer. Default 2 s. */
@@ -348,6 +350,22 @@ export function addShortcutPreamble(
   const m = { type: "message", text: body.message.text ?? "" };
   addPreamble(m, preamble, user);
   body.message.text = m.text;
+}
+
+/** "name=email,…" and "name,…" (a leading # is dropped) -> channel name -> its owner. */
+export function parseChannels(channels: string, code: string): Record<string, { email: string; code: boolean }> {
+  const names = (s: string) => s.split(",").map((x) => x.trim().replace(/^#/, "")).filter(Boolean);
+  const out: Record<string, { email: string; code: boolean }> = {};
+  for (const entry of channels.split(",").map((x) => x.trim()).filter(Boolean)) {
+    const [name, email] = entry.split("=").map((x) => x?.trim());
+    if (!name || !email) throw new Error(`CHANNELS: "${entry}" is not name=email`);
+    out[name.replace(/^#/, "")] = { email: email.toLowerCase(), code: false };
+  }
+  for (const name of names(code)) {
+    if (!out[name]) throw new Error(`CODE_CHANNELS: ${name} is not in CHANNELS`);
+    out[name].code = true;
+  }
+  return out;
 }
 
 export function createGateway(cfg: GatewayConfig) {
