@@ -1,6 +1,7 @@
 // Agent daemon: a Bolt app that connects to the relay as if it were Slack and runs each
 // DM thread as an ACP session (e.g. `opencode acp`). A new message gets a picker in the DM's main
 // view (a Slack modal for the folder, then a new or existing session in it); its thread opens with both set.
+// In a channel the relay forwards, a message that mentions the bot does the same, the picker in its thread.
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -80,8 +81,9 @@ interface Pending {
   user?: string;
   ts?: string;
   cwd?: string; // the folder, once chosen; then the thread asks for the session
-  picker?: string; // ts of the greeting in the main view
+  picker?: string; // ts of the greeting in the main view (in a channel, in the thread)
   question?: string; // ts of the session question in the thread
+  top?: boolean; // the session's messages go in the channel itself (a Slack code channel), not in a thread
 }
 
 interface Thread {
@@ -89,7 +91,12 @@ interface Thread {
   thread: string;
   sessionId: string;
   cwd: string;
+  top?: boolean; // see Pending
 }
+
+// Where a session's messages go: its thread, or the channel itself.
+const inThread = (w: { thread: string; top?: boolean }) => (w.top ? undefined : w.thread);
+const isDM = (channel: string) => channel.startsWith("D");
 
 export function createDaemon(cfg: DaemonConfig) {
   const log = cfg.log ?? ((msg, extra) => console.log(JSON.stringify({ msg, ...(extra as object) })));
@@ -141,8 +148,8 @@ export function createDaemon(cfg: DaemonConfig) {
     writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), defaults, settings: latestSettings() }));
   }
 
-  const say = (t: { channel: string; thread: string }, text: string, blocks?: unknown[]) =>
-    slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, text, ...(blocks && { blocks: blocks as any }) });
+  const say = (t: { channel: string; thread: string; top?: boolean }, text: string, blocks?: unknown[]) =>
+    slack.chat.postMessage({ channel: t.channel, thread_ts: inThread(t), text, ...(blocks && { blocks: blocks as any }) });
 
   // ---------- ACP agent ----------
 
@@ -400,7 +407,7 @@ export function createDaemon(cfg: DaemonConfig) {
     await slack.apiCall("files.completeUploadExternal", {
       files: JSON.stringify([{ id: up.file_id, title: filename }]),
       channel_id: t.channel,
-      thread_ts: t.thread,
+      thread_ts: inThread(t),
       ...(opts.comment && { initial_comment: opts.comment }),
     });
   }
@@ -573,7 +580,7 @@ export function createDaemon(cfg: DaemonConfig) {
       // Its turn has come: the notice loses its button.
       void notice?.then((m) => slack.chat.update({ channel: t.channel, ts: m.ts, text: "📬 Queued, now running.", blocks: [] })).catch(() => {});
       const started = Date.now();
-      const out = createOutput((m, p) => slack.apiCall(m, p), t, { title, log });
+      const out = createOutput((m, p) => slack.apiCall(m, p), { channel: t.channel, thread: inThread(t) }, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
       outputs.set(t.sessionId, out);
       turnOf.set(t.sessionId, ++turns);
@@ -619,8 +626,9 @@ export function createDaemon(cfg: DaemonConfig) {
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
         }
         const took = Date.now() - started;
-        // A long turn ends with a notice in the main view (it notifies; a stream's end does not), linking its thread.
-        if (took >= (cfg.doneNoticeMs ?? 60_000)) {
+        // A long turn ends with a notice in the DM's main view (it notifies; a stream's end does not), linking its
+        // thread. Not in a channel: its main view is everyone's.
+        if (isDM(t.channel) && took >= (cfg.doneNoticeMs ?? 60_000)) {
           const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
           const text = `${DONE[outcome]} in \`${basename(t.cwd)}\` · ${duration(took)}${link ? ` → <${link}|Open thread>` : ""}`;
           await slack.chat.postMessage({ channel: t.channel, text, unfurl_links: false }).catch(() => {});
@@ -858,10 +866,11 @@ export function createDaemon(cfg: DaemonConfig) {
     if (first.cwd !== undefined) return; // a second tap
     Object.assign(first, { cwd: p.cwd, picker: p.picker });
     save();
-    const q: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, ...(await question(p)) } as any);
+    const q: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread({ thread: p.thread, top: first.top }), ...(await question(p)) } as any);
     first.question = q.ts;
     save();
-    const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: q.ts }).then((r) => r.permalink, () => undefined);
+    // In a channel the greeting is in the thread already: it only loses its buttons.
+    const link = isDM(p.channel) ? await slack.chat.getPermalink({ channel: p.channel, message_ts: q.ts }).then((r) => r.permalink, () => undefined) : undefined;
     await slack.chat.update({ channel: p.channel, ts: p.picker, text: `📁 \`${nameOf(p.cwd)}\`${link ? ` → <${link}|Open thread>` : ""}`, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
   }
 
@@ -875,7 +884,7 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!first) return;
     pending.delete(p.thread);
     save();
-    const where = { channel: p.channel, thread: p.thread };
+    const where = { channel: p.channel, thread: p.thread, top: first.top };
     const cwd = abs(p.cwd);
     let t: Thread;
     let head: string;
@@ -920,9 +929,9 @@ export function createDaemon(cfg: DaemonConfig) {
     save();
     // The question gives way to the header and the recap; the greeting, in the DM's main view, links to them.
     if (first.question) await slack.chat.delete({ channel: p.channel, ts: first.question }).catch(() => {});
-    const posted: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, text: head, unfurl_links: false });
-    if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: p.thread, markdown_text: recap } as any); // Slack refuses text with markdown_text
-    const link = await slack.chat.getPermalink({ channel: p.channel, message_ts: posted.ts }).then((r) => r.permalink, () => undefined);
+    const posted: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), text: head, unfurl_links: false });
+    if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
+    const link = isDM(p.channel) ? await slack.chat.getPermalink({ channel: p.channel, message_ts: posted.ts }).then((r) => r.permalink, () => undefined) : undefined;
     const done = `📁 \`${nameOf(p.cwd)}\` · ${status}${link ? ` → <${link}|Open thread>` : ""}`;
     await slack.chat.update({ channel: p.channel, ts: p.picker, text: done, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
@@ -1152,20 +1161,28 @@ export function createDaemon(cfg: DaemonConfig) {
     const tail = out.length > SHELL_SHOWN ? `…\n${out.slice(-SHELL_SHOWN)}` : out;
     const status = code === 0 ? "" : `\n${code === null ? "timed out or failed to start" : `exit ${code}`}`;
     const fenced = `\`\`\`\n$ ${cmd}\n${tail.replaceAll("\`\`\`", "ˋˋˋ")}\n\`\`\`${status}`;
-    await slack.chat.postMessage({ channel: t.channel, thread_ts: t.thread, markdown_text: fenced } as any);
+    await slack.chat.postMessage({ channel: t.channel, thread_ts: inThread(t), markdown_text: fenced } as any);
     shellNotes.set(t.sessionId, [...(shellNotes.get(t.sessionId) ?? []), fenced]);
   }
 
   // ---------- Slack ----------
 
-  app.message(async ({ message }) => {
+  app.message(async ({ message, context }) => {
     const m = message as any;
     if (m.subtype === "message_changed") {
-      // Edits never reach the agent: only their author sees this, in the message's thread.
+      // Edits never reach the agent: only their author sees this, in the message's thread. Only for a session's
+      // or a picker's messages: in a channel the others were never for the agent.
       const e = m.message;
+      if (!threads[e.thread_ts ?? e.ts] && !pending.has(e.thread_ts ?? e.ts)) return;
       return void (await slack.chat.postEphemeral({ channel: m.channel, user: e.user, thread_ts: e.thread_ts ?? e.ts, text: "✏️ Edits don't reach the agent. Send a new message instead." }).catch(() => {}));
     }
     if ((m.subtype && m.subtype !== "file_share") || !(m.text || m.files?.length)) return;
+    // In a channel a new message is for the agent only when it mentions the bot, which is not part of what it says.
+    const mention = `<@${context.botUserId}>`;
+    if (!m.thread_ts && !isDM(m.channel)) {
+      if (!m.text?.includes(mention)) return;
+      m.text = m.text.replaceAll(mention, "").trim();
+    }
     if (!m.thread_ts && /^\s*\$[a-z][\w-]*\s*(\n|$)/i.test(m.text ?? "")) {
       // A command outside a thread: there is no session to run it on.
       const help = /^\s*\$help\s*(\n|$)/i.test(m.text) ? HELP : `Commands work inside a thread with a session.\n${HELP}`;
@@ -1184,11 +1201,12 @@ export function createDaemon(cfg: DaemonConfig) {
     const where = { channel: m.channel, thread: m.thread_ts };
     const held = pending.get(m.thread_ts);
     if (held) return void (await say(where, held.cwd === undefined ? "Choose a folder above first." : "Choose a new or previous session above first."));
+    if (!isDM(m.channel)) return; // a channel's other threads are not the agent's: no reply there
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
 
-  // A new message waits for the picker, in the DM's main view: its button (re)opens the modal.
-  // The thread opens once a session starts.
+  // A new message waits for the picker, in the DM's main view (in a channel, in the message's thread):
+  // its button (re)opens the modal. The thread opens once a session starts.
   async function offerPicker(p: Pending & { ts: string }) {
     pending.set(p.ts, p);
     save();
@@ -1206,7 +1224,7 @@ export function createDaemon(cfg: DaemonConfig) {
       : found.length ? `👋 Hi${to}! Work in one of these folders?`
       : `👋 Hi${to}! Pick the folder to work in.`;
     const hint = found.length ? "Found in your message. " : "";
-    return (await slack.chat.postMessage({ channel: p.channel, text: hi, blocks: [
+    return (await slack.chat.postMessage({ channel: p.channel, thread_ts: isDM(p.channel) ? undefined : p.ts, text: hi, blocks: [
       section(`${hi}\n${hint}Then choose a new or previous session in the thread; your message goes to the agent once it starts.`),
       { type: "actions", elements: found.length ? [{ ...use[0], style: "primary" }, ...use.slice(1), choose] : [{ ...choose, style: "primary" }] },
     ] as any })) as any;

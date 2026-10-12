@@ -188,7 +188,7 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
   return parts;
 }
 
-export function createOutput(api: Api, where: { channel: string; thread: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
+export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
   let streaming = true; // until a stream call fails, for the rest of this turn
@@ -212,7 +212,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
   const run = (fn: () => Promise<unknown>) =>
     (chain = chain.then(fn).catch((err) => log("output_failed", { error: String(err) })));
   const status = (s: string, extra: Record<string, unknown> = {}) =>
-    api("agents.sessions.setStatus", { channel_id: channel, thread_ts: thread, status: s, ...extra }).catch((err) =>
+    api("agents.sessions.setStatus", { channel_id: channel, ...(thread && { thread_ts: thread }), status: s, ...extra }).catch((err) =>
       log("status_failed", { status: s, error: String(err) }),
     );
 
@@ -232,7 +232,7 @@ export function createOutput(api: Api, where: { channel: string; thread: string 
     const open = running().filter((t) => !chunks.some((c) => c.id === t.id));
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
-    const r = await api("chat.startStream", { channel, thread_ts: thread, task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
+    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
     stream = { ts: r.ts, started: Date.now() };
     sent = textOf(lead);
   }

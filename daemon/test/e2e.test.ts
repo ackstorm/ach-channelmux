@@ -13,7 +13,8 @@ import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-sla
 import { createDaemon, short } from "../src/daemon.ts";
 
 const DM = "D_UPEPE";
-const slack = createMockSlack({ UPEPE: "pepe@example.com" });
+const DEV = "C_DEV"; // #dev: its mentions go to this daemon
+const slack = createMockSlack({ UPEPE: "pepe@example.com" }, { [DEV]: "dev" });
 const base = mkdtempSync(join(tmpdir(), "daemon-test-"));
 for (const d of ["alpha", "beta", ".hidden", "node_modules"]) mkdirSync(join(base, d));
 // A symlinked folder, browsed like any other.
@@ -156,6 +157,7 @@ before(async () => {
     resolveToken: async (t) => (t === "tok-pepe" ? "pepe@example.com" : null),
     workingNoticeMs: 0, // forward 👀 so the test sees the daemon's turn markers
     rates: {},
+    channels: { dev: { email: "pepe@example.com", code: false } },
     log: () => {},
   });
   await gw.start();
@@ -844,6 +846,59 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
   assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
   await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
+});
+
+// A message in #dev, and a tap there.
+const inDev = (text: string, extra: Record<string, unknown>) =>
+  slack.emit("events_api", slack.dm("UPEPE", text, { channel: DEV, channel_type: "channel", ...extra }));
+const clickInDev = (message: { ts: string; thread_ts?: string }, action: Record<string, unknown>) =>
+  slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_dev_${message.ts}`, channel: { id: DEV }, message, actions: [action] }, true);
+
+test("a mention in a channel opens the picker in its thread and the reply runs the session there", async () => {
+  await inDev("<@UBOT> look at the logs", { ts: "950.000001" });
+  const greeting = await waitFor(() => posts.find((p) => p.params.channel === DEV && p.params.blocks?.includes("picker_open_modal")));
+  assert.equal(greeting.params.thread_ts, "950.000001"); // in the mention's thread, not the channel
+  assert.equal(greeting.params.text, "👋 Hi Mary Ann! Pick the folder to work in.");
+  const n = views().length;
+  await clickInDev({ ts: greeting.ts, thread_ts: "950.000001" }, { type: "button", action_id: "picker_open_modal", value: "950.000001" });
+  await waitFor(() => views().length > n);
+  await submit(lastView()); // the base folder
+  const q = await questionIn("950.000001");
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === greeting.ts && c.params.text === `📁 \`${basename(base)}\``)); // no link: it is in the thread
+  await clickInDev({ ts: q.ts, thread_ts: "950.000001" }, { type: "button", action_id: "session_new", value: "950.000001" });
+  const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("look at the logs")));
+  assert.equal(p.text, "look at the logs"); // without the mention
+  await turnEnded("950.000001");
+  assert.equal(calls("chat.update").filter((c) => c.params.ts === greeting.ts).at(-1)!.params.text, `📁 \`${basename(base)}\` · new session`);
+
+  // Replies need no mention. A long turn's notice stays out of the channel's main view.
+  await inDev("wait", { ts: "950.000002", thread_ts: "950.000001" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait" && e.sessionId === p.sessionId));
+  await sleep(150); // past doneNoticeMs
+  await inDev("$stop", { ts: "950.000003", thread_ts: "950.000001" });
+  await inDev("and now this", { ts: "950.000004", thread_ts: "950.000001" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and now this" && e.sessionId === p.sessionId));
+  await turnEnded("950.000004"); // the stopped turn, notice included, ended before this one
+  assert.deepEqual(posts.filter((x) => x.params.channel === DEV && !x.params.thread_ts), []);
+});
+
+test("a channel message without a mention is ignored", async () => {
+  await inDev("just chatting", { ts: "951.000001" });
+  await inDev("$help", { ts: "951.000002" });
+  await inDev("<@UBOT> $help", { ts: "951.000003" }); // with a mention: the help, in its thread
+  const help = await waitFor(() => posts.find((p) => p.params.thread_ts === "951.000003"));
+  assert.match(help.params.text, /^\*Commands\*/);
+  assert.equal(posts.some((p) => ["951.000001", "951.000002"].includes(p.params.thread_ts) || p.params.blocks?.includes("951.000001")), false);
+  assert.equal(agentLog().some((e) => e.m === "prompt" && e.text.includes("just chatting")), false);
+});
+
+test("a thread reply in a channel with no session is ignored silently", async () => {
+  await inDev("anyone?", { ts: "952.000002", thread_ts: "952.000001" });
+  await inDev("", { user: undefined, subtype: "message_changed", message: { type: "message", user: "UPEPE", ts: "952.000002", thread_ts: "952.000001", text: "anyone at all?" }, previous_message: { text: "anyone?" } });
+  await inDev("<@UBOT> $help", { ts: "952.000003" });
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "952.000003"));
+  assert.equal(posts.some((p) => p.params.thread_ts === "952.000001"), false); // not "This thread has no agent session"
+  assert.equal(calls("chat.postEphemeral").some((c) => c.params.thread_ts === "952.000001"), false); // nor the edit notice
 });
 
 test("a long folder path keeps its start and its name, the middle cut", () => {
