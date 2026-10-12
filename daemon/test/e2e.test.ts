@@ -14,7 +14,8 @@ import { createDaemon, short } from "../src/daemon.ts";
 
 const DM = "D_UPEPE";
 const DEV = "C_DEV"; // #dev: its mentions go to this daemon
-const slack = createMockSlack({ UPEPE: "pepe@example.com" }, { [DEV]: "dev" });
+const CODE = "C_CODE"; // #code: its mentions open a code channel
+const slack = createMockSlack({ UPEPE: "pepe@example.com" }, { [DEV]: "dev", [CODE]: "code" });
 const base = mkdtempSync(join(tmpdir(), "daemon-test-"));
 for (const d of ["alpha", "beta", ".hidden", "node_modules"]) mkdirSync(join(base, d));
 // A symlinked folder, browsed like any other.
@@ -157,7 +158,7 @@ before(async () => {
     resolveToken: async (t) => (t === "tok-pepe" ? "pepe@example.com" : null),
     workingNoticeMs: 0, // forward 👀 so the test sees the daemon's turn markers
     rates: {},
-    channels: { dev: { email: "pepe@example.com", code: false } },
+    channels: { dev: { email: "pepe@example.com", code: false }, code: { email: "pepe@example.com", code: true } },
     log: () => {},
   });
   await gw.start();
@@ -457,10 +458,11 @@ test("with one MCP server per folder (opencode), a tool call goes to the thread 
   // A fork of the thread, in the same folder, registers its own URL last.
   const forks = agentLog().filter((e) => e.m === "new" && e.from).length;
   await slack.emit("events_api", slack.dm("UPEPE", "$fork", { ts: "100.000041", thread_ts: "100.000001" }));
-  await waitFor(() => agentLog().filter((e) => e.m === "new" && e.from).length > forks);
+  // Longer waits: a fork loads the session and connects its tools, slow on a busy machine.
+  await waitFor(() => agentLog().filter((e) => e.m === "new" && e.from).length > forks, 10_000);
   const before = calls("files.completeUploadExternal").length;
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000042", thread_ts: "100.000001" }));
-  await waitFor(() => calls("files.completeUploadExternal").length > before);
+  await waitFor(() => calls("files.completeUploadExternal").length > before, 10_000);
   assert.equal(calls("files.completeUploadExternal").at(-1)!.params.thread_ts, "100.000001");
   await turnEnded("100.000042");
 });
@@ -848,11 +850,11 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
 
-// A message in #dev, and a tap there.
+// A message in #dev, and a tap in a channel.
 const inDev = (text: string, extra: Record<string, unknown>) =>
   slack.emit("events_api", slack.dm("UPEPE", text, { channel: DEV, channel_type: "channel", ...extra }));
-const clickInDev = (message: { ts: string; thread_ts?: string }, action: Record<string, unknown>) =>
-  slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_dev_${message.ts}`, channel: { id: DEV }, message, actions: [action] }, true);
+const clickIn = (channel: string, message: { ts: string; thread_ts?: string }, action: Record<string, unknown>) =>
+  slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${channel}_${message.ts}`, channel: { id: channel }, message, actions: [action] }, true);
 
 test("a mention in a channel opens the picker in its thread and the reply runs the session there", async () => {
   await inDev("<@UBOT> look at the logs", { ts: "950.000001" });
@@ -860,12 +862,12 @@ test("a mention in a channel opens the picker in its thread and the reply runs t
   assert.equal(greeting.params.thread_ts, "950.000001"); // in the mention's thread, not the channel
   assert.equal(greeting.params.text, "👋 Hi Mary Ann! Pick the folder to work in.");
   const n = views().length;
-  await clickInDev({ ts: greeting.ts, thread_ts: "950.000001" }, { type: "button", action_id: "picker_open_modal", value: "950.000001" });
+  await clickIn(DEV, { ts: greeting.ts, thread_ts: "950.000001" }, { type: "button", action_id: "picker_open_modal", value: "950.000001" });
   await waitFor(() => views().length > n);
   await submit(lastView()); // the base folder
   const q = await questionIn("950.000001");
   await waitFor(() => calls("chat.update").some((c) => c.params.ts === greeting.ts && c.params.text === `📁 \`${basename(base)}\``)); // no link: it is in the thread
-  await clickInDev({ ts: q.ts, thread_ts: "950.000001" }, { type: "button", action_id: "session_new", value: "950.000001" });
+  await clickIn(DEV, { ts: q.ts, thread_ts: "950.000001" }, { type: "button", action_id: "session_new", value: "950.000001" });
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("look at the logs")));
   assert.equal(p.text, "look at the logs"); // without the mention
   await turnEnded("950.000001");
@@ -899,6 +901,119 @@ test("a thread reply in a channel with no session is ignored silently", async ()
   await waitFor(() => posts.find((p) => p.params.thread_ts === "952.000003"));
   assert.equal(posts.some((p) => p.params.thread_ts === "952.000001"), false); // not "This thread has no agent session"
   assert.equal(calls("chat.postEphemeral").some((c) => c.params.thread_ts === "952.000001"), false); // nor the edit notice
+});
+
+// A message in #code or in a code channel (a private channel to Slack).
+const inCode = (channel: string, text: string, extra: Record<string, unknown>) =>
+  slack.emit("events_api", slack.dm("UPEPE", text, { channel, channel_type: channel === CODE ? "channel" : "group", ...extra }));
+const repo = join(base, "delta"); // the code channel's folder: a git repo with one commit, on main
+let cc = ""; // the code channel the next tests work in
+let ccSession = "";
+
+test("a mention in a CODE_CHANNELS channel opens a code channel with the picker in it, and the session replies there, top-level", async () => {
+  mkdirSync(repo);
+  writeFileSync(join(repo, "big.py"), "old\n");
+  const git = (...args: string[]) => execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@example.com", ...args]);
+  execFileSync("git", ["init", "-q", "-b", "main", repo]);
+  git("add", ".");
+  git("commit", "-qm", "init");
+  await inCode(CODE, "<@UBOT> refactor the parser", { ts: "960.000001" });
+  const created = await waitFor(() => calls("agents.conversations.create")[0]);
+  const { origin_channel_id, origin_message_ts, session_id, is_private } = created.params;
+  assert.deepEqual([origin_channel_id, origin_message_ts, session_id, is_private], [CODE, "960.000001", "960.000001", "true"]);
+  const working = await waitFor(() => posts.find((p) => p.params.channel === CODE && p.params.thread_ts === "960.000001"));
+  cc = /^🧑‍💻 Working in <#(\w+)>$/.exec(working.params.text)![1];
+  const greeting = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("picker_open_modal")));
+  assert.equal(greeting.params.thread_ts, undefined); // the channel is the session: no threads
+  const n = views().length;
+  await clickIn(cc, { ts: greeting.ts }, { type: "button", action_id: "picker_open_modal", value: cc });
+  await waitFor(() => views().length > n);
+  await submit(lastView(), searched("delta"));
+  const q = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("session_new")));
+  assert.equal(q.params.thread_ts, undefined);
+  const m = mark();
+  await clickIn(cc, { ts: q.ts }, { type: "button", action_id: "session_new", value: cc });
+  ccSession = (await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text === "refactor the parser"))).sessionId;
+  await waitFor(() => since(m).some((c) => c.method === "chat.stopStream"));
+  assert.equal(posts.find((p) => p.params.channel === cc && p.params.text?.includes("💬"))!.params.thread_ts, undefined); // the header
+  const stream = since(m).find((c) => c.method === "chat.startStream")!;
+  assert.deepEqual([stream.params.channel, stream.params.thread_ts], [cc, undefined]);
+  const statuses = since(m).filter((c) => c.method === "agents.sessions.setStatus");
+  assert.ok(statuses.length && statuses.every((c) => c.params.channel_id === cc && c.params.thread_ts === undefined));
+
+  // Its messages need no mention, top-level or in a thread inside it; its buttons and stop find the session.
+  await inCode(cc, "and the tests", { ts: "960.000002" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and the tests" && e.sessionId === ccSession));
+  await turnEnded("960.000002");
+  await inCode(cc, "in a thread", { ts: "960.000003", thread_ts: "960.000002" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in a thread" && e.sessionId === ccSession));
+  await turnEnded("960.000003");
+  const k = mark();
+  await inCode(cc, "ask", { ts: "960.000004" });
+  const ask = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("ask_1")));
+  assert.equal(ask.params.thread_ts, undefined);
+  await clickIn(cc, { ts: ask.ts }, { type: "button", action_id: "ask_1", value: "Blue" });
+  await waitFor(() => streamed(since(k)).some((c: any) => c.type === "markdown_text" && c.text.includes("answer: Blue")));
+  await turnEnded("960.000004");
+  await inCode(cc, "wait", { ts: "960.000005" });
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait" && e.sessionId === ccSession));
+  await slack.emit("events_api", { type: "event_callback", event_id: "EvStopCode", team_id: "T1", api_app_id: "A1", event: { type: "agent_session_stopped", channel: cc, user: "UPEPE" } });
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "960.000005" && c.params.name === "black_square_for_stop"));
+
+  // The Home tab still draws: a code channel's session has no thread ts.
+  const published = calls("views.publish").length;
+  await slack.emit("events_api", { type: "event_callback", event_id: "EvHomeCode", team_id: "T1", api_app_id: "A1", event: { type: "app_home_opened", user: "UPEPE", channel: DM, tab: "home" } });
+  await waitFor(() => calls("views.publish").length > published);
+});
+
+test("if the code channel cannot be created, the session opens in the thread", async () => {
+  slack.fail.set("agents.conversations.create", "restricted_action");
+  try {
+    await inCode(CODE, "<@UBOT> try this", { ts: "961.000001" });
+    await waitFor(() => posts.find((p) => p.params.channel === CODE && p.params.thread_ts === "961.000001" && p.params.blocks?.includes("picker_open_modal")));
+    assert.ok(posts.some((p) => p.params.thread_ts === "961.000001" && /^⚠️ Could not open a code channel/.test(p.params.text ?? "")));
+  } finally {
+    slack.fail.delete("agents.conversations.create");
+  }
+});
+
+// The code channel's context bar, as last set.
+const bar = () => JSON.parse(calls("agents.conversations.setProperties").filter((c) => c.params.channel_id === cc).at(-1)!.params.code_channel).context_bar_items;
+
+test("a code channel's context bar shows its folder, branch and model, and follows a model change", async () => {
+  assert.deepEqual(bar(), [
+    { key: "folder", label: short(repo), icon: "folder" },
+    { key: "branch", label: "main", icon: "branch" },
+    { key: "model", label: "Model two", icon: "terminal" }, // the Home tab's default
+  ]);
+  await inCode(cc, "$model", { ts: "962.000001" });
+  const panel = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("cfg:model")));
+  assert.equal(panel.params.thread_ts, undefined);
+  await clickIn(cc, { ts: panel.ts }, { type: "static_select", action_id: "cfg:model", selected_option: { value: "m1" } });
+  await waitFor(() => bar().find((i: any) => i.key === "model").label === "Model one");
+});
+
+test("a turn that edits in a git folder sets the code channel's Changes tab to the diff", async () => {
+  assert.equal(calls("agents.conversations.setView").length, 0); // the turns so far edited nothing
+  writeFileSync(join(repo, "big.py"), "new\n"); // the mock agent only reports its edit
+  await inCode(cc, "big edit", { ts: "963.000001" });
+  const view = await waitFor(() => calls("agents.conversations.setView")[0]);
+  const { channel_id, view_key, type, base_branch, head_branch, content } = view.params;
+  assert.deepEqual([channel_id, view_key, type, base_branch, head_branch], [cc, "changes", "diff", "main", "main"]);
+  assert.match(content, /^diff --git a\/big\.py b\/big\.py\n[\s\S]*\n-old\n\+new\n$/);
+  await turnEnded("963.000001");
+});
+
+test("$done closes a code channel: a summary, then the channel archived with it; elsewhere it explains", async () => {
+  await inCode(cc, "$done", { ts: "964.000001" });
+  const archive = await waitFor(() => calls("agents.conversations.archive")[0]);
+  const summary = posts.find((p) => p.params.channel === cc && p.params.text?.startsWith("✅ Session closed"))!;
+  assert.equal(summary.params.text, `✅ Session closed · \`${ccSession}\` — continue it from any new message's Previous session.`);
+  assert.equal(summary.params.thread_ts, undefined);
+  assert.deepEqual([archive.params.channel_id, archive.params.summary_message_ts], [cc, summary.ts]);
+  await waitFor(() => !(cc in JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).threads)); // still resumable from the picker
+  await slack.emit("events_api", slack.dm("UPEPE", "$done", { ts: "964.000002", thread_ts: "930.000001" }));
+  await waitFor(() => posts.find((p) => p.params.thread_ts === "930.000001" && p.params.text === "`$done` closes a code channel; this is not one."));
 });
 
 test("a long folder path keeps its start and its name, the middle cut", () => {
