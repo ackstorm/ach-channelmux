@@ -458,11 +458,13 @@ test("with one MCP server per folder (opencode), a tool call goes to the thread 
   // A fork of the thread, in the same folder, registers its own URL last.
   const forks = agentLog().filter((e) => e.m === "new" && e.from).length;
   await slack.emit("events_api", slack.dm("UPEPE", "$fork", { ts: "100.000041", thread_ts: "100.000001" }));
-  // Longer waits: a fork loads the session and connects its tools, slow on a busy machine.
-  await waitFor(() => agentLog().filter((e) => e.m === "new" && e.from).length > forks, 10_000);
+  // Until the daemon says it forked, the fork's thread may be unknown to it: the agent logs the fork first.
+  await waitFor(() => agentLog().filter((e) => e.m === "new" && e.from).length > forks);
+  // A fork may wait up to 5.5 s for the agent to list the tools of a folder not yet warm.
+  await waitFor(() => posts.some((p) => p.params.thread_ts === "100.000001" && p.params.text?.startsWith("🍴 Forked")), 10_000);
   const before = calls("files.completeUploadExternal").length;
   await slack.emit("events_api", slack.dm("UPEPE", "upload the report", { ts: "100.000042", thread_ts: "100.000001" }));
-  await waitFor(() => calls("files.completeUploadExternal").length > before, 10_000);
+  await waitFor(() => calls("files.completeUploadExternal").length > before);
   assert.equal(calls("files.completeUploadExternal").at(-1)!.params.thread_ts, "100.000001");
   await turnEnded("100.000042");
 });
@@ -700,6 +702,7 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await say("hello again", "500.000008");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "hello again" && e.sessionId === fresh.sessionId));
 
+  await turnEnded("500.000008"); // $fork refuses while a turn runs
   const m = posts.length; // an earlier test forks too
   await say("$fork", "500.000013"); // a copy of the session in a new thread, rooted at our message
   const root = await waitFor(() => posts.slice(m).find((p) => !p.params.thread_ts && /^🍴 Fork of \*Session ses_\d+\* in /.test(p.params.text ?? "")));
@@ -929,8 +932,9 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   git("commit", "-qm", "init");
   await inCode(CODE, "<@UBOT> refactor the parser", { ts: "960.000001" });
   const created = await waitFor(() => calls("agents.conversations.create")[0]);
-  const { origin_channel_id, origin_message_ts, session_id, is_private } = created.params;
+  const { origin_channel_id, origin_message_ts, session_id, is_private, name } = created.params;
   assert.deepEqual([origin_channel_id, origin_message_ts, session_id, is_private], [CODE, "960.000001", "960.000001", "true"]);
+  assert.equal(name, "refactor the parser"); // the message without the mention, which Slack's own name would keep
   const working = await waitFor(() => posts.find((p) => p.params.channel === CODE && p.params.thread_ts === "960.000001"));
   cc = /^🧑‍💻 Working in <#(\w+)>$/.exec(working.params.text)![1];
   const greeting = await waitFor(() => posts.find((p) => p.params.channel === cc && p.params.blocks?.includes("picker_open_modal")));

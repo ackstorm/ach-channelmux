@@ -232,7 +232,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const open = running().filter((t) => !chunks.some((c) => c.id === t.id));
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
-    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
+    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "plan", chunks: [...open, ...lead, ...chunks] });
     stream = { ts: r.ts, started: Date.now() };
     sent = textOf(lead);
   }

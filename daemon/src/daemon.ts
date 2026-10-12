@@ -657,7 +657,6 @@ export function createDaemon(cfg: DaemonConfig) {
         }
         if (t.top && edits) await changesTab(t);
         await contextBar(t); // the turn may have changed the branch
-        if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
         if (outcome === "failed") {
           // The error is in the reply; a button sends the same message again.
           const id = randomUUID();
@@ -673,6 +672,8 @@ export function createDaemon(cfg: DaemonConfig) {
           await slack.chat.postMessage({ channel: t.channel, text, unfurl_links: false }).catch(() => {});
         }
         outputs.delete(t.sessionId);
+        // Last: once it shows, the turn is over ($fork, $clear and $done no longer refuse).
+        if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
       }
     });
     queues.set(t.sessionId, turn);
@@ -1310,7 +1311,10 @@ export function createDaemon(cfg: DaemonConfig) {
     const where = { channel: first.channel, thread: first.ts };
     let id: string | undefined;
     try {
-      const r: any = await slack.apiCall("agents.conversations.create", { origin_channel_id: first.channel, origin_message_ts: first.ts, session_id: first.ts, is_private: true });
+      // Named after the message without the mention (and the relay's context block): Slack's own name keeps "@bot".
+      const at = first.text.indexOf("\n\n[Context from the Slack relay");
+      const name = (at >= 0 ? first.text.slice(0, at) : first.text).split("\n")[0].trim().slice(0, 80);
+      const r: any = await slack.apiCall("agents.conversations.create", { origin_channel_id: first.channel, origin_message_ts: first.ts, session_id: first.ts, is_private: true, ...(name && { name }) });
       id = r.channel_id;
     } catch (err: any) {
       log("code_channel_failed", { error: err?.data?.error ?? String(err) });
