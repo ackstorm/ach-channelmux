@@ -37,21 +37,62 @@ const linesOf = (s?: string | null) => (s ? s.replace(/\n$/, "").split("\n") : [
 // A card's output renders Markdown when expanded (```diff in colour, verified on Slack); fences
 // are closed after clipping so a cut never leaves one open.
 const fence = (body: string, max: number, lang = "") => `\`\`\`${lang}\n${clip(body.replaceAll("\`\`\`", "ˋˋˋ"), max)}\n\`\`\``;
-/** What an edit changed: the lines left once those both versions share at the start and end are set aside.
- * opencode reports a whole file before and after each edit. */
-export function changed(oldText: string | null | undefined, newText: string | null | undefined) {
+/** Both versions line by line, each line kept (" "), removed ("-") or added ("+"): a longest common subsequence
+ * of the lines between those both share at the start and end. opencode reports a whole file before and after each edit. */
+function lineOps(oldText: string | null | undefined, newText: string | null | undefined): [string, string][] {
   const a = linesOf(oldText);
   const b = linesOf(newText);
   let at = 0;
   while (at < a.length && at < b.length && a[at] === b[at]) at++;
   let end = 0;
   while (end < a.length - at && end < b.length - at && a[a.length - 1 - end] === b[b.length - 1 - end]) end++;
-  // ponytail: one hunk from the first to the last change; edits far apart show the lines between them too.
-  return { at, removed: a.slice(at, a.length - end), added: b.slice(at, b.length - end) };
+  const x = a.slice(at, a.length - end);
+  const y = b.slice(at, b.length - end);
+  const ops: [string, string][] = a.slice(0, at).map((l) => [" ", l]);
+  if (x.length * y.length > 4_000_000) {
+    // ponytail: past 4M line pairs (16 MB), one block of removed then added lines; Myers' diff if that shows up.
+    ops.push(...x.map((l): [string, string] => ["-", l]), ...y.map((l): [string, string] => ["+", l]));
+  } else {
+    // common[i * w + j]: the longest common subsequence of x[i..] and y[j..]
+    const w = y.length + 1;
+    const common = new Uint32Array((x.length + 1) * w);
+    for (let i = x.length - 1; i >= 0; i--) {
+      for (let j = y.length - 1; j >= 0; j--) common[i * w + j] = x[i] === y[j] ? common[(i + 1) * w + j + 1] + 1 : Math.max(common[(i + 1) * w + j], common[i * w + j + 1]);
+    }
+    let i = 0;
+    let j = 0;
+    while (i < x.length || j < y.length) {
+      if (i < x.length && j < y.length && x[i] === y[j]) ops.push([" ", x[i++]]), j++;
+      else if (i < x.length && (j === y.length || common[(i + 1) * w + j] >= common[i * w + j + 1])) ops.push(["-", x[i++]]);
+      else ops.push(["+", y[j++]]);
+    }
+  }
+  ops.push(...a.slice(a.length - end).map((l): [string, string] => [" ", l]));
+  return ops;
 }
+/** The lines an edit removed and added. */
+export function changed(oldText: string | null | undefined, newText: string | null | undefined) {
+  const ops = lineOps(oldText, newText);
+  return { removed: ops.filter(([op]) => op === "-").map(([, l]) => l), added: ops.filter(([op]) => op === "+").map(([, l]) => l) };
+}
+const CONTEXT = 3; // unchanged lines around each change, as git shows them
+/** Unified diff hunks: changes closer than twice the context share one. */
 const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) => {
-  const { at, removed, added } = changed(oldText, newText);
-  return [`@@ -${at + 1},${removed.length} +${at + 1},${added.length} @@`, ...removed.map((l) => `-${l}`), ...added.map((l) => `+${l}`)].join("\n");
+  const ops = lineOps(oldText, newText);
+  const hunks: [number, number][] = []; // first and last change of each
+  ops.forEach(([op], i) => {
+    if (op === " ") return;
+    const last = hunks.at(-1);
+    if (last && i - last[1] <= 2 * CONTEXT + 1) last[1] = i;
+    else hunks.push([i, i]);
+  });
+  const count = (part: [string, string][], skip: string) => part.filter(([op]) => op !== skip).length;
+  return hunks.map(([first, last]) => {
+    const from = Math.max(0, first - CONTEXT);
+    const body = ops.slice(from, last + CONTEXT + 1);
+    const before = ops.slice(0, from);
+    return [`@@ -${count(before, "+") + 1},${count(body, "+")} +${count(before, "-") + 1},${count(body, "-")} @@`, ...body.map(([op, l]) => `${op}${l}`)].join("\n");
+  }).join("\n");
 };
 
 // A path relative to the folder; the agent may report it under the folder's real path (a symlink resolved).
@@ -220,7 +261,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let reopen = "";
   let pending = "";
   let afterTool = false;
-  let quiet = false; // a tool ran and no text has come since
+  let quiet = true; // no reply text yet, or none since the last tool
   let timer: ReturnType<typeof setTimeout> | undefined;
   let refresh: ReturnType<typeof setInterval> | undefined;
   let suspended = false;
@@ -449,7 +490,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       void tool(thinking.id, { title: "Thinking", status: "in_progress" });
     },
     tool,
-    /** True when the turn's last output was a tool call, with no reply after it. */
+    /** True when the turn has no reply text yet, or none after its last tool call. */
     get quiet() {
       return quiet;
     },

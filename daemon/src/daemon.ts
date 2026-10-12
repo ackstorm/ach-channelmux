@@ -35,6 +35,10 @@ const BUILTIN = ["stop", "compact", "clear", "fork", "model", "mode", "effort", 
 const SHELL_TIMEOUT_MS = 120_000;
 const VOICE_POLLS = 15; // seconds to wait for Slack to transcribe a voice clip
 type Where = { channel?: string; ts?: string; thread_ts?: string }; // a Slack message's place
+// A user's message waiting for its session's running turn; key: its thread's key in threads.
+type Queued = { key: string; channel: string; ts: string; thread_ts?: string; text?: string; files?: any[]; user?: string };
+// Slack escapes these three in a message's text; its own markup (<@U1>, <url|label>) uses them unescaped.
+const unescape = (s: string) => s.replace(/&(amp|lt|gt);/g, (_, e: string) => ({ amp: "&", lt: "<", gt: ">" })[e]!);
 
 /** The text of a WebVTT transcript: its cues, without the header, numbers and timings. */
 const vttText = (vtt: string) =>
@@ -95,6 +99,7 @@ interface Thread {
   cwd: string;
   top?: boolean; // see Pending
   opened?: string; // a code channel's: ts of the message that opened it (its key is not a ts)
+  base?: string; // a code channel's: the commit its Changes tab diffs against, HEAD when its first turn began
 }
 
 // Where a session's messages go: its thread, or the channel itself.
@@ -116,12 +121,14 @@ export function createDaemon(cfg: DaemonConfig) {
   let waiting: [string, Pending][] = [];
   let defaults: Record<string, string> = {}; // setting id -> value new sessions start with, chosen on the Home tab
   let knownSettings: acp.SessionConfigOption[] = []; // the agent's settings, as its latest session reported them (for the Home tab after a restart)
+  let queuedState: [string, Queued][] = [];
   try {
     const state = JSON.parse(readFileSync(cfg.stateFile, "utf8"));
-    ({ threads, pending: waiting = [], defaults = {}, settings: knownSettings = [] } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
+    ({ threads, pending: waiting = [], defaults = {}, settings: knownSettings = [], queued: queuedState = [] } = state.threads ? state : { threads: state }); // up to 0.2.3 it held only the threads
   } catch {} // first run
   const bySession = new Map(Object.values(threads).map((t) => [t.sessionId, t]));
   const pending = new Map<string, Pending>(waiting); // thread ts -> first message, until the picker starts a session
+  const queued = new Map<string, Queued>(queuedState); // message ts -> a message waiting for its session's running turn
   const loaded = new Map<string, Promise<unknown>>(); // sessions open in this agent process
   const replaying = new Set<string>(); // sessions being loaded: their history updates are dropped
   const queues = new Map<string, Promise<void>>(); // one turn at a time per session
@@ -148,7 +155,7 @@ export function createDaemon(cfg: DaemonConfig) {
   function save() {
     mkdirSync(dirname(cfg.stateFile), { recursive: true });
     // ponytail: only the 50 newest unanswered pickers survive a restart.
-    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), defaults, settings: latestSettings() }));
+    writeFileSync(cfg.stateFile, JSON.stringify({ threads, pending: [...pending].slice(-50), queued: [...queued], defaults, settings: latestSettings() }));
   }
 
   const say = (t: { channel: string; thread: string; top?: boolean }, text: string, blocks?: unknown[]) =>
@@ -548,17 +555,17 @@ export function createDaemon(cfg: DaemonConfig) {
   // How a turn ended, as a reaction on the message that asked for it.
   const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
   const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
-  // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3" (the branch only in a
-  // git repo, the counts only after edits). A code channel's context bar shows the rest: there only the counts.
+  // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3 · Context 24k / 200k (12%)
+  // · Cost $0.012" (the branch only in a git repo, the counts only after edits, context and cost once the agent
+  // reports them). A code channel's context bar shows folder, branch and model: there only the rest.
   // ponytail: counts the edits the agent reported; changes made by shell commands are not in it.
   async function footer(t: Thread, edits?: Map<string, [number, number]>) {
     let added = 0;
     let removed = 0;
     for (const [a, r] of edits?.values() ?? []) [added, removed] = [added + a, removed + r];
     const files = edits && `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
-    if (t.top) return files ?? "";
-    const branch = await branchOf(t.cwd);
-    return [`📁 \`${basename(t.cwd)}\``, branch && `🌿 \`${branch}\``, modelName(t), files].filter(Boolean).join(" · ");
+    const where = t.top ? [] : [`📁 \`${basename(t.cwd)}\``, await branchOf(t.cwd).then((b) => b && `🌿 \`${b}\``), modelName(t)];
+    return [...where, files, ...usageOf(t)].filter(Boolean).join(" · ");
   }
   // The session's model by its short name (no provider prefix); undefined when the agent has no model setting.
   const modelName = (t: Thread) => {
@@ -567,6 +574,8 @@ export function createDaemon(cfg: DaemonConfig) {
   };
   // The folder's git branch; "" outside a git repo.
   const branchOf = (cwd: string) => promisify(execFile)("git", ["-C", cwd, "branch", "--show-current"], { timeout: 5_000 }).then((r) => r.stdout.trim(), () => "");
+  // The folder's last commit; undefined outside a git repo or before its first commit.
+  const headOf = (cwd: string) => promisify(execFile)("git", ["-C", cwd, "rev-parse", "HEAD"], { timeout: 5_000 }).then((r) => r.stdout.trim(), () => undefined);
 
   // A code channel's context bar: its folder, git branch and model. Slack replaces the whole set each time.
   async function contextBar(t: Thread) {
@@ -581,12 +590,13 @@ export function createDaemon(cfg: DaemonConfig) {
     await slack.apiCall("agents.conversations.setProperties", { channel_id: t.channel, code_channel: { context_bar_items: items } }).catch((err) => log("context_bar_failed", { error: String(err) }));
   }
 
-  // A code channel's Changes tab, after a turn that edited: the folder's diff against its last commit.
-  // ponytail: git diff HEAD is the whole working tree, changes made outside the session included; a diff of the
-  // session's own edits needs their full record (opencode reports whole files).
+  // A code channel's Changes tab, after a turn that edited: the folder's diff since the session's first turn here
+  // (the agent may commit as it goes), or since its last commit when the folder had none then.
+  // ponytail: the whole working tree, changes made outside the session included; a diff of the session's own
+  // edits needs their full record (opencode reports whole files).
   async function changesTab(t: Thread) {
     const branch = await branchOf(t.cwd);
-    const diff = branch && (await promisify(execFile)("git", ["-C", t.cwd, "diff", "HEAD"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout, () => ""));
+    const diff = branch && (await promisify(execFile)("git", ["-C", t.cwd, "diff", t.base ?? "HEAD"], { timeout: 10_000, maxBuffer: 16 * 1024 * 1024 }).then((r) => r.stdout, () => ""));
     if (!diff) return; // not a git repo (or no commit yet), or nothing changed
     await slack.apiCall("agents.conversations.setView", { channel_id: t.channel, view_key: "changes", type: "diff", content: diff.slice(0, 200_000), base_branch: branch, head_branch: branch })
       .catch((err) => log("changes_tab_failed", { error: String(err) }));
@@ -594,17 +604,28 @@ export function createDaemon(cfg: DaemonConfig) {
   const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
-  function prompt(t: Thread, content: acp.ContentBlock[] | Promise<acp.ContentBlock[]>, opts: { title?: string; ts?: string } = {}) {
-    const { title, ts } = opts;
+  // from: the user's message, kept in STATE_FILE while it waits, so a restart runs it still.
+  // command: the agent's own command (e.g. /compact), which may end without a reply.
+  function prompt(t: Thread, content: acp.ContentBlock[] | Promise<acp.ContentBlock[]>, opts: { title?: string; ts?: string; from?: Queued; command?: boolean } = {}) {
+    const { title, ts, from, command } = opts;
     let notice: Promise<any> | undefined;
     if (outputs.has(t.sessionId)) {
-      const queued = "📬 Queued: I'll start on this when the current turn ends.";
+      const text = "📬 Queued: I'll start on this when the current turn ends.";
       // The button stops only the turn running now, not whichever runs when it is tapped.
-      notice = say(t, queued, [section(queued, button("Send now", "queue_now", JSON.stringify({ thread: t.thread, turn: turnOf.get(t.sessionId) })))]);
+      notice = say(t, text, [section(text, button("Send now", "queue_now", JSON.stringify({ thread: t.thread, turn: turnOf.get(t.sessionId) })))]);
+      if (from) queued.set(from.ts, from), save();
     }
     const turn = (queues.get(t.sessionId) ?? Promise.resolve()).then(async () => {
+      if (stopping) return; // a stopped daemon starts no turn: its message stays queued for the next one
       // Its turn has come: the notice loses its button.
       void notice?.then((m) => slack.chat.update({ channel: t.channel, ts: m.ts, text: "📬 Queued, now running.", blocks: [] })).catch(() => {});
+      // ponytail: out of the queue once it runs, so a turn cut short by a restart is not run again (it may have
+      // made half its edits); the user sends it again.
+      if (from && queued.delete(from.ts)) save();
+      if (t.top && !t.base) {
+        t.base = await headOf(t.cwd);
+        if (t.base) save();
+      }
       const started = Date.now();
       const out = createOutput((m, p) => slack.apiCall(m, p), { channel: t.channel, thread: inThread(t) }, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
@@ -618,7 +639,7 @@ export function createDaemon(cfg: DaemonConfig) {
         const context: acp.ContentBlock[] = ran ? [{ type: "text", text: `[Shell commands the user ran in this folder since your last turn]\n${ran.join("\n\n")}` }] : [];
         let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...(await content)] });
         // Some models end a turn right after their tool calls, with no reply: ask once for one.
-        if (r.stopReason === "end_turn" && out.quiet) {
+        if (r.stopReason === "end_turn" && out.quiet && !command) {
           log("nudged", { session: t.sessionId });
           r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
           // Still nothing (some models end with an empty reply): say so, or the turn looks finished and answered.
@@ -999,13 +1020,13 @@ export function createDaemon(cfg: DaemonConfig) {
       await loadedWithSettings(t);
       const own = agentCommands.get(t.sessionId)?.find((c) => c.name.toLowerCase() === name);
       if (own) {
-        void prompt(t, [{ type: "text", text: `/${own.name}${args ? ` ${args}` : ""}` }]);
+        void prompt(t, [{ type: "text", text: `/${own.name}${args ? ` ${args}` : ""}` }], { command: true });
         return true;
       }
       if (args) return false; // "$HOME is unset": a message, not a command
     }
     if (name === "stop") await (outputs.has(t.sessionId) ? stop(t) : say(t, "Nothing is running."));
-    else if (name === "compact") void prompt(t, [{ type: "text", text: "/compact" }]); // the agent's own command
+    else if (name === "compact") void prompt(t, [{ type: "text", text: "/compact" }], { command: true }); // the agent's own command
     else if (name === "clear") await clear(t);
     else if (name === "fork") await fork(t);
     else if (name === "done") await closeChannel(t);
@@ -1242,6 +1263,7 @@ export function createDaemon(cfg: DaemonConfig) {
       if (!m.text?.includes(mention)) return;
       m.text = m.text.replaceAll(mention, "").trim();
     }
+    if (m.text) m.text = unescape(m.text);
     if (!key && /^\s*\$[a-z][\w-]*\s*(\n|$)/i.test(m.text ?? "")) {
       // A command outside a thread: there is no session to run it on.
       const help = /^\s*\$help\s*(\n|$)/i.test(m.text) ? HELP : `Commands work inside a thread with a session.\n${HELP}`;
@@ -1259,7 +1281,10 @@ export function createDaemon(cfg: DaemonConfig) {
       if (await answer(key, [m.text, ...notes].filter(Boolean).join("\n\n"))) return;
     }
     // Not awaited: the turn can outlive Bolt's handler.
-    if (t) return void prompt(t, blocksFor(m), { ts: m.ts });
+    if (t) {
+      const from = { key, channel: m.channel, ts: m.ts, thread_ts: m.thread_ts, text: m.text, files: m.files, user: m.user };
+      return void prompt(t, blocksFor(from), { ts: m.ts, from });
+    }
     const where = { channel: m.channel, thread: m.thread_ts ?? m.ts };
     const held = pending.get(key);
     if (held) return void (await say(where, held.cwd === undefined ? "Choose a folder above first." : "Choose a new or previous session above first."));
@@ -1318,7 +1343,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const b = body as any;
     const link = b.team?.domain ? `https://${b.team.domain}.slack.com/archives/${b.channel.id}/p${String(b.message.ts).replace(".", "")}` : "";
     // The relay may have appended its context block: the agent gets it, the quote does not.
-    const full: string = b.message.text ?? "";
+    const full: string = unescape(b.message.text ?? "");
     const at = full.indexOf("\n\n[Context from the Slack relay");
     const text = (at >= 0 ? full.slice(0, at) : full) || "(a message without text)";
     const context = at >= 0 ? full.slice(at) : "";
@@ -1485,6 +1510,12 @@ export function createDaemon(cfg: DaemonConfig) {
       mcpPort = (mcp.address() as AddressInfo).port;
       await app.start();
       log("started", { baseDir: cfg.baseDir, threads: bySession.size });
+      // Messages that were waiting when the daemon stopped, in the order they came.
+      for (const m of [...queued.values()]) {
+        const t = threads[m.key];
+        if (t) void prompt(t, blocksFor(m), { ts: m.ts, from: m });
+        else queued.delete(m.ts);
+      }
     },
     async stop() {
       stopping = true;

@@ -164,6 +164,10 @@ new acp.AgentSideConnection(
           // Whether the daemon's tools were there when the turn started.
           log({ m: "tools", ready: Boolean(mcpUrl(sessionId)) });
           await say(sessionId, "Checked.");
+        } else if (text === "empty") {
+          mute.add(sessionId); // no reply, no tool: like a model that answers nothing; its nudge gets nothing either
+        } else if (text === "/compact") {
+          // Like opencode's: done without a reply.
         } else if (text === "silent" || text === "mute" || (text.includes("without replying") && mute.delete(sessionId))) {
           if (text === "mute") mute.add(sessionId);
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "s1", title: "git log", kind: "execute", status: "pending" } });

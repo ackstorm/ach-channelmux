@@ -272,13 +272,30 @@ test("a card's sources, details and output go out once: Slack adds them to those
   assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined]]);
 });
 
-test("an edit reported as the whole file before and after shows only the lines it changed", () => {
+test("an edit reported as the whole file before and after shows only the lines it changed, with 3 lines around", () => {
   const file = (mid: string) => ["a", "b", "c", mid, "e", "f"].join("\n") + "\n";
-  assert.deepEqual(changed(file("d"), file("D")), { at: 3, removed: ["d"], added: ["D"] });
-  assert.deepEqual(changed(file("d"), file("d").replace("e\n", "e\nnew\n")), { at: 5, removed: [], added: ["new"] });
+  assert.deepEqual(changed(file("d"), file("D")), { removed: ["d"], added: ["D"] });
+  assert.deepEqual(changed(file("d"), file("d").replace("e\n", "e\nnew\n")), { removed: [], added: ["new"] });
   const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/proj/x.js", oldText: file("d"), newText: file("D") }] };
-  assert.equal(describeTool(edit, { path: "x.js" }, "/w/proj").output, "x.js  +1 −1\n```diff\n@@ -4,1 +4,1 @@\n-d\n+D\n```");
-  assert.equal(fullDiff(edit, "/w/proj"), "--- x.js\n+++ x.js\n@@ -4,1 +4,1 @@\n-d\n+D");
+  assert.equal(describeTool(edit, { path: "x.js" }, "/w/proj").output, "x.js  +1 −1\n```diff\n@@ -1,6 +1,6 @@\n a\n b\n c\n-d\n+D\n e\n f\n```");
+  assert.equal(fullDiff(edit, "/w/proj"), "--- x.js\n+++ x.js\n@@ -1,6 +1,6 @@\n a\n b\n c\n-d\n+D\n e\n f");
+});
+
+test("changes far apart in one edit are two hunks, and only the changed lines count", () => {
+  const lines = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+  const after = lines.map((l, i) => (i === 2 ? "TWO" : i === 30 ? "THIRTY" : l));
+  after.splice(20, 0, "inserted");
+  const old = `${lines.join("\n")}\n`;
+  const now = `${after.join("\n")}\n`;
+  // The middle change is within twice the context of neither: three hunks, nothing in between them shown.
+  assert.deepEqual(changed(old, now), { removed: ["line 2", "line 30"], added: ["TWO", "inserted", "THIRTY"] });
+  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/x.js", oldText: old, newText: now }] };
+  assert.equal(fullDiff(edit, "/w"), [
+    "--- x.js", "+++ x.js",
+    "@@ -1,6 +1,6 @@", " line 0", " line 1", "-line 2", "+TWO", " line 3", " line 4", " line 5",
+    "@@ -18,6 +18,7 @@", " line 17", " line 18", " line 19", "+inserted", " line 20", " line 21", " line 22",
+    "@@ -28,7 +29,7 @@", " line 27", " line 28", " line 29", "-line 30", "+THIRTY", " line 31", " line 32", " line 33",
+  ].join("\n"));
 });
 
 test("a path the agent reports under the folder's real path (a symlink) is shown relative to the folder", () => {

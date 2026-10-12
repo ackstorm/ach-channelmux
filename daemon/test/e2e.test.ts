@@ -339,6 +339,21 @@ test("when the nudge gets no reply either, the thread says the agent ended witho
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /_The agent ended its turn without a reply\._$/);
 });
 
+test("a turn with no reply and no tools at all gets the nudge too, then says the agent ended without one", async () => {
+  const n = mark();
+  const before = agentLog().length;
+  await slack.emit("events_api", slack.dm("UPEPE", "empty", { ts: "100.000052", thread_ts: "100.000001" }));
+  await turnEnded("100.000052");
+  assert.match(agentLog().slice(before).filter((e) => e.m === "prompt").map((e) => e.text)[1], /without replying/);
+  assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /_The agent ended its turn without a reply\._$/);
+});
+
+test("Slack's escaped & < > reach the agent as typed", async () => {
+  await slack.emit("events_api", slack.dm("UPEPE", "is a &lt; b &amp;&amp; c &gt; d?", { ts: "100.000053", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "is a < b && c > d?"));
+  await turnEnded("100.000053");
+});
+
 test("the model's thinking shows as a Thinking card", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "think", { ts: "100.000017", thread_ts: "100.000001" }));
@@ -357,6 +372,24 @@ test("a failed turn offers Retry, which sends the same message again", async () 
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "white_check_mark"));
 });
 
+test("a message queued behind a running turn still runs after the daemon restarts", async () => {
+  const from = agentLog().length;
+  await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000050", thread_ts: "100.000001" }));
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait" && e.sessionId === "ses_1"));
+  const notices = () => posts.filter((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")).length;
+  const before = notices();
+  await slack.emit("events_api", slack.dm("UPEPE", "queued before the restart", { ts: "100.000051", thread_ts: "100.000001" }));
+  await waitFor(() => notices() > before);
+  await daemon.stop();
+  daemon = newDaemon();
+  await daemon.start();
+  await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "queued before the restart"));
+  await turnEnded("100.000051");
+  const state = JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8"));
+  assert.deepEqual(state.queued, []); // run once, then gone
+  assert.equal(agentLog().slice(from).filter((e) => e.m === "prompt" && e.text === "wait").length, 1); // the turn cut short is not run again
+});
+
 test("a subagent's own reply is not streamed as the agent's reply", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "subagent", { ts: "100.000013", thread_ts: "100.000001" }));
@@ -370,9 +403,9 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   execFileSync("git", ["init", "-q", "-b", "work", join(base, "beta")]);
   await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
   const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
-  // The turn's edits, in one line under the reply: the only block there.
+  // The turn's edits, in one line under the reply with the context and cost so far: the only block there.
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30" }] });
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] });
   assert.equal(end.length, 1);
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
@@ -658,12 +691,14 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await waitFor(() => posts.find((p) => p.params.thread_ts === T && /\*Context\* 24k \/ 200k \(12%\)   ·   \*Cost\* \$0\.012/.test(p.params.text ?? "")));
   await say("$review branch", "500.000010"); // the agent's own command, with arguments
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/review branch"));
+  const prompts = agentLog().slice(before).filter((e) => e.m === "prompt").map((e) => e.text);
+  assert.equal(prompts[prompts.indexOf("/compact") + 1], "/review branch"); // a command ending without a reply is not nudged
   await say("$HOME is unset", "500.000011"); // not a command: goes to the agent as a message
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "$HOME is unset"));
 
-  await say("! echo shell-$((40+2))", "500.000005");
+  await say("! echo shell-$((40+2)) &amp;&amp; echo then", "500.000005"); // Slack escapes & < > in text
   const out = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.markdown_text?.includes("$ echo shell")));
-  assert.match(out.params.markdown_text, /shell-42/);
+  assert.match(out.params.markdown_text, /\$ echo shell-\$\(\(40\+2\)\) && echo then\n[\s\S]*shell-42\nthen/);
   const asked = mark();
   await say("what did I run?", "500.000006");
   const next = await waitFor(() => agentLog().slice(before).find((e) => e.m === "prompt" && e.text.includes("what did I run?")));
@@ -834,7 +869,7 @@ test("a reply without edits ends with its folder and model, not in a git repo no
   await slack.emit("events_api", slack.dm("UPEPE", "hi again", { ts: "930.000002", thread_ts: "930.000001" }));
   await turnEnded("930.000002");
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end, [{ type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two" }] }]);
+  assert.deepEqual(end, [{ type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }]);
 });
 
 // A message in #dev, and a tap in a channel.
@@ -930,8 +965,9 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   await inCode(cc, "and the tests", { ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and the tests" && e.sessionId === ccSession));
   await turnEnded("960.000002");
-  // The context bar shows folder, branch and model: no footer under a reply without edits.
-  assert.equal(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks, undefined);
+  // The context bar shows folder, branch and model: the footer only context and cost.
+  const footer = JSON.parse(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks);
+  assert.equal(footer[0].elements[0].text, "*Context* 24k / 200k (12%) · *Cost* $0.012");
   await inCode(cc, "in a thread", { ts: "960.000003", thread_ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in a thread" && e.sessionId === ccSession));
   await turnEnded("960.000003");
@@ -986,18 +1022,22 @@ test("a code channel's context bar shows its folder, branch and model, and follo
   await waitFor(() => bar().find((i: any) => i.key === "model").label === "Model two");
 });
 
-test("a turn that edits in a git folder sets the code channel's Changes tab to the diff", async () => {
+test("a turn that edits in a git folder sets the code channel's Changes tab to the diff since the session's first turn", async () => {
   assert.equal(calls("agents.conversations.setView").length, 0); // the turns so far edited nothing
+  // The agent commits as it goes: what it committed since the session's first turn is still a change.
+  writeFileSync(join(repo, "done.txt"), "committed\n");
+  execFileSync("git", ["-C", repo, "add", "done.txt"]);
+  execFileSync("git", ["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "done"]);
   writeFileSync(join(repo, "big.py"), "new\n"); // the mock agent only reports its edit
   const n = mark();
   await inCode(cc, "big edit", { ts: "963.000001" });
   const view = await waitFor(() => calls("agents.conversations.setView")[0]);
   const { channel_id, view_key, type, base_branch, head_branch, content } = view.params;
   assert.deepEqual([channel_id, view_key, type, base_branch, head_branch], [cc, "changes", "diff", "main", "main"]);
-  assert.match(content, /^diff --git a\/big\.py b\/big\.py\n[\s\S]*\n-old\n\+new\n$/);
+  assert.match(content, /^diff --git a\/big\.py b\/big\.py\n[\s\S]*\n-old\n\+new\ndiff --git a\/done\.txt b\/done\.txt\n[\s\S]*\n\+committed\n$/);
   await turnEnded("963.000001");
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "1 file changed +30 −30" }] }); // the counts only: the bar has the rest
+  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }); // the bar has the rest
 });
 
 test("$done closes a code channel: a summary, then the channel archived with it; elsewhere it explains", async () => {
