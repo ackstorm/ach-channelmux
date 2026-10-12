@@ -5,7 +5,7 @@
 # Log: /tmp/ach-channelmux-daemon.log
 set -euo pipefail
 
-VERSION=v0.3.1
+VERSION=v0.3.2
 BASE_DIR=${AGENT_BASE_DIR:-/workspace}
 
 : "${CODER_AGENT_TOKEN:?}" "${ACH_CHANNELMUX_URL:?}"
