@@ -324,15 +324,19 @@ export function localTime(at: Date, tz?: string) {
  * session. Thread replies, edits and other events, and commands ("/cmd", "$cmd", "!shell",
  * also with leading spaces) pass untouched: cc-connect would read the preamble as arguments.
  */
+export function wantsPreamble(ev: { type?: string; subtype?: string; text?: string; thread_ts?: string }, preamble: string | undefined) {
+  if (!preamble || ev.type !== "message" || ev.thread_ts) return false;
+  if (ev.subtype && ev.subtype !== "file_share") return false;
+  return !/^\s*[/!$]/.test(ev.text ?? "");
+}
+
 export function addPreamble(
   ev: { type?: string; subtype?: string; text?: string; ts?: string; thread_ts?: string },
   preamble: string | undefined,
-  user: { email: string; name?: string; tz?: string },
+  user: { email?: string; name?: string; tz?: string },
 ) {
-  if (!preamble || ev.type !== "message" || ev.thread_ts) return;
-  if (ev.subtype && ev.subtype !== "file_share") return;
-  if (/^\s*[/!$]/.test(ev.text ?? "")) return;
-  const who = user.name ? `${user.name} <${user.email}>` : user.email;
+  if (!wantsPreamble(ev, preamble)) return;
+  const who = user.name && user.email ? `${user.name} <${user.email}>` : user.name || user.email;
   const at = localTime(new Date(Number(ev.ts ?? 0) * 1000 || Date.now()), user.tz);
   ev.text = [
     ev.text ?? "",
@@ -471,6 +475,22 @@ export function createGateway(cfg: GatewayConfig) {
   }
 
   const codeChannels = new Map<string, Owner>(); // code channel id -> the owner whose daemon opened it
+  const viewOwner = new Map<string, Owner>(); // view id -> the owner whose daemon it was delivered to or opened by
+
+  // A channel message's author, for its context block. A failed lookup is not cached.
+  const authors = new Map<string, Promise<{ email?: string; name?: string; tz?: string }>>();
+  function authorOf(userId: string) {
+    let p = authors.get(userId);
+    if (!p) {
+      p = slack("users.info", { user: userId }).then((r) => {
+        if (!r.ok) authors.delete(userId);
+        const u = r.user as SlackUser | undefined;
+        return { email: u?.profile?.email, name: u?.profile?.real_name || u?.real_name || `<@${userId}>`, tz: u?.tz };
+      });
+      authors.set(userId, p);
+    }
+    return p;
+  }
 
   // "" (a service account's DM and user) is nobody's.
   async function mayWrite(owner: Owner, id: string) {
@@ -590,13 +610,18 @@ export function createGateway(cfg: GatewayConfig) {
     }
 
     const inChannel = !key.userId;
-    const codeOwner = inChannel ? codeChannels.get(key.channel!) : undefined; // never in CHANNELS
-    const entry = inChannel && !codeOwner ? await channelEntry(key.channel!) : undefined;
+    // An interaction in a channel (anyone may click there) is the channel owner's, like its messages.
+    // Shortcuts stay personal: they go to whoever used them.
+    const byChannel = type === "interactive" && ["block_actions", "view_submission", "view_closed"].includes(body.type);
+    const where = inChannel ? key.channel! : byChannel ? body.channel?.id ?? body.container?.channel_id : undefined;
+    const codeOwner = where ? codeChannels.get(where) : undefined; // never in CHANNELS
+    const entry = where && !codeOwner && !where.startsWith("D") ? await channelEntry(where) : undefined;
     if (inChannel && !codeOwner && !entry) {
       if (entry === null) log("channel_unmapped", { channel: key.channel });
       return;
     }
-    const owner = codeOwner ?? (entry ? await ownerFor(entry.email) : await ownerForSlackUser(key.userId!));
+    // A modal's submit has no channel: the view says whose it is.
+    const owner = codeOwner ?? (entry ? await ownerFor(entry.email) : viewOwner.get(body?.view?.id) ?? (await ownerForSlackUser(key.userId!)));
     if (!owner) {
       log("unknown_owner", { user: key.userId, channel: key.channel });
       if (type !== "events_api") await evt.ack();
@@ -610,15 +635,29 @@ export function createGateway(cfg: GatewayConfig) {
 
     if (type === "interactive") {
       if (body.trigger_id) owner.triggers.add(body.trigger_id);
-      if (body.view?.id) owner.views.add(body.view.id);
+      if (body.view?.id) {
+        owner.views.add(body.view.id);
+        viewOwner.set(body.view.id, owner);
+      }
       addShortcutPreamble(body, cfg.sessionPreamble, owner);
     }
     rewriteFiles(owner, body?.event?.files);
     if (type === "events_api") {
       const ev = body.event;
       if (entry?.code) ev.code_channel_origin = true; // the daemon's only hint: it never sees CHANNELS
+      // In a channel only the owner runs shell commands ("!…", also after a mention of the bot). A top-level
+      // message that does not mention the agent is not for it, so "!!! great" there passes.
+      const forAgent = Boolean(codeOwner || ev.thread_ts || /^\s*<@\w+>/.test(ev.text ?? ""));
+      if (inChannel && forAgent && ev.type === "message" && ev.subtype !== "message_changed" && ev.user !== owner.slackUserId && /^\s*(<@\w+>\s*)?!/.test(ev.text ?? "")) {
+        log("shell_refused", { owner: owner.email, channel: ev.channel, user: ev.user });
+        const text = owner.slackUserId ? `🔒 Only <@${owner.slackUserId}> can run shell commands here.` : "🔒 Shell commands are off in this channel.";
+        await slack("chat.postEphemeral", { channel: ev.channel, user: ev.user, thread_ts: ev.thread_ts ?? ev.ts, text });
+        return;
+      }
       if (ev.type === "message") {
-        addPreamble(ev, cfg.sessionPreamble, owner);
+        // The context block names who wrote it: in a channel that is not always the owner.
+        const author = inChannel && ev.user && wantsPreamble(ev, cfg.sessionPreamble) ? await authorOf(ev.user) : owner;
+        addPreamble(ev, cfg.sessionPreamble, author);
         owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
         if (owner.threadOf.size > 1000) owner.threadOf.delete(owner.threadOf.keys().next().value!);
       }
@@ -772,7 +811,10 @@ export function createGateway(cfg: GatewayConfig) {
     if (method === "views.open") {
       if (!owner.triggers.has(params.trigger_id)) return { ok: false, error: "restricted_action" };
       const r = await slack(method, params);
-      if (r.ok && r.view?.id) owner.views.add(r.view.id);
+      if (r.ok && r.view?.id) {
+        owner.views.add(r.view.id);
+        viewOwner.set(r.view.id, owner);
+      }
       return r;
     }
     if (method === "views.update") {

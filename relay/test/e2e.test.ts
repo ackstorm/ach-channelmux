@@ -10,7 +10,7 @@ import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
 
-const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com" };
+const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com", UANA: "ana@example.com" };
 const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
 const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops" };
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
@@ -24,6 +24,7 @@ const GW = `http://127.0.0.1:${GW_PORT}`;
 
 const slack = createMockSlack(USERS, CHANNEL_NAMES);
 let gw: ReturnType<typeof createGateway>;
+let sessionPreamble: string | undefined; // set by a test, read by the gateway on each message
 
 type Daemon = { app: InstanceType<typeof App>; got: any[]; name: string };
 const daemons: Daemon[] = [];
@@ -39,6 +40,14 @@ async function daemon(name: string, token: string): Promise<Daemon> {
   const d: Daemon = { app, got: [], name };
   app.message(async ({ message }) => {
     d.got.push(message);
+  });
+  app.action(/.*/, async ({ ack, body }) => {
+    await ack();
+    d.got.push(body);
+  });
+  app.shortcut(/.*/, async ({ ack, body }) => {
+    await ack();
+    d.got.push(body);
   });
   app.view("settings", async ({ ack }) => {
     await ack({ response_action: "errors", errors: { cwd: `rejected by ${name}` } });
@@ -79,6 +88,9 @@ before(async () => {
     slowWorkingNoticeMs: 150,
     rates: {},
     offlineMessage: "Offline. Start it at <https://example.com|your workspace>.",
+    get sessionPreamble() {
+      return sessionPreamble;
+    },
     channels: { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false } },
     log: () => {},
   });
@@ -204,6 +216,63 @@ test("users.info for any user once the owner has a channel", async () => {
   const info = async (user: string) => (await (await fetch(`${GW}/api/users.info?user=${user}`, { method: "POST", headers: { authorization: "Bearer gw-xavi" } })).json()).error;
   assert.equal(await info("UXAVI"), undefined);
   assert.equal(await info("UPEPE"), "restricted_action");
+});
+
+test("a button in a channel thread clicked by another user reaches the channel owner's daemon, and its modal's submit too", async () => {
+  const before = pepe1.got.length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UXAVI" }, trigger_id: "T_CHAN", channel: { id: "C_DEV" }, container: { type: "message", channel_id: "C_DEV" }, actions: [{ action_id: "new_session", type: "button" }] }, true);
+  await waitFor(() => pepe1.got.length === before + 1);
+  assert.equal(pepe1.got.at(-1).trigger_id, "T_CHAN");
+  const view = { type: "modal" as const, callback_id: "settings", title: { type: "plain_text" as const, text: "x" }, blocks: [] };
+  const opened = await pepe1.app.client.views.open({ trigger_id: "T_CHAN", view });
+  assert.ok(opened.ok);
+  // The submit carries no channel: the view says whose it is.
+  const reply = await slack.emit("interactive", { type: "view_submission", user: { id: "UXAVI" }, trigger_id: "T_CHAN2", view: { id: opened.view!.id, callback_id: "settings", state: { values: {} } } }, true);
+  assert.deepEqual(reply, { response_action: "errors", errors: { cwd: "rejected by pepe1" } });
+  // A shortcut is personal: it stays with whoever used it, even in the owner's channel.
+  const n = pepe1.got.length;
+  await slack.emit("interactive", { type: "message_action", callback_id: "send_to_agent", user: { id: "UXAVI" }, trigger_id: "T_SC", channel: { id: "C_DEV" }, message: { text: "look", ts: "1.0" } }, true);
+  await sleep(200);
+  assert.equal(pepe1.got.length, n);
+});
+
+test("!ls from a non-owner in a channel is refused with an ephemeral note; from the owner it passes", async () => {
+  const notes = (text: string) => slack.calls.filter((c) => c.method === "chat.postEphemeral" && c.params.user === "UXAVI" && c.params.text === text);
+  const before = pepe1.got.length;
+  // A top-level message that does not mention the agent is not for it: "!!! great" passes untouched.
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "!!! great", { ts: "300.000000" }));
+  await waitFor(() => pepe1.got.length === before + 1);
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "<@UBOT> !ls", { ts: "300.000001" }));
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "<@UBOT>  !rm -rf /", { ts: "300.000003", thread_ts: "300.000002" }));
+  await waitFor(() => notes("🔒 Only <@UPEPE> can run shell commands here.").length === 2);
+  assert.deepEqual(notes("🔒 Only <@UPEPE> can run shell commands here.").map((c) => [c.params.channel, c.params.thread_ts]), [["C_DEV", "300.000001"], ["C_DEV", "300.000002"]]);
+  await slack.emit("events_api", inChannel("C_DEV", "UPEPE", "<@UBOT> !ls"));
+  await waitFor(() => pepe1.got.length === before + 2);
+  assert.equal(pepe1.got.at(-1).text, "<@UBOT> !ls");
+  // A service account has no owner to run them.
+  const n = bot.got.length;
+  await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "<@UBOT> !ls"));
+  await waitFor(() => notes("🔒 Shell commands are off in this channel.").length === 1);
+  await sleep(100);
+  assert.equal(bot.got.length, n);
+});
+
+test("a channel message's context block names its author", async () => {
+  const lookups = () => slack.calls.filter((c) => c.method === "users.info" && c.params.user === "UANA").length;
+  const before = pepe1.got.length;
+  await slack.emit("events_api", inChannel("C_DEV", "UANA", "no preamble configured"));
+  sessionPreamble = "P";
+  try {
+    await slack.emit("events_api", inChannel("C_DEV", "UANA", "a reply", { thread_ts: "1.0" }));
+    await waitFor(() => pepe1.got.length === before + 2);
+    assert.equal(lookups(), 0, "the author is looked up only for a context block");
+    await slack.emit("events_api", inChannel("C_DEV", "UANA", "hi team"));
+    await waitFor(() => pepe1.got.length === before + 3);
+    assert.match(pepe1.got.at(-1).text, /^hi team\n[\s\S]*\nUser: Real UANA <ana@example\.com>\. Local time: .* \(Europe\/Madrid\)\.\nP\n/);
+    assert.equal(lookups(), 1);
+  } finally {
+    sessionPreamble = undefined;
+  }
 });
 
 test("a user's edit reaches its owner; bot edits and unfurls do not", async () => {
@@ -440,6 +509,9 @@ test("session preamble: only a new top-level message, never commands, edits or o
   const files = { type: "message", subtype: "file_share", text: "see this", ts };
   addPreamble(files, "P", { email: "x@a.com" }); // no name, no tz: email and UTC
   assert.match(files.text, /\nUser: x@a\.com\. Local time: 2026-10-03 16:40 \(UTC\)\.\n/);
+  const noEmail = { type: "message", text: "hi", ts };
+  addPreamble(noEmail, "P", { name: "Ext Guest" }); // a channel author without an email: the name alone
+  assert.match(noEmail.text, /\nUser: Ext Guest\. Local time/);
   assert.equal(localTime(new Date(0), "Not/AZone"), "1970-01-01 00:00 (UTC)");
 });
 

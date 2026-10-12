@@ -51,6 +51,11 @@ channel's `CHANNELS` entry, statelessly.
 responses, and the daemon re-announces its code channels after connecting (Task 4, step B). Record the outcome
 in the plan before Task 4.
 
+**Result (2026-10-12): Outcome A.** `conversations.info` on a code channel returns
+`properties.agent_session.origin_link = { channel_id: "C09UV0MCV70", ts }` (the origin message) and
+`properties.record_channel.record_id` ending in our `session_id`. A code channel created without an origin has
+no `origin_link` and stays unmapped.
+
 ---
 
 ### Task 1: Relay config — `CHANNELS` and `CODE_CHANNELS`
