@@ -28,7 +28,8 @@ resource "coder_script" "slack_agent" {
 }
 ```
 
-Optional env: `AGENT_BASE_DIR` (root of the folder picker, default `/workspace`).
+Optional env: `AGENT_BASE_DIR` (root of the folder picker, default `/workspace`),
+`ACH_CHANNELMUX_VERSION` (a release tag, e.g. `v0.3.2`, to pin instead of the latest).
 
 ## Resolving the agent token
 
@@ -63,7 +64,9 @@ WHERE a.auth_token = $1
 
 ## Operations
 
-Daemon build: the script pins `VERSION`, the latest ach-channelmux release (each release
-bumps it); copy the script again to upgrade, and the next workspace start installs it. Logs: `/tmp/ach-channelmux-daemon.log`. The thread → session map
+Daemon build: every workspace start looks up the latest ach-channelmux release and installs it
+when it differs from the one installed (checked against the release's `checksums.txt`); with
+GitHub unreachable the installed one runs. A bad release: pin the previous tag with
+`ACH_CHANNELMUX_VERSION` until the next one. Logs: `/tmp/ach-channelmux-daemon.log`. The thread → session map
 persists in `~/.local/state/ach-channelmux/threads.json` and OpenCode's sessions in its own
 data dir, both on the home volume, so threads resume after a workspace restart.

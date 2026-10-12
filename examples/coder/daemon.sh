@@ -5,7 +5,8 @@
 # Log: /tmp/ach-channelmux-daemon.log
 set -euo pipefail
 
-VERSION=v0.3.2
+# The release to run: the latest, looked up on every start, unless ACH_CHANNELMUX_VERSION pins one (e.g. v0.3.2).
+VERSION=${ACH_CHANNELMUX_VERSION:-latest}
 BASE_DIR=${AGENT_BASE_DIR:-/workspace}
 
 : "${CODER_AGENT_TOKEN:?}" "${ACH_CHANNELMUX_URL:?}"
@@ -18,9 +19,18 @@ case $(uname -m) in
   *) echo "ach-channelmux-daemon: unsupported arch $(uname -m)" >&2; exit 1 ;;
 esac
 
-if [ "$(cat "$bin.version" 2>/dev/null)" != "$VERSION" ]; then
+repo=https://github.com/ackstorm/ach-channelmux
+installed=$(cat "$bin.version" 2>/dev/null || true)
+if [ "$VERSION" = latest ]; then
+  # releases/latest redirects to releases/tag/<tag>. GitHub unreachable: the installed one runs.
+  VERSION=$(curl -fsSIL --max-time 20 -o /dev/null -w '%{url_effective}' "$repo/releases/latest" | sed -n 's|.*/releases/tag/||p' || true)
+  VERSION=${VERSION:-$installed}
+  : "${VERSION:?ach-channelmux-daemon: GitHub unreachable and no daemon installed}"
+fi
+
+if [ "$installed" != "$VERSION" ]; then
   name=ach-channelmux-daemon-linux-$arch
-  url=https://github.com/ackstorm/ach-channelmux/releases/download/$VERSION
+  url=$repo/releases/download/$VERSION
   tmp=$(mktemp -d)
   curl -fsSL --retry 3 -o "$tmp/$name" "$url/$name"
   curl -fsSL --retry 3 -o "$tmp/checksums.txt" "$url/checksums.txt"
