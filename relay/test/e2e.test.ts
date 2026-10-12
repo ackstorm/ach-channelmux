@@ -11,9 +11,9 @@ import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 const { App, LogLevel } = bolt;
 
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com", UANA: "ana@example.com" };
-const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
-const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops" };
-const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false } };
+const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-pepe-case": "Pepe@Example.COM", "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
+const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops", C_QA: "qa" };
+const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false }, qa: { email: USERS.UANA, code: false } }; // ana never connects
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
 const freePort = () =>
   new Promise<number>((r) => {
@@ -165,7 +165,7 @@ test("a message in a channel goes to the owner's daemon even when someone else w
 let bot: Daemon;
 test("a service account without a Slack user connects when it owns a channel; other unknown emails do not", async () => {
   // Offline: the notice goes in the message's thread, not the channel's main view.
-  await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "anyone?", { ts: "200.000001" }));
+  await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "<@UBOT> anyone?", { ts: "200.000001" }));
   await waitFor(() => slack.calls.some((c) => c.method === "chat.postMessage" && c.params.channel === "C_SALES" && c.params.thread_ts === "200.000001" && /^Offline\. Start it/.test(c.params.text)));
   bot = await daemon("bot", "gw-bot");
   await slack.emit("events_api", inChannel("C_SALES", "UXAVI", "a lead"));
@@ -269,8 +269,9 @@ test("!ls from a non-owner in a channel is refused with an ephemeral note; from 
   await waitFor(() => pepe1.got.length === before + 1);
   await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "<@UBOT> !ls", { ts: "300.000001" }));
   await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "<@UBOT>  !rm -rf /", { ts: "300.000003", thread_ts: "300.000002" }));
-  await waitFor(() => notes("🔒 Only <@UPEPE> can run shell commands here.").length === 2);
-  assert.deepEqual(notes("🔒 Only <@UPEPE> can run shell commands here.").map((c) => [c.params.channel, c.params.thread_ts]), [["C_DEV", "300.000001"], ["C_DEV", "300.000002"]]);
+  await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "!ls <@UBOT>", { ts: "300.000004" })); // the mention anywhere
+  await waitFor(() => notes("🔒 Only <@UPEPE> can run shell commands here.").length === 3);
+  assert.deepEqual(notes("🔒 Only <@UPEPE> can run shell commands here.").map((c) => [c.params.channel, c.params.thread_ts]).sort(), [["C_DEV", "300.000001"], ["C_DEV", "300.000002"], ["C_DEV", "300.000004"]]);
   await slack.emit("events_api", inChannel("C_DEV", "UPEPE", "<@UBOT> !ls"));
   await waitFor(() => pepe1.got.length === before + 2);
   assert.equal(pepe1.got.at(-1).text, "<@UBOT> !ls");
@@ -280,6 +281,33 @@ test("!ls from a non-owner in a channel is refused with an ephemeral note; from 
   await waitFor(() => notes("🔒 Shell commands are off in this channel.").length === 1);
   await sleep(100);
   assert.equal(bot.got.length, n);
+});
+
+test("offline in a channel: only a message for the agent gets the notice, in its thread", async () => {
+  const notice = (thread: string) => slack.calls.filter((c) => c.method === "chat.postMessage" && c.params.channel === "C_QA" && c.params.thread_ts === thread && /^Offline\. Start it/.test(c.params.text));
+  await slack.emit("events_api", inChannel("C_QA", "UXAVI", "lunch?", { ts: "600.000001" }));
+  await slack.emit("events_api", inChannel("C_QA", "UXAVI", "me too", { ts: "600.000002", thread_ts: "600.000001" }));
+  await slack.emit("events_api", inChannel("C_QA", "UXAVI", "is the build red, <@UBOT>?", { ts: "600.000003" }));
+  await waitFor(() => notice("600.000003").length === 1);
+  await slack.emit("events_api", inChannel("C_QA", "UXAVI", "hello?", { ts: "600.000004", thread_ts: "600.000003" })); // the mention's thread: the agent's
+  await waitFor(() => notice("600.000003").length === 2);
+  assert.equal(notice("600.000001").length, 0);
+});
+
+test("an email from the resolver meets its CHANNELS entry whatever its case", async () => {
+  const res = await fetch(`${GW}/api/chat.postMessage`, { method: "POST", headers: { authorization: "Bearer gw-pepe-case" }, body: new URLSearchParams({ channel: "C_DEV", text: "hi" }) });
+  assert.equal((await res.json()).ok, true);
+});
+
+test("a code channel whose origin lookup fails is looked up again on its next message", async () => {
+  // Opened from a channel Slack cannot find (yet): nothing is cached.
+  const { channel_id: id } = await (await fetch(`${slack.url}/api/agents.conversations.create`, { method: "POST", body: new URLSearchParams({ origin_channel_id: "C_GONE" }) })).json();
+  const lookups = () => slack.calls.filter((c) => c.method === "conversations.info" && c.params.channel === id).length;
+  await slack.emit("events_api", inChannel(id, "UXAVI", "hi", { ts: "610.000001", channel_type: "group" }));
+  await waitFor(() => lookups() === 1);
+  await sleep(100);
+  await slack.emit("events_api", inChannel(id, "UXAVI", "hi again", { ts: "610.000002", channel_type: "group" }));
+  await waitFor(() => lookups() === 2);
 });
 
 test("a channel message's context block names its author", async () => {

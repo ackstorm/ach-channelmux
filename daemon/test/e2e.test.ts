@@ -873,14 +873,15 @@ test("a mention in a channel opens the picker in its thread and the reply runs t
   const n = views().length;
   await clickIn(DEV, { ts: greeting.ts, thread_ts: "950.000001" }, { type: "button", action_id: "picker_open_modal", value: "950.000001" });
   await waitFor(() => views().length > n);
-  await submit(lastView()); // the base folder
+  await submit(lastView(), searched("alpha")); // a folder with a session in the DM
   const q = await questionIn("950.000001");
-  await waitFor(() => calls("chat.update").some((c) => c.params.ts === greeting.ts && c.params.text === `📁 \`${basename(base)}\``)); // no link: it is in the thread
+  assert.equal(q.params.blocks.includes("session_previous"), false); // the DM's sessions in this folder stay out of the channel
+  await waitFor(() => calls("chat.update").some((c) => c.params.ts === greeting.ts && c.params.text === "📁 `alpha`")); // no link: it is in the thread
   await clickIn(DEV, { ts: q.ts, thread_ts: "950.000001" }, { type: "button", action_id: "session_new", value: "950.000001" });
   const p = await waitFor(() => agentLog().find((e) => e.m === "prompt" && e.text.includes("look at the logs")));
   assert.equal(p.text, "look at the logs"); // without the mention
   await turnEnded("950.000001");
-  assert.equal(calls("chat.update").filter((c) => c.params.ts === greeting.ts).at(-1)!.params.text, `📁 \`${basename(base)}\` · new session`);
+  assert.equal(calls("chat.update").filter((c) => c.params.ts === greeting.ts).at(-1)!.params.text, "📁 `alpha` · new session");
 
   // Replies need no mention. A long turn's notice stays out of the channel's main view.
   await inDev("wait", { ts: "950.000002", thread_ts: "950.000001" });
@@ -976,6 +977,7 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   const published = calls("views.publish").length;
   await slack.emit("events_api", { type: "event_callback", event_id: "EvHomeCode", team_id: "T1", api_app_id: "A1", event: { type: "app_home_opened", user: "UPEPE", channel: DM, tab: "home" } });
   await waitFor(() => calls("views.publish").length > published);
+  assert.match(calls("views.publish").at(-1)!.params.view, new RegExp(`📁 \\*delta\\* · <#${cc}>`)); // a code channel links as itself
 });
 
 test("if the code channel cannot be created, the session opens in the thread", async () => {
@@ -1003,6 +1005,11 @@ test("a code channel's context bar shows its folder, branch and model, and follo
   assert.equal(panel.params.thread_ts, undefined);
   await clickIn(cc, { ts: panel.ts }, { type: "static_select", action_id: "cfg:model", selected_option: { value: "m1" } });
   await waitFor(() => bar().find((i: any) => i.key === "model").label === "Model one");
+  // $clear: a new session, with the Home tab's default model again.
+  const m = posts.length;
+  await inCode(cc, "$clear", { ts: "962.000002" });
+  ccSession = /💬 New session · `(\S+)`/.exec((await waitFor(() => posts.slice(m).find((p) => p.params.channel === cc && p.params.text?.startsWith("🧹")))).params.text)![1];
+  await waitFor(() => bar().find((i: any) => i.key === "model").label === "Model two");
 });
 
 test("a turn that edits in a git folder sets the code channel's Changes tab to the diff", async () => {
@@ -1020,13 +1027,23 @@ test("a turn that edits in a git folder sets the code channel's Changes tab to t
 });
 
 test("$done closes a code channel: a summary, then the channel archived with it; elsewhere it explains", async () => {
+  const state = () => JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).threads;
+  // Slack refuses: the summary says so, and the channel stays the session.
+  slack.fail.set("agents.conversations.archive", "not_allowed");
+  try {
+    await inCode(cc, "$done", { ts: "964.000000" });
+    await waitFor(() => calls("chat.update").some((c) => c.params.channel === cc && c.params.text === "⚠️ Could not close the code channel: not_allowed"));
+    assert.ok(cc in state());
+  } finally {
+    slack.fail.delete("agents.conversations.archive");
+  }
   await inCode(cc, "$done", { ts: "964.000001" });
-  const archive = await waitFor(() => calls("agents.conversations.archive")[0]);
-  const summary = posts.find((p) => p.params.channel === cc && p.params.text?.startsWith("✅ Session closed"))!;
+  const archive = await waitFor(() => calls("agents.conversations.archive")[1]);
+  const summary = posts.filter((p) => p.params.channel === cc && p.params.text?.startsWith("✅ Session closed")).at(-1)!;
   assert.equal(summary.params.text, `✅ Session closed · \`${ccSession}\` — continue it from any new message's Previous session.`);
   assert.equal(summary.params.thread_ts, undefined);
   assert.deepEqual([archive.params.channel_id, archive.params.summary_message_ts], [cc, summary.ts]);
-  await waitFor(() => !(cc in JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).threads)); // still resumable from the picker
+  await waitFor(() => !(cc in state())); // still resumable from the picker
   await slack.emit("events_api", slack.dm("UPEPE", "$done", { ts: "964.000002", thread_ts: "930.000001" }));
   await waitFor(() => posts.find((p) => p.params.thread_ts === "930.000001" && p.params.text === "`$done` closes a code channel; this is not one."));
 });

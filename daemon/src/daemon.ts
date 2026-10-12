@@ -871,9 +871,14 @@ export function createDaemon(cfg: DaemonConfig) {
     return modal("picker_folder", "Choose folder", use.length > 24 ? `${use.slice(0, 23)}…` : use, p, blocks);
   }
 
+  // The folder's sessions a picker offers. In a channel only those whose thread is there: the owner's DM
+  // sessions stay private.
+  const previous = async (p: Pick) =>
+    (await sessions()).filter((x) => x.rel === p.cwd && (isDM(p.channel) || bySession.get(x.sessionId)?.channel === p.channel));
+
   // The thread's question once the folder is chosen. New session always; previous ones when there are.
   async function question(p: Pick) {
-    const any = (await sessions()).some((x) => x.rel === p.cwd);
+    const any = (await previous(p)).length > 0;
     const text = `📁 \`${abs(p.cwd)}\`\n${any ? "New session, or continue one?" : "No sessions here yet."}`;
     return {
       text,
@@ -886,7 +891,7 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // "Previous session…": the folder's last 10 sessions, then Continue.
   async function sessionView(p: Pick) {
-    const list = (await sessions()).filter((x) => x.rel === p.cwd).slice(0, 10); // radio buttons hold 10 options
+    const list = (await previous(p)).slice(0, 10); // radio buttons hold 10 options
     const options = list.map((x) => {
       const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
       return { text: plain((x.title || "Untitled").slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
@@ -1105,10 +1110,11 @@ export function createDaemon(cfg: DaemonConfig) {
     const since = (t: Thread) => Number(t.opened ?? t.thread) || 0;
     const recent = Object.values(threads).sort((a, b) => since(b) - since(a)).slice(0, 5);
     const rows = await Promise.all(recent.map(async (t) => {
-      const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
+      const link = t.top ? undefined : await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
       const title = (titles.get(t.sessionId) || "Untitled").replace(/[<>|]/g, " "); // they would break the link
       const when = since(t) ? ago(new Date(since(t) * 1000).toISOString()) : "";
-      return `📁 *${basename(t.cwd)}* · ${link ? `<${link}|${title}>` : title}${when ? ` · ${when}` : ""}`;
+      // A code channel links as itself: Slack shows its name, which is the message that opened it.
+      return `📁 *${basename(t.cwd)}* · ${t.top ? `<#${t.channel}>` : link ? `<${link}|${title}>` : title}${when ? ` · ${when}` : ""}`;
     }));
     const note = (text: string) => ({ type: "context", elements: [{ type: "mrkdwn", text }] });
     const header = (text: string) => ({ type: "header", text: plain(text) });
@@ -1168,6 +1174,7 @@ export function createDaemon(cfg: DaemonConfig) {
     loaded.set(sessionId, Promise.resolve());
     save();
     await say(t, `🧹 ${header(t.cwd, "New session", sessionId)}`);
+    await contextBar(fresh); // its model may differ
   }
 
   // $fork: a copy of the session in a new thread (its root is our message), to try something else.
@@ -1196,7 +1203,13 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!t.top) return void (await say(t, "`$done` closes a code channel; this is not one."));
     if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
     const summary: any = await say(t, `✅ Session closed · \`${t.sessionId}\` — continue it from any new message's Previous session.`);
-    await slack.apiCall("agents.conversations.archive", { channel_id: t.channel, summary_message_ts: summary.ts });
+    try {
+      await slack.apiCall("agents.conversations.archive", { channel_id: t.channel, summary_message_ts: summary.ts });
+    } catch (err: any) {
+      // The channel stays the session: the summary says why it did not close.
+      const text = `⚠️ Could not close the code channel: ${err?.data?.error ?? err?.message ?? err}`;
+      return void (await slack.chat.update({ channel: t.channel, ts: summary.ts, text }).catch(() => {}));
+    }
     delete threads[t.thread];
     bySession.delete(t.sessionId);
     save();

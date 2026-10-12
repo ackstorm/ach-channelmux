@@ -80,7 +80,7 @@ interface Owner {
   triggers: Set<string>;
   views: Set<string>;
   files: Map<string, string>; // fileId -> original url_private_download
-  threadOf: Map<string, string>; // DM message ts -> its thread root, for messages delivered to the daemon
+  threadOf: Map<string, string>; // message ts -> its thread root, for messages delivered to the daemon (in a channel, those for the agent)
   working: Map<string, { timer: NodeJS.Timeout; notice?: string }>; // message ts -> running working notice
 }
 
@@ -388,6 +388,7 @@ export function createGateway(cfg: GatewayConfig) {
   const ownerByEmail = new Map<string, Owner>();
   const tickets = new Map<string, { owner: Owner; exp: number }>();
   const seenEvents = new Map<string, true>();
+  let botUserId = ""; // the app's bot user, from auth.test at start: a mention of it is "<@id>"
 
   // ---------- upstream Slack calls (bot token) ----------
 
@@ -411,6 +412,7 @@ export function createGateway(cfg: GatewayConfig) {
   // start) must resolve to the same Owner, so in-flight lookups are shared.
   const resolving = new Map<string, Promise<Owner | null>>();
   function ownerFor(email: string, knownUser?: SlackUser): Promise<Owner | null> {
+    email = email.toLowerCase(); // the resolver's and CHANNELS' emails meet in one owner
     const cached = ownerByEmail.get(email);
     if (cached) return Promise.resolve(cached);
     let p = resolving.get(email);
@@ -475,6 +477,7 @@ export function createGateway(cfg: GatewayConfig) {
     if (!r.ok) return undefined;
     const origin = r.channel?.properties?.agent_session?.origin_link?.channel_id;
     const from = origin ? await channelEntry(origin) : null;
+    if (from === undefined) return undefined; // its origin's lookup failed: try again next time
     if (from?.code) {
       const owner = await ownerFor(from.email);
       if (!owner) return undefined;
@@ -548,7 +551,7 @@ export function createGateway(cfg: GatewayConfig) {
     log("subscriber_promoted", { owner: owner.email, conn: owner.primary.id });
   }
 
-  // Nothing is held while offline: every message gets the notice, where it was written.
+  // Nothing is held while offline: every message for the agent gets the notice, where it was written.
   async function goOffline(env: Envelope, channel: string, inChannel: boolean) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
     const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
@@ -652,13 +655,20 @@ export function createGateway(cfg: GatewayConfig) {
       addShortcutPreamble(body, cfg.sessionPreamble, owner);
     }
     rewriteFiles(owner, body?.event?.files);
+    let quiet = false; // a channel message not for the agent: no offline notice
     if (type === "events_api") {
       const ev = body.event;
       if (entry?.code) ev.code_channel_origin = true; // the daemon's only hint: it never sees CHANNELS
-      // In a channel only the owner runs shell commands ("!…", also after a mention of the bot). A top-level
-      // message that does not mention the agent is not for it, so "!!! great" there passes.
-      const forAgent = Boolean(codeOwner || ev.thread_ts || /^\s*<@\w+>/.test(ev.text ?? ""));
-      if (inChannel && forAgent && ev.type === "message" && ev.subtype !== "message_changed" && ev.user !== owner.slackUserId && /^\s*(<@\w+>\s*)?!/.test(ev.text ?? "")) {
+      // In a channel only the owner runs shell commands ("!…", also with a mention of the bot). A top-level
+      // message that does not mention the agent is not for it, so "!!! great" there passes. Any thread may be
+      // the agent's: this relay forgets them on a restart.
+      const mention = `<@${botUserId}>`;
+      const mentioned = (ev.text ?? "").includes(mention);
+      const forAgent = Boolean(codeOwner || ev.thread_ts || mentioned);
+      // Offline, a channel message gets the notice only when it surely is the agent's: in a code channel, a
+      // mention, or in the thread of one this relay forwarded.
+      quiet = inChannel && !codeOwner && !(ev.thread_ts ? owner.threadOf.has(ev.thread_ts) : mentioned);
+      if (inChannel && forAgent && ev.type === "message" && ev.subtype !== "message_changed" && ev.user !== owner.slackUserId && /^\s*!/.test((ev.text ?? "").replaceAll(mention, ""))) {
         log("shell_refused", { owner: owner.email, channel: ev.channel, user: ev.user });
         const text = owner.slackUserId ? `🔒 Only <@${owner.slackUserId}> can run shell commands here.` : "🔒 Shell commands are off in this channel.";
         await slack("chat.postEphemeral", { channel: ev.channel, user: ev.user, thread_ts: ev.thread_ts ?? ev.ts, text });
@@ -668,7 +678,7 @@ export function createGateway(cfg: GatewayConfig) {
         // The context block names who wrote it: in a channel that is not always the owner.
         const author = inChannel && ev.user && wantsPreamble(ev, cfg.sessionPreamble) ? await authorOf(ev.user) : owner;
         addPreamble(ev, cfg.sessionPreamble, author);
-        owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
+        if (!quiet) owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
         if (owner.threadOf.size > 1000) owner.threadOf.delete(owner.threadOf.keys().next().value!);
       }
     }
@@ -684,7 +694,7 @@ export function createGateway(cfg: GatewayConfig) {
 
     if (!owner.primary) {
       if (type !== "events_api") await evt.ack();
-      return goOffline(env, key.channel ?? owner.dm, inChannel);
+      return quiet ? undefined : goOffline(env, key.channel ?? owner.dm, inChannel);
     }
 
     if (type === "events_api") {
@@ -955,6 +965,9 @@ export function createGateway(cfg: GatewayConfig) {
   return {
     async start() {
       await new Promise<void>((r) => server.listen(cfg.port, r));
+      const me = await slack("auth.test", {});
+      if (!me.ok) throw new Error(`auth.test: ${me.error}`);
+      botUserId = me.user_id;
       await upstreamClient.start();
       log("gateway_started", { port: cfg.port });
     },
