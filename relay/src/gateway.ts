@@ -483,7 +483,8 @@ export function createGateway(cfg: GatewayConfig) {
       if (!owner) return undefined;
       codeChannels.set(id, owner);
     }
-    const entry = from?.code ? null : cfg.channels?.[r.channel?.name] ?? null;
+    // By id first: an id survives a rename, and a new channel cannot take it as a free name can.
+    const entry = from?.code ? null : cfg.channels?.[id] ?? cfg.channels?.[r.channel?.name] ?? null;
     channelEntries.set(id, entry);
     return entry;
   }

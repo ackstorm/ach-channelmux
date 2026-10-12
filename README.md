@@ -39,8 +39,8 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | `AUTH_RESOLVER_EMAIL_FIELD` | Dotted path to the email in its reply. Default `email`. |
 | `SESSION_PREAMBLE` | Optional; `""` disables the context block. |
 | `OFFLINE_MESSAGE` | Optional reply while the user's daemon is not connected, e.g. how to start their workspace (Slack mrkdwn, `<url\|text>` links). Default: "Your workspace is offline. Start it and try again." |
-| `CHANNELS` | Optional; `name=owner email,…` (chart `channels`): channels whose mentions go to that owner's daemon. Default: DMs only. |
-| `CODE_CHANNELS` | Optional; `name,…` (chart `codeChannels`): of those, the channels where a mention opens a Slack code channel. |
+| `CHANNELS` | Optional; `name=owner email,…` or `id=owner email,…` (chart `channels`): channels whose mentions go to that owner's daemon. An id (`C0123ABCD`) survives renames and cannot be taken by a new channel of that name. Default: DMs only. |
+| `CODE_CHANNELS` | Optional; `name,…` or ids, as written in `CHANNELS` (chart `codeChannels`): of those, the channels where a mention opens a Slack code channel. |
 | `PORT` | Default `8080`. |
 
 Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, `message.channels`,

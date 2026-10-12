@@ -13,7 +13,8 @@ const { App, LogLevel } = bolt;
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com", UANA: "ana@example.com" };
 const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-pepe-case": "Pepe@Example.COM", "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
 const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops", C_QA: "qa" };
-const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, ops: { email: USERS.UPEPE, code: false }, qa: { email: USERS.UANA, code: false } }; // ana never connects
+// Keyed by name, or by id (C_OPS): an id survives a rename and cannot be taken by a new channel of that name.
+const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, C_OPS: { email: USERS.UPEPE, code: false }, qa: { email: USERS.UANA, code: false } }; // ana never connects
 // A free port, so the suite doesn't collide with a running run-local.sh (18080).
 const freePort = () =>
   new Promise<number>((r) => {

@@ -8,7 +8,7 @@
 //   PORT                               default 8080
 //   SESSION_PREAMBLE                   optional; added to each thread's first message (default below, "" disables)
 //   OFFLINE_MESSAGE                    optional; reply while the user's daemon is not connected
-//   CHANNELS                           optional; name=owner email,… channels whose mentions go to that owner's daemon (default: DMs only)
+//   CHANNELS                           optional; name or id=owner email,… channels whose mentions go to that owner's daemon (default: DMs only)
 //   CODE_CHANNELS                      optional; of those, the channels where a mention opens a Slack code channel
 
 import { createGateway, parseChannels } from "./gateway.ts";

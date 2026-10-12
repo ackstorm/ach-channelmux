@@ -27,11 +27,12 @@ slackSecretRef:
   appTokenKey: app-token
   botTokenKey: bot-token
 
-# Channels whose mentions go to an owner's daemon, as "name=owner email,…"
-# (e.g. "dev=pepe@example.com"). The owner may be a service account with no
+# Channels whose mentions go to an owner's daemon, as "name=owner email,…" or
+# "id=owner email,…" (e.g. "dev=pepe@example.com", "C0123ABCD=pepe@example.com";
+# an id survives renames and cannot be taken by a new channel). The owner may be a service account with no
 # Slack user: its daemon then serves only its channels. Empty: DMs only.
 channels: ""
-# Of those, the channels where a mention opens a Slack code channel: "name,…".
+# Of those, the channels where a mention opens a Slack code channel: "name,…" (or ids, as in channels).
 codeChannels: ""
 
 resources: {}
