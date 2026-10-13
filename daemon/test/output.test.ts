@@ -40,11 +40,11 @@ test("a turn streams text and tool cards into one message, then stops the stream
   out.text("Done.");
   await out.end();
   assert.deepEqual(calls.map((c) => c.method), [
-    "agents.sessions.setStatus", "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream",
+    "agents.sessions.setStatus", "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update",
   ]);
   assert.deepEqual(calls[0].params, { channel_id: "D1", thread_ts: "1.0", status: "processing", title: "repo: fix the bug" });
   assert.equal(chunks(calls).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"]]);
+  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
 });
 
 test("blocks given to end() go under the streamed reply; without a stream there is nothing to attach them to", async () => {
@@ -113,7 +113,9 @@ test("a card running when the stream pauses is closed there with a pointer and r
     ["chat.appendStream", "execute:complete:↓ continues below"],
     ["chat.stopStream"],
     ["chat.startStream", "slack.ask_user:complete"],
+    ["chat.appendStream", "🔧 1 tool used:complete"],
     ["chat.stopStream"],
+    ["chat.update"],
   ]);
 });
 
@@ -132,34 +134,58 @@ test("a card updated while paused for the user waits for the resume: no message 
   assert.deepEqual(after, [
     ["chat.startStream", "slack.ask_user:in_progress:Which colour?"],
     ["chat.appendStream", "slack.ask_user:complete"],
+    ["chat.appendStream", "🔧 1 tool used:complete"],
     ["chat.stopStream"],
+    ["chat.update"],
   ]);
 });
 
-test("once its message stops, a run of tools folds into one card that holds each tool; text and Thinking stay apart", async () => {
+test("a run of tools shows the one running and a count of those before it; once its message stops, only the count", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
   out.thought("hmm");
-  await out.tool("a", { title: "ls", status: "completed", output: "```\nsrc\n```" });
-  await out.tool("b", { title: "cat x", status: "failed", output: "exit 1" });
+  await out.tool("g", { title: "grep X", status: "in_progress", details: "X in ." });
+  await out.tool("g", { status: "completed", output: "a.ts:1" });
+  await out.tool("l", { title: "ls -la", status: "completed", output: "src" });
+  await out.tool("c", { title: "cat file", status: "failed", output: "exit 1" });
   out.text("Found it.");
-  await out.tool("c", { title: "read y", status: "completed" });
+  await out.tool("r", { title: "read y", status: "completed" });
   out.text("Done.");
   await out.end([{ type: "context", elements: [] }]);
+  const card = (x: any) => `${x.id} ${x.title}:${x.status}${x.details ? ` d=${x.details}` : ""}${x.output ? ` o=${x.output}` : ""}`;
+  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map(card), [
+    "thought0 Thinking:in_progress",
+    "thought0 Thinking:complete o=hmm",
+    "a1 grep X:in_progress d=X in .", // the first tool shows itself, content and all
+    "a1 grep X:complete o=a.ts:1",
+    "a1 🔧 1 tool used:complete", // the second: a count of those before it, and itself in a card below
+    "b1 ls -la:complete o=── ls -la\nsrc",
+    "a1 🔧 2 tools used:complete",
+    "b1 cat file:error o=\n── cat file\nexit 1", // Slack appends content: each tool's under its title
+    "a1 🔧 3 tools used · 1 failed:complete", // text closes the run: the count takes them all
+    "b1 cat file:complete",
+    "a2 read y:complete",
+    "a2 🔧 1 tool used:complete",
+  ]);
   const update = calls.at(-1)!;
   assert.equal(update.method, "chat.update");
   assert.equal(update.params.ts, "9.1");
-  const row = (b: any) => (b.type === "task_card" ? `${b.title}:${b.status}` : b.text ?? b.type);
-  assert.deepEqual(update.params.blocks.map(row), ["Thinking:complete", "🔧 2 tools used · 1 failed:complete", "Found it.", "read y:complete", "Done.", "context"]);
-  const run = update.params.blocks[1].output.elements.map((e: any) => [e.type, e.elements.map((x: any) => x.text).join("")]);
-  assert.deepEqual(run, [["rich_text_section", "✓ ls"], ["rich_text_preformatted", "src"], ["rich_text_section", "✗ cat x"], ["rich_text_section", "exit 1"]]);
-  // a message with no run of two tools is left as streamed
-  const one = fakeApi();
-  const out2 = createOutput(one.api, where);
-  await out2.tool("a", { title: "ls", status: "completed" });
-  out2.text("Done.");
-  await out2.end();
-  assert.ok(one.calls.every((c) => c.method !== "chat.update"));
+  const row = (b: any) => (b.type === "task_card" ? `${b.title}:${b.status}${b.output ? "+" : ""}` : b.text ?? b.type);
+  assert.deepEqual(update.params.blocks.map(row), ["Thinking:complete+", "🔧 3 tools used · 1 failed:complete", "Found it.", "🔧 1 tool used:complete", "Done.", "context"]);
+});
+
+test("the thinking between two texts is one card, each stretch added to it", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  out.thought("one");
+  await out.tool("a", { title: "ls", status: "completed" });
+  out.thought("two");
+  await out.tool("b", { title: "cat", status: "completed" });
+  out.text("ok");
+  out.thought("three");
+  await out.end();
+  const thinking = chunks(calls).filter((c: any) => c.title === "Thinking").map((c: any) => `${c.id}:${c.status}${c.output ? `:${c.output}` : ""}`);
+  assert.deepEqual(thinking, ["thought0:in_progress", "thought0:complete:one", "thought0:in_progress", "thought0:complete:\n\ntwo", "thought1:in_progress", "thought1:complete:three"]);
 });
 
 test("task cards get short ids and repeated identical updates are not sent", async () => {
@@ -171,7 +197,7 @@ test("task cards get short ids and repeated identical updates are not sent", asy
   await out.tool(long, { status: "completed" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["t1", "in_progress"], ["t1", "complete"]]);
+  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["a1", "in_progress"], ["a1", "complete"], ["a1", "complete"]]);
 });
 
 test("describePermission says what the agent wants to do to what", () => {
@@ -231,7 +257,7 @@ test("a card's details and output reach the stream, and a repeated identical upd
   await out.tool("x", { status: "completed", output: "a.txt" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", undefined, "a.txt"]]);
+  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", undefined, "a.txt"], ["complete", undefined, undefined]]);
 });
 
 test("the model's thinking is one card, opened when it starts and filled when text follows", async () => {
@@ -269,7 +295,7 @@ test("a card's sources, details and output go out once: Slack adds them to those
   await out.tool("x", { status: "failed", output: "Example" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined]]);
+  assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined], [undefined, undefined, undefined]]);
 });
 
 test("an edit reported as the whole file before and after shows only the lines it changed, with 3 lines around", () => {
@@ -336,7 +362,7 @@ test("a stream message full to Slack's size limit goes on in a new one, reopenin
   out.text("+b\n```\nDone.");
   await out.end();
   assert.deepEqual(calls.map((c) => c.method).filter((m) => m.startsWith("chat.")), [
-    "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.startStream", "chat.stopStream",
+    "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update", "chat.startStream", "chat.appendStream", "chat.stopStream", "chat.update",
   ]);
   const second = calls.filter((c) => c.method === "chat.startStream")[1].params.chunks;
   assert.deepEqual(second.map((c: any) => c.type), ["task_update", "markdown_text", "markdown_text"]); // the running card comes along

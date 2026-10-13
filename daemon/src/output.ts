@@ -233,23 +233,10 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
 const rich = (s: string) =>
   s.split(/```\w*\n?([\s\S]*?)\n?```/).flatMap((part, i) =>
     part.trim() ? [{ type: i % 2 ? "rich_text_preformatted" : "rich_text_section", elements: [{ type: "text", text: i % 2 ? part : part.trim() }] }] : []);
+const CONTENT = ["details", "output", "sources"];
 const taskCard = (id: string, title: string, status: string, fields: Record<string, unknown>) => ({
   type: "task_card", task_id: id, title, status: status === "complete" || status === "error" ? status : "in_progress", ...fields,
 });
-// A tool's card folded into its run's card: its title, then a clip of what it showed.
-const IN_RUN_MAX = 300;
-function inRun(t: Chunk) {
-  let body = clip([t.details, t.output].filter(Boolean).join("\n"), IN_RUN_MAX);
-  if (openFence(body)) body += "\n```";
-  const mark = t.status === "complete" ? "✓" : t.status === "error" ? "✗" : "◦";
-  const links = ((t.sources as { url: string; text: string }[] | undefined) ?? []).map((x) => ({ type: "link", url: x.url, text: x.text }));
-  return [
-    { type: "rich_text_section", elements: [{ type: "text", text: `${mark} ` }, { type: "text", text: t.title, style: { bold: true } }] },
-    ...rich(body),
-    ...(links.length ? [{ type: "rich_text_section", elements: links }] : []),
-  ];
-}
-
 export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
@@ -267,9 +254,19 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let suspended = false;
   const held = new Set<string>(); // cards updated during a pause: a new message would show them running under the question
   let thinking: { id: string; text: string } | null = null; // the model's thinking since its last text or tool
-  let thoughts = 0;
-  const tasks = new Map<string, Chunk>(); // ACP tool call id -> last known card, for tool()'s prev lookup
-  const sentTasks = new Map<string, Chunk>(); // last status actually delivered; replayed into a rolled-over stream
+  let texts = 0; // texts so far: the thinking between two texts is one card
+  const tasks = new Map<string, Chunk>(); // ACP tool call id (or thoughtN) -> its card's last known fields, whole
+  // A run is the tools called between two texts; it takes two cards, each on its own line. a<n> shows its first
+  // tool, then counts the tools before the one running now, which b<n> shows (each tool's content under its title:
+  // Slack appends content to a card); text or the turn's end makes a<n> count them all. A stream can neither
+  // remove b<n> nor clear a<n>'s content: the message is rewritten without them once it stops.
+  type Run = { n: number; tools: string[]; closed: boolean };
+  const runs: Run[] = [];
+  let current: Run | null = null;
+  const runOf = new Map<string, Run>(); // ACP tool call id -> its run
+  const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
+  const filled = new Set<string>(); // "<card>:<field>" and "<card>:<tool>:<field>" given content in a b<n> card
+  const sentTasks = new Map<string, Chunk>(); // card id -> last update delivered; replayed into a rolled-over stream
   let layout: ({ text: string } | { card: string })[] = []; // the current stream message as sent, in order
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
@@ -287,44 +284,28 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     await rewrite(ts, blocks);
   }
 
-  // A stopped message is sent again with each run of tools (no text between them) folded into one card that
-  // counts them and holds each one's title and a clip of its card: fewer cards, less space between them.
-  // A live stream cannot remove cards; a stopped one can be rewritten whole (verified on Slack).
+  // A stopped message is sent again with each run's cards as one, its count, with nothing inside.
   // ponytail: a rewrite Slack refuses (size, more than 50 blocks) leaves the message as streamed.
   async function rewrite(ts: string, extra: unknown[] = []) {
-    // Each card whole (sentTasks keeps only what each update changed), with the status this message got: one
-    // still running here goes on in the next message, as settle() says.
-    const byId = new Map([...tasks].map(([key, t]) => {
-      const status = sentTasks.get(t.id as string)?.status as string;
-      const done = status === "complete" || status === "error";
-      return [t.id as string, { thought: key.startsWith("thought"), t: { ...t, ...(done ? { status } : { status: "complete", output: "↓ continues below" }) } }];
-    }));
-    const items: ({ text: string } | { card: Chunk } | { run: Chunk[] })[] = [];
-    let run: Chunk[] | null = null;
-    for (const x of layout) {
+    const runOfCard = (card: string) => runs[Number(card.slice(1)) - 1];
+    const folded = (card: string) => card[0] === "b" || (card[0] === "a" && (runOfCard(card).closed || runOfCard(card).tools.length > 1));
+    if (!layout.some((x) => "card" in x && folded(x.card))) return;
+    const blocks = layout.flatMap((x): unknown[] => {
       if ("text" in x) {
-        if (x.text.trim()) items.push(x), (run = null);
-        continue;
+        const t = x.text.trim();
+        return t ? [{ type: "markdown", text: openFence(x.text) ? `${t}\n\`\`\`` : t }] : [];
       }
-      const { thought, t } = byId.get(x.card)!;
-      if (thought) items.push({ card: t }); // Thinking keeps its own card, and the run goes on past it
-      else if (run) run.push(t);
-      else items.push({ run: (run = [t]) });
-    }
-    if (!items.some((x) => "run" in x && x.run.length > 1)) return;
-    const card = (t: Chunk) =>
-      taskCard(t.id as string, t.title as string, t.status as string, {
+      if (x.card[0] === "b") return [];
+      const { title, status } = sentTasks.get(x.card) as { title: string; status: string };
+      // One still running here goes on in the next message, as settle() says.
+      const done = finished(status);
+      if (folded(x.card)) return [taskCard(x.card, title, done ? status : "complete", {})];
+      const t = { ...tasks.get(x.card[0] === "a" ? runOfCard(x.card).tools[0] : x.card)!, ...(done ? {} : { output: "↓ continues below" }) };
+      return [taskCard(x.card, t.title as string, done ? status : "complete", {
         ...(t.details ? { details: { type: "rich_text", elements: rich(t.details as string) } } : {}),
         ...(t.output ? { output: { type: "rich_text", elements: rich(t.output as string) } } : {}),
         ...(t.sources ? { sources: t.sources } : {}),
-      });
-    const blocks = items.map((x) => {
-      if ("text" in x) return { type: "markdown", text: openFence(x.text) ? `${x.text.trim()}\n\`\`\`` : x.text.trim() };
-      if ("card" in x || x.run.length === 1) return card("card" in x ? x.card : x.run[0]);
-      const failed = x.run.filter((t) => t.status === "error").length;
-      const done = x.run.every((t) => t.status === "complete" || t.status === "error");
-      const title = `🔧 ${x.run.length} tools used${failed ? ` · ${failed} failed` : ""}`;
-      return taskCard(x.run[0].id as string, title, done ? "complete" : "in_progress", { output: { type: "rich_text", elements: x.run.flatMap(inRun) } });
+      })];
     });
     await api("chat.update", { channel, ts, text: sent.trim().slice(0, 3000) || "🔧", blocks: [...blocks, ...extra] })
       .catch((err) => log("rewrite_failed", { error: String(err) }));
@@ -343,11 +324,14 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
 
-  const running = () => [...sentTasks.values()].filter((t) => t.status === "pending" || t.status === "in_progress");
+  const finished = (status: unknown) => status === "complete" || status === "error";
+  const running = () => [...sentTasks.values()].filter((t) => !finished(t.status));
 
-  // A new stream message carries the cards still running and, before text, the fence the last one left open.
+  // A new stream message carries, whole, the cards still running and the open run's, and, before text, the fence
+  // the last one left open.
   async function start(chunks: Chunk[]) {
-    const open = running().filter((t) => !chunks.some((c) => c.id === t.id));
+    const keep = current ? [`a${current.n}`, `b${current.n}`] : [];
+    const open = [...sentTasks.values()].filter((t) => (!finished(t.status) || keep.includes(t.id as string)) && !chunks.some((c) => c.id === t.id)).map((t) => whole(t.id as string));
     const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
     reopen = "";
     const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
@@ -427,8 +411,6 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const sources = info.sources ?? prev?.sources;
     const task: Chunk = {
       type: "task_update",
-      // ACP ids can be long (opencode's run ~150 chars with + and /); Slack only needs them unique per message.
-      id: prev?.id ?? `t${tasks.size + 1}`,
       title: clip(String(info.title ?? prev?.title ?? "tool"), TITLE_MAX),
       status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
       ...(details && { details }),
@@ -442,29 +424,109 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     afterTool = true;
     quiet = true;
     // Slack appends a card's details, output and sources to what it already shows: send them only when they change.
-    const chunk = { ...task };
-    for (const k of ["details", "output", "sources"]) if (same(k)) delete chunk[k];
+    // A text that only grew sends what it gained.
+    const gain = (k: string) => (typeof prev?.[k] === "string" && (task[k] as string).startsWith(prev[k] as string) ? (task[k] as string).slice((prev[k] as string).length) : task[k]);
+    const added = Object.fromEntries(CONTENT.filter((k) => task[k] && !same(k)).map((k) => [k, gain(k)]));
+    if (id.startsWith("thought")) return emit([update(id, task as { title: string; status: string }, added)]);
+    let r = runOf.get(id);
+    if (!r) {
+      r = current ??= runs[runs.push({ n: runs.length + 1, tools: [], closed: false }) - 1];
+      r.tools.push(id);
+      runOf.set(id, r);
+    }
+    return show(r, id, added);
+  }
+
+  // A run's cards as they stand, with what tool `id` added to its own.
+  function show(r: Run, id?: string, added: Record<string, unknown> = {}) {
+    const a = update(`a${r.n}`, head(r), !r.closed && r.tools.length === 1 ? added : {});
+    if (r.tools.length < 2) return emit([a]);
+    const last = r.tools.at(-1)!;
+    const b = update(`b${r.n}`, now(r), !r.closed && id === last ? headed(`b${r.n}`, last, added) : {});
+    return emit([a, b]);
+  }
+  // The first card's title and status: its tool alone and running, else the count of those before the running one.
+  function head(r: Run) {
+    if (!r.closed && r.tools.length === 1) return now(r);
+    const counted = r.closed ? r.tools : r.tools.slice(0, -1);
+    const states = counted.map((t) => tasks.get(t)!.status);
+    const failed = states.filter((x) => x === "error").length;
+    const title = `🔧 ${counted.length} tool${counted.length === 1 ? "" : "s"} used${failed ? ` · ${failed} failed` : ""}`;
+    return { title, status: states.every(finished) ? "complete" : "in_progress" };
+  }
+  // The running tool's title and status; closed, its card is done (and goes when the message is rewritten).
+  function now(r: Run) {
+    const t = tasks.get(r.tools.at(-1)!)!;
+    return { title: t.title as string, status: r.closed ? "complete" : (t.status as string) };
+  }
+  // What a tool adds to the running-tool card, the first part of each field under the tool's title.
+  function headed(card: string, tool: string, added: Record<string, unknown>) {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(added)) {
+      if (k === "sources") {
+        out[k] = v;
+        continue;
+      }
+      const gap = filled.has(`${card}:${k}`) ? "\n" : "";
+      const title = filled.has(`${card}:${tool}:${k}`) ? "" : `── ${tasks.get(tool)!.title}\n`;
+      filled.add(`${card}:${k}`).add(`${card}:${tool}:${k}`);
+      out[k] = `${gap}${title}${v}`;
+    }
+    return out;
+  }
+  // A card's update, or null when it shows nothing new.
+  function update(card: string, state: { title: string; status: string }, content: Record<string, unknown>): Chunk | null {
+    const was = queued.get(card);
+    if (was?.title === state.title && was.status === state.status && !Object.keys(content).length) return null;
+    queued.set(card, { title: state.title, status: state.status });
+    return { type: "task_update", id: card, title: state.title, status: state.status, ...content };
+  }
+  function emit(updates: (Chunk | null)[]) {
+    const chunks = updates.filter((c) => c !== null);
+    if (!chunks.length) return chain;
     return run(async () => {
-      if (suspended) return void held.add(id);
+      if (suspended) return void chunks.forEach((c) => held.add(c.id as string));
       await flush();
-      await send([chunk]);
+      await send(chunks);
     });
+  }
+  // A card whole, for a message that has not shown it.
+  function whole(card: string): Chunk {
+    if (card.startsWith("thought")) return { ...tasks.get(card)!, id: card };
+    const r = runs[Number(card.slice(1)) - 1];
+    const b = card[0] === "b";
+    const tool = b ? r.tools.at(-1)! : r.tools[0];
+    const t = tasks.get(tool)!;
+    const shows = !r.closed && (b || r.tools.length === 1);
+    const content = Object.fromEntries((shows ? CONTENT : []).filter((k) => t[k]).map((k) => [k, b && k !== "sources" ? `── ${t.title}\n${t[k]}` : t[k]]));
+    if (b) for (const k of Object.keys(content)) filled.add(`${card}:${k}`).add(`${card}:${tool}:${k}`);
+    return { type: "task_update", id: card, ...(b ? now(r) : head(r)), ...content };
   }
   // The held cards, whole: the message they go to has not shown them yet.
   async function release() {
-    const cards = [...held].map((id) => tasks.get(id)!);
+    const cards = [...held].map(whole);
     held.clear();
     if (cards.length) await send(cards);
   }
+  // Text, or the turn's end, closes the run: its first card counts all its tools.
+  function close() {
+    const r = current;
+    if (!r) return;
+    current = null;
+    r.closed = true;
+    void show(r);
+  }
 
-  // The model's thinking is one folded card per stretch: opened when it starts, filled with its
-  // end when text or a tool follows (two appends, not one per chunk).
+  // The model's thinking between two texts is one folded card: it runs while the model thinks, and each stretch's
+  // end goes into it when a tool or text follows (two appends a stretch, not one per chunk).
   function endThought() {
     if (!thinking) return;
     const { id, text } = thinking;
     thinking = null;
     const tail = text.trim().replaceAll("\`\`\`", "ˋˋˋ");
-    void tool(id, { status: "completed", ...(tail && { output: tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail }) });
+    const before = tasks.get(id)?.output as string | undefined;
+    const add = tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail;
+    void tool(id, { status: "completed", ...((add || before) && { output: before && add ? `${before}\n\n${add}` : before || add }) });
   }
 
   return {
@@ -475,6 +537,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     text(s: string) {
       if (s.trim()) {
         endThought();
+        close();
+        texts++;
         quiet = false;
       }
       if (afterTool) {
@@ -486,7 +550,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     },
     thought(s: string) {
       if (thinking) return void (thinking.text += s);
-      thinking = { id: `thought${++thoughts}`, text: s };
+      thinking = { id: `thought${texts}`, text: s };
       void tool(thinking.id, { title: "Thinking", status: "in_progress" });
     },
     tool,
@@ -515,6 +579,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     end: (blocks?: unknown[]) => {
       clearInterval(refresh);
       endThought();
+      close();
       suspended = false;
       return run(async () => {
         await release();
