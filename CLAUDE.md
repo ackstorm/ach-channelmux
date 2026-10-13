@@ -19,7 +19,7 @@ Slack ⇄ relay (one bot token: the trust boundary) ⇄ N daemons (one active pe
 
 ## Layout
 
-- `relay/src/gateway.ts`: the relay (upstream Socket Mode, downstream Socket Mode facade, DM, channel and code channel routing, Web API allowlist, files, working notice, preamble).
+- `relay/src/gateway.ts`: the relay (upstream Socket Mode, downstream Socket Mode facade, DM, channel and code channel routing, Web API allowlist, files, preamble).
 - `relay/src/limiter.ts`: paces and retries upstream Slack calls, shared across every daemon.
 - `relay/src/resolver.ts`: token → owner email through the configured endpoint.
 - `relay/src/main.ts`: env config and the default session preamble.

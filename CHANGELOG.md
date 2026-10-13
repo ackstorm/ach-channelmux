@@ -8,6 +8,9 @@ All notable changes are documented here. The format follows
 
 ### Removed
 
+- The relay's working notice (`🥧 *Baking…*` while 👀 is on a message) and its
+  `workingNoticeMs`, `slowWorkingAfterMs` and `slowWorkingNoticeMs` options: only
+  cc-connect set 👀, and the daemon shows Slack's own status instead.
 - Examples no longer set the OpenCode model (`CC_CONNECT_MODEL`, `OPENCODE_MODEL`):
   the agent's default model is its own configuration.
 

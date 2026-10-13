@@ -1,7 +1,7 @@
 // Slack relay.
 //
 // One upstream Socket Mode connection to the real Slack app; per-user
-// downstream daemons (cc-connect, any Bolt app) connect to this gateway as if
+// downstream daemons (any Bolt app) connect to this gateway as if
 // it were Slack by pointing their Slack API base URL here. The gateway:
 //   - fans DM events out to the single active daemon of the sender,
 //   - proxies an allowlist of Web API methods with the real bot token, scoped
@@ -27,12 +27,6 @@ export interface GatewayConfig {
   resolveToken: (token: string) => Promise<string | null>;
   interactiveAckTimeoutMs?: number;
   pingIntervalMs?: number;
-  /** Working-notice ("🧠 Ruminating…") refresh period; 0 disables it and forwards the daemon's reactions instead. Default 15 s. */
-  workingNoticeMs?: number;
-  /** After this long, switch to "taking a while" lines with the elapsed time. Default 2 min. */
-  slowWorkingAfterMs?: number;
-  /** Refresh period once slow. Default 60 s. */
-  slowWorkingNoticeMs?: number;
   /** Instructions appended, with who the user is and their local time, to the first message of each thread (a top-level DM starts a new agent session). Empty disables it. */
   sessionPreamble?: string;
   /** Reply to a message while no daemon is connected (e.g. how to start the workspace). */
@@ -81,7 +75,6 @@ interface Owner {
   views: Set<string>;
   files: Map<string, string>; // fileId -> original url_private_download
   threadOf: Map<string, string>; // message ts -> its thread root, for messages delivered to the daemon (in a channel, those for the agent)
-  working: Map<string, { timer: NodeJS.Timeout; notice?: string }>; // message ts -> running working notice
 }
 
 // Methods whose target (channel, or user for users.info) must be the owner's DM or the owner, one of its
@@ -109,206 +102,6 @@ const CHANNEL_SCOPED: Record<string, string[]> = {
   "agents.conversations.archive": ["channel_id"],
 };
 const PASSTHROUGH = new Set(["auth.test", "team.info", "files.getUploadURLExternal"]);
-// cc-connect's progress reactions (👀 plus its heartbeat emoji), replaced by the working notice.
-const PROGRESS_REACTIONS = new Set([
-  "eyes", "clock1", "hourglass_flowing_sand", "hourglass", "gear", "hammer_and_wrench", "mag", "bulb", "rocket",
-  "zap", "fire", "sparkles", "brain", "crystal_ball", "jigsaw", "microscope", "satellite",
-]);
-
-/** Lines the working notice rotates through while an agent turn runs (Claude Code-style). */
-export const WORKING_MESSAGES = [
-  "🎯 *Accomplishing…*",
-  "⚡ *Actioning…*",
-  "✨ *Actualizing…*",
-  "🔎 *Analyzing…*",
-  "🏗️ *Architecting…*",
-  "🥧 *Baking…*",
-  "✨ *Beaming…*",
-  "🎷 *Beboppin'…*",
-  "🥬 *Blanching…*",
-  "💃 *Boogieing…*",
-  "🤪 *Boondoggling…*",
-  "🤖 *Booping…*",
-  "🥾 *Bootstrapping…*",
-  "🌩️ *Brainstorming…*",
-  "☕ *Brewing…*",
-  "🐰 *Burrowing…*",
-  "🌵 *Cactusing…*",
-  "🎚️ *Calibrating…*",
-  "🧮 *Calculating…*",
-  "💕 *Canoodling…*",
-  "🍮 *Caramelizing…*",
-  "🌊 *Cascading…*",
-  "🚀 *Catapulting…*",
-  "🤔 *Cerebrating…*",
-  "📡 *Channelling…*",
-  "💃 *Choreographing…*",
-  "🔄 *Churning…*",
-  "🤖 *Clauding…*",
-  "🌀 *Coalescing…*",
-  "🤔 *Cogitating…*",
-  "🔧 *Combobulating…*",
-  "🎼 *Composing…*",
-  "💻 *Computing…*",
-  "🎨 *Conceptualizing…*",
-  "🧪 *Concocting…*",
-  "🪄 *Conjuring…*",
-  "💭 *Considering…*",
-  "🤔 *Contemplating…*",
-  "🍳 *Cooking…*",
-  "🔨 *Crafting…*",
-  "✨ *Creating…*",
-  "📊 *Crunching…*",
-  "💎 *Crystallizing…*",
-  "🌱 *Cultivating…*",
-  "☁️ *Daydreaming…*",
-  "🔓 *Deciphering…*",
-  "⚖️ *Deliberating…*",
-  "🎯 *Determining…*",
-  "🦆 *Dilly-dallying…*",
-  "😵 *Discombobulating…*",
-  "🧪 *Distilling…*",
-  "🎩 *Doffing…*",
-  "⚡ *Doing…*",
-  "🌧️ *Drizzling…*",
-  "🌊 *Ebbing…*",
-  "⚡ *Effecting…*",
-  "📐 *Evaluating…*",
-  "🦴 *Exoskeletizing…*",
-  "💡 *Elucidating…*",
-  "✨ *Enchanting…*",
-  "👁️ *Envisioning…*",
-  "💨 *Evaporating…*",
-  "🍺 *Fermenting…*",
-  "🎻 *Fiddle-faddling…*",
-  "🔍 *Figuring…*",
-  "🎭 *Finagling…*",
-  "🔥 *Flambéing…*",
-  "🦋 *Flibbertigibbeting…*",
-  "😵‍💫 *Flummoxing…*",
-  "🦋 *Fluttering…*",
-  "🔥 *Forging…*",
-  "📝 *Formulating…*",
-  "🧁 *Frosting…*",
-  "🐎 *Galloping…*",
-  "🌿 *Garnishing…*",
-  "⚙️ *Generating…*",
-  "🌱 *Germinating…*",
-  "💨 *Gusting…*",
-  "🎵 *Harmonizing…*",
-  "🐣 *Hatching…*",
-  "🐑 *Herding…*",
-  "🦢 *Honking…*",
-  "🎉 *Hullaballooing…*",
-  "🔬 *Hypothesizing…*",
-  "🚀 *Hyperspacing…*",
-  "💡 *Ideating…*",
-  "💭 *Imagining…*",
-  "🎭 *Improvising…*",
-  "🥚 *Incubating…*",
-  "🎲 *Inferring…*",
-  "🫖 *Infusing…*",
-  "🕵️ *Investigating…*",
-  "💃 *Jitterbugging…*",
-  "🥕 *Julienning…*",
-  "🥖 *Kneading…*",
-  "🍞 *Leavening…*",
-  "🧘 *Levitating…*",
-  "😴 *Lollygagging…*",
-  "🌟 *Manifesting…*",
-  "🫒 *Marinating…*",
-  "🚶 *Meandering…*",
-  "🦋 *Metamorphosing…*",
-  "🌙 *Moonwalking…*",
-  "🍷 *Mulling…*",
-  "🎭 *Musing…*",
-  "💪 *Mustering…*",
-  "💨 *Nebulizing…*",
-  "🪺 *Nesting…*",
-  "🍜 *Noodling…*",
-  "⚛️ *Nucleating…*",
-  "🎼 *Orchestrating…*",
-  "🚶 *Perambulating…*",
-  "☕ *Percolating…*",
-  "🌸 *Pollinating…*",
-  "🤔 *Pondering…*",
-  "🎩 *Pontificating…*",
-  "🪄 *Poofing…*",
-  "🐱 *Pouncing…*",
-  "🌧️ *Precipitating…*",
-  "🎩 *Prestidigitating…*",
-  "⚡ *Processing…*",
-  "🌱 *Propagating…*",
-  "🔧 *Puttering…*",
-  "🧩 *Puzzling…*",
-  "⚛️ *Quantumizing…*",
-  "🧩 *Rationalizing…*",
-  "✨ *Razzle-dazzling…*",
-  "🎭 *Razzmatazzing…*",
-  "🤔 *Reasoning…*",
-  "🪞 *Reflecting…*",
-  "🔀 *Reticulating…*",
-  "✅ *Resolving…*",
-  "🐓 *Roosting…*",
-  "💭 *Ruminating…*",
-  "🐿️ *Scampering…*",
-  "🐁 *Scurrying…*",
-  "💃 *Shimmying…*",
-  "🎮 *Simulating…*",
-  "🏃 *Skedaddling…*",
-  "✏️ *Sketching…*",
-  "🍲 *Simmering…*",
-  "🐍 *Slithering…*",
-  "🧦 *Sock-hopping…*",
-  "🔮 *Speculating…*",
-  "🦇 *Spelunking…*",
-  "🌀 *Spinning…*",
-  "🌱 *Sprouting…*",
-  "🍲 *Stewing…*",
-  "♟️ *Strategizing…*",
-  "💨 *Sublimating…*",
-  "🌀 *Swirling…*",
-  "🦅 *Swooping…*",
-  "🤝 *Symbioting…*",
-  "🧬 *Synthesizing…*",
-  "🌡️ *Tempering…*",
-  "📚 *Theorizing…*",
-  "💭 *Thinking…*",
-  "🤡 *Tomfoolering…*",
-  "🙃 *Topsy-turvying…*",
-  "✨ *Transfiguring…*",
-  "🔮 *Transmuting…*",
-  "🌊 *Undulating…*",
-  "🌸 *Unfurling…*",
-  "🧶 *Unravelling…*",
-  "🌊 *Vibing…*",
-  "🐧 *Waddling…*",
-  "🚶 *Wandering…*",
-  "🌀 *Warping…*",
-  "⚖️ *Weighing…*",
-  "❓ *Whatchamacalliting…*",
-  "🌀 *Whirlpooling…*",
-  "⚙️ *Whirring…*",
-  "🥄 *Whipping up…*",
-  "〰️ *Wibbling…*",
-  "⚙️ *Working…*",
-  "🏋️ *Working out…*",
-  "🤠 *Wrangling…*",
-  "🤼 *Wrestling with…*",
-  "🍋 *Zesting…*",
-  "⚡ *Zigzagging…*",
-];
-
-/** Lines once a turn has run for a while; shown with the elapsed time. */
-export const SLOW_WORKING_MESSAGES = [
-  "😅 Phew, this is taking a bit…",
-  "⏳ Taking a little longer than usual…",
-  "☕ Still at it, hang in there…",
-  "🐢 Slow going, but still going…",
-  "🙏 Thanks for your patience…",
-  "🚧 Still on the job…",
-];
-
 /** "2026-10-03 18:40 (Europe/Madrid)"; UTC when the zone is missing or unknown. */
 export function localTime(at: Date, tz?: string) {
   const fmt = (timeZone: string) =>
@@ -322,7 +115,7 @@ export function localTime(at: Date, tz?: string) {
 /**
  * Appends the preamble to a new top-level message, which starts a thread and an agent
  * session. Thread replies, edits and other events, and commands ("/cmd", "$cmd", "!shell",
- * also with leading spaces) pass untouched: cc-connect would read the preamble as arguments.
+ * also with leading spaces) pass untouched: the daemon would read the preamble as arguments.
  */
 export function wantsPreamble(ev: { type?: string; subtype?: string; text?: string; thread_ts?: string }, preamble: string | undefined) {
   if (!preamble || ev.type !== "message" || ev.thread_ts) return false;
@@ -380,9 +173,6 @@ export function createGateway(cfg: GatewayConfig) {
   const log = cfg.log ?? ((m, d) => console.log(JSON.stringify({ msg: m, ...d })));
   const upstream = cfg.upstreamApiUrl.endsWith("/") ? cfg.upstreamApiUrl : cfg.upstreamApiUrl + "/";
   const ackTimeout = cfg.interactiveAckTimeoutMs ?? 2500;
-  const noticeMs = cfg.workingNoticeMs ?? 15_000;
-  const slowAfterMs = cfg.slowWorkingAfterMs ?? 120_000;
-  const slowNoticeMs = cfg.slowWorkingNoticeMs ?? 60_000;
 
   const owners = new Map<string, Owner>(); // by slack user id
   const ownerByEmail = new Map<string, Owner>();
@@ -449,7 +239,6 @@ export function createGateway(cfg: GatewayConfig) {
       views: new Set(),
       files: new Map(),
       threadOf: new Map(),
-      working: new Map(),
     };
     if (user) owners.set(user.id, owner);
     ownerByEmail.set(email, owner);
@@ -736,50 +525,6 @@ export function createGateway(cfg: GatewayConfig) {
     return [String(value)];
   }
 
-  // ---------- working notice ----------
-  // cc-connect marks the message it is working on with 👀 and removes it when
-  // the turn ends. While it stays, post a status line in the thread and
-  // refresh it, so a long silent turn doesn't look hung.
-
-
-  function startWorking(owner: Owner, ts: string) {
-    if (!noticeMs || owner.working.has(ts)) return;
-    const thread = owner.threadOf.get(ts) ?? ts;
-    const started = Date.now();
-    let last = "";
-    const state: { timer: NodeJS.Timeout; notice?: string } = { timer: undefined as unknown as NodeJS.Timeout };
-    // A different line each refresh, so the thread visibly moves: quick verbs
-    // first, then "taking a while" lines with the elapsed time.
-    const tick = async () => {
-      if (!owner.working.has(ts)) return;
-      const elapsed = Date.now() - started;
-      const slow = elapsed >= slowAfterMs;
-      const pool = (slow ? SLOW_WORKING_MESSAGES : WORKING_MESSAGES).filter((m) => m !== last);
-      last = pool[Math.floor(Math.random() * pool.length)];
-      const text = slow ? `${last} (${Math.floor(elapsed / 60_000)} min)` : last;
-      state.timer = setTimeout(tick, slow ? slowNoticeMs : noticeMs);
-      const r = state.notice
-        ? await slack("chat.update", { channel: owner.dm, ts: state.notice, text })
-        : await slack("chat.postMessage", { channel: owner.dm, thread_ts: thread, text });
-      if (!owner.working.has(ts)) {
-        // Turn ended while the post was in flight.
-        if (!state.notice && r.ok) await slack("chat.delete", { channel: owner.dm, ts: r.ts });
-        return;
-      }
-      if (r.ok && !state.notice) state.notice = r.ts;
-    };
-    owner.working.set(ts, state);
-    void tick();
-  }
-
-  function stopWorking(owner: Owner, ts: string) {
-    const state = owner.working.get(ts);
-    if (!state) return;
-    clearTimeout(state.timer);
-    owner.working.delete(ts);
-    if (state.notice) void slack("chat.delete", { channel: owner.dm, ts: state.notice });
-  }
-
   async function apiCall(owner: Owner, method: string, params: Record<string, any>): Promise<any> {
     delete params.token;
 
@@ -807,15 +552,6 @@ export function createGateway(cfg: GatewayConfig) {
       const inDm = params.channel === owner.dm || params.channel === owner.slackUserId;
       if (method === "chat.postEphemeral" && inDm && params.user !== owner.slackUserId) {
         return { ok: false, error: "restricted_action" };
-      }
-      // The working notice replaces cc-connect's progress reactions (👀, 🕐, …): they stay off
-      // Slack, and 👀 marks the start and end of a turn. Other reactions (e.g. ✅ when a turn ends) go through.
-      if (noticeMs && method.startsWith("reactions.") && params.channel === owner.dm && PROGRESS_REACTIONS.has(params.name)) {
-        if (params.name === "eyes") {
-          if (method === "reactions.add") startWorking(owner, params.timestamp);
-          else stopWorking(owner, params.timestamp);
-        }
-        return { ok: true };
       }
       const r = await slack(method, params);
       if (method === "conversations.replies") for (const m of r.messages ?? []) rewriteFiles(owner, m.files); // e.g. a clip's finished transcript
@@ -930,7 +666,6 @@ export function createGateway(cfg: GatewayConfig) {
       for (const r of conn.pending.values()) r(undefined);
       if (owner.primary === conn) {
         log("subscriber_lost", { owner: owner.email, conn: conn.id });
-        for (const ts of [...owner.working.keys()]) stopWorking(owner, ts); // its turns died with it
         promote(owner);
       } else {
         owner.standby = owner.standby.filter((c) => c !== conn);
@@ -974,7 +709,6 @@ export function createGateway(cfg: GatewayConfig) {
     },
     async stop() {
       clearInterval(pinger);
-      for (const o of ownerByEmail.values()) for (const ts of [...o.working.keys()]) stopWorking(o, ts);
       await upstreamClient.disconnect();
       for (const ws of wss.clients) ws.terminate();
       await new Promise<void>((r) => server.close(() => r()));

@@ -30,7 +30,6 @@ before(async () => {
     resolveToken: async (t) => (t.startsWith("tok-") ? `u${t.slice(4)}@example.com` : null),
     rates: { "chat.update": 2400, "chat.startStream": 240 }, // 40/s and 4/s, under the mock's windows
     maxStreamStartWaitMs: 500,
-    workingNoticeMs: 0,
     log: () => {},
   });
   await gw.start();

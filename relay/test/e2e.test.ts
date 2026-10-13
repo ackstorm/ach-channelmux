@@ -5,7 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
-import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime, WORKING_MESSAGES, SLOW_WORKING_MESSAGES } from "../src/gateway.ts";
+import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime } from "../src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
@@ -87,9 +87,6 @@ before(async () => {
     botToken: BOT_TOKEN,
     resolveToken: async (t) => TOKENS[t] ?? null,
     pingIntervalMs: 1000,
-    workingNoticeMs: 150,
-    slowWorkingAfterMs: 400,
-    slowWorkingNoticeMs: 150,
     rates: {},
     offlineMessage: "Offline. Start it at <https://example.com|your workspace>.",
     get sessionPreamble() {
@@ -211,7 +208,7 @@ test("after a relay restart a code channel's messages still reach its owner, and
   // A fresh relay: it knows no code channel, Slack's conversations.info says where this one came from.
   const port = await freePort();
   const url = `http://127.0.0.1:${port}`;
-  const gw2 = createGateway({ port, publicUrl: url, upstreamApiUrl: `${slack.url}/api/`, appToken: APP_TOKEN, botToken: BOT_TOKEN, resolveToken: async (t) => TOKENS[t] ?? null, rates: {}, workingNoticeMs: 0, channels: CHANNELS, log: () => {} });
+  const gw2 = createGateway({ port, publicUrl: url, upstreamApiUrl: `${slack.url}/api/`, appToken: APP_TOKEN, botToken: BOT_TOKEN, resolveToken: async (t) => TOKENS[t] ?? null, rates: {}, channels: CHANNELS, log: () => {} });
   await gw2.start();
   const [pepe, bot2] = [await daemon("pepe-r", "gw-pepe", url), await daemon("bot-r", "gw-bot", url)];
   try {
@@ -376,39 +373,6 @@ test("a daemon can read its own user and DM and remove its reactions, nobody els
   await assert.rejects(c.reactions.remove({ channel: "D_UXAVI", timestamp: "1.0", name: "eyes" }), /restricted_action/);
 });
 
-test("working notice: shown in the thread while 👀 is on a message, removed with it", async () => {
-  const c = pepe1.app.client;
-  const notices = () => slack.calls.filter((x) => x.params.channel === "D_UPEPE" && [...WORKING_MESSAGES, ...SLOW_WORKING_MESSAGES].some((m) => (x.params.text ?? "").startsWith(m)));
-  // A reply inside an existing thread: the notice goes to the thread root, not under the reply.
-  await slack.emit("events_api", slack.dm("UPEPE", "long task", { ts: "50.2", thread_ts: "50.0" }));
-  await c.reactions.add({ channel: "D_UPEPE", timestamp: "50.2", name: "eyes" });
-  // Quick lines first, then a "taking a while" line with the elapsed time.
-  await waitFor(() => notices().some((x) => SLOW_WORKING_MESSAGES.some((m) => x.params.text.startsWith(m))));
-  const [post, update] = notices();
-  assert.equal(post.method, "chat.postMessage");
-  assert.ok(WORKING_MESSAGES.includes(post.params.text), post.params.text);
-  assert.notEqual(update.params.text, post.params.text, "each refresh changes the message");
-  assert.match(notices().at(-1)!.params.text, /\(0 min\)$/);
-  assert.equal(post.params.thread_ts, "50.0");
-  await c.reactions.remove({ channel: "D_UPEPE", timestamp: "50.2", name: "eyes" });
-  await waitFor(() => slack.calls.some((x) => x.method === "chat.delete" && x.params.channel === "D_UPEPE"));
-  const n = notices().length;
-  await sleep(700);
-  assert.equal(notices().length, n, "no updates after the turn ended");
-
-  // A quick turn: its line is posted at once and deleted with the reaction.
-  await c.reactions.add({ channel: "D_UPEPE", timestamp: "60.0", name: "eyes" });
-  await waitFor(() => notices().length > n);
-  const dels = slack.calls.filter((x) => x.method === "chat.delete").length;
-  await c.reactions.remove({ channel: "D_UPEPE", timestamp: "60.0", name: "eyes" });
-  await waitFor(() => slack.calls.filter((x) => x.method === "chat.delete").length > dels);
-
-  // The progress reactions themselves never reach Slack; any other reaction does.
-  assert.equal(slack.calls.some((x) => x.method.startsWith("reactions.")), false);
-  await c.reactions.add({ channel: "D_UPEPE", timestamp: "60.0", name: "white_check_mark" });
-  assert.ok(slack.calls.some((x) => x.method === "reactions.add" && x.params.name === "white_check_mark"));
-});
-
 test("files: URLs are rewritten and only the owner can fetch them", async () => {
   const ev = slack.dm("UPEPE", "see file", {
     subtype: "file_share",
@@ -492,13 +456,8 @@ test("criterion 4: a second daemon parks as standby and takes over when the firs
   await waitFor(() => pepe1.got.length === n1 + 1);
   assert.equal(pepe2.got.length, 0);
 
-  // A turn in progress dies with the primary: its working notice is removed.
-  await pepe1.app.client.reactions.add({ channel: "D_UPEPE", timestamp: "70.0", name: "eyes" });
-  await waitFor(() => slack.calls.some((x) => x.method === "chat.postMessage" && x.params.thread_ts === "70.0"));
-  const deletes = slack.calls.filter((x) => x.method === "chat.delete").length;
   await pepe1.app.stop();
   await waitFor(() => gw.state(USERS.UPEPE)!.standby === 0);
-  await waitFor(() => slack.calls.filter((x) => x.method === "chat.delete").length > deletes);
   await slack.emit("events_api", slack.dm("UPEPE", "now pepe2"));
   await waitFor(() => pepe2.got.length === 1);
   assert.equal(pepe2.got[0].text, "now pepe2");
@@ -547,7 +506,7 @@ test("session preamble: only a new top-level message, never commands, edits or o
     { type: "message", text: "again", thread_ts: "1.0", ts },
     { type: "message", text: "/dir /tmp", ts },
     { type: "message", text: " /dir /tmp", ts }, // Slack DM workaround for unregistered commands
-    { type: "message", text: "!ls", ts }, // cc-connect shell shortcut: the rest would run
+    { type: "message", text: "!ls", ts }, // the daemon's shell shortcut: the rest would run
     { type: "message", text: "$help", ts }, // the daemon's commands
     { type: "message", subtype: "message_changed", ts },
     { type: "reaction_added", ts },
