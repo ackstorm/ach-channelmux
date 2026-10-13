@@ -1,7 +1,7 @@
 // Agent daemon: a Bolt app that connects to the relay as if it were Slack and runs each
-// DM thread as an ACP session (e.g. `opencode acp`). A new message gets a picker in the DM's main
-// view (a Slack modal for the folder, then a new or existing session in it); its thread opens with both set.
-// In a channel the relay forwards, a message that mentions the bot does the same, the picker in its thread; in a
+// DM thread as an ACP session (e.g. `opencode acp`). A new message gets a picker in its thread (a Slack modal
+// for the folder, then a new or existing session in it); the thread then runs with both set.
+// In a channel the relay forwards, a message that mentions the bot does the same; in a
 // code channels' origin it opens a Slack code channel instead, which is the session (its key is the channel id).
 
 import { execFile, spawn } from "node:child_process";
@@ -76,8 +76,6 @@ export interface DaemonConfig {
   /** Called when the agent process exits on its own. */
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
-  /** A turn at least this long ends with a short message, which notifies (a stream's end does not). Default 60 s. */
-  doneNoticeMs?: number;
 }
 
 interface Pending {
@@ -86,9 +84,7 @@ interface Pending {
   files?: any[];
   user?: string;
   ts?: string;
-  cwd?: string; // the folder, once chosen; then the thread asks for the session
-  picker?: string; // ts of the greeting in the main view (in a channel, in the thread)
-  question?: string; // ts of the session question in the thread
+  picker?: string; // ts of the greeting in the thread, which becomes its header
   top?: boolean; // the session's messages go in the channel itself (a Slack code channel), not in a thread
 }
 
@@ -554,7 +550,6 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // How a turn ended, as a reaction on the message that asked for it.
   const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
-  const DONE = { done: "✅ Done", failed: "❌ Failed", stopped: "⏹️ Stopped" } as const;
   // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3 · Context 24k / 200k (12%)
   // · Cost $0.012" (the branch only in a git repo, the counts only after edits, context and cost once the agent
   // reports them). A code channel's context bar shows folder, branch and model: there only the rest.
@@ -601,7 +596,6 @@ export function createDaemon(cfg: DaemonConfig) {
     await slack.apiCall("agents.conversations.setView", { channel_id: t.channel, view_key: "changes", type: "diff", content: diff.slice(0, 200_000), base_branch: branch, head_branch: branch })
       .catch((err) => log("changes_tab_failed", { error: String(err) }));
   }
-  const duration = (ms: number) => (ms < 60_000 ? `${Math.round(ms / 1000)}s` : `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`);
 
   // Blocks may still be on their way (a voice clip's transcript): the turn waits in the queue, keeping order.
   // from: the user's message, kept in STATE_FILE while it waits, so a restart runs it still.
@@ -626,7 +620,6 @@ export function createDaemon(cfg: DaemonConfig) {
         t.base = await headOf(t.cwd);
         if (t.base) save();
       }
-      const started = Date.now();
       const out = createOutput((m, p) => slack.apiCall(m, p), { channel: t.channel, thread: inThread(t) }, { title, log });
       let outcome: keyof typeof OUTCOME = "failed";
       outputs.set(t.sessionId, out);
@@ -669,14 +662,6 @@ export function createDaemon(cfg: DaemonConfig) {
           const id = randomUUID();
           retries.set(id, { thread: t.thread, content, ts });
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
-        }
-        const took = Date.now() - started;
-        // A long turn ends with a notice in the DM's main view (it notifies; a stream's end does not), linking its
-        // thread. Not in a channel: its main view is everyone's.
-        if (isDM(t.channel) && took >= (cfg.doneNoticeMs ?? 60_000)) {
-          const link = await slack.chat.getPermalink({ channel: t.channel, message_ts: t.thread }).then((r) => r.permalink, () => undefined);
-          const text = `${DONE[outcome]} in \`${basename(t.cwd)}\` · ${duration(took)}${link ? ` → <${link}|Open thread>` : ""}`;
-          await slack.chat.postMessage({ channel: t.channel, text, unfurl_links: false }).catch(() => {});
         }
         outputs.delete(t.sessionId);
         // Last: once it shows, the turn is over ($fork, $clear and $done no longer refuse).
@@ -727,12 +712,11 @@ export function createDaemon(cfg: DaemonConfig) {
     return [{ type: "text", text: `<slack${from} at="${when(m.ts, who.tz)}">\n${body}\n</slack>` }];
   }
 
-  // ---------- picker: the folder in the main view, then a new or previous session in the thread ----------
+  // ---------- picker: a greeting in the thread, then a two-step modal: the folder, then the session ----------
 
   interface Pick {
     channel: string;
     thread: string;
-    picker: string; // ts of the greeting in the main view, which becomes a link to the thread
     cwd: string; // relative to baseDir; "" is baseDir
   }
   const canList = ready.then((r) => Boolean(r.agentCapabilities?.sessionCapabilities?.list));
@@ -846,36 +830,46 @@ export function createDaemon(cfg: DaemonConfig) {
     blocks: blocks as any[],
   });
 
-  // One screen that only picks the folder. Browsing comes first: the folders, then (in the base folder only) recent
-  // ones and a search. Inside a folder it only browses, and "Use <folder>" takes it.
-  async function folderView(p: Pick, error?: string) {
-    const blocks: unknown[] = [section(`📁 \`${abs(p.cwd)}\``)];
-    if (p.cwd) blocks.push({ type: "actions", elements: [button(`⬅️ Back to ${nameOf(parentOf(p.cwd))}`, "picker_up", "up")] });
-    const subs = subfolders(p.cwd);
-    blocks.push(section(subs.length ? `*Browse ${p.cwd ? nameOf(p.cwd) : "folders"}*` : "_No subfolders here._"));
-    // Buttons in rows of 25 (Slack's limit per block), each action_id unique in its block.
-    // ponytail: the first 100 subfolders only.
-    for (let i = 0; i < Math.min(subs.length, 100); i += 25)
-      blocks.push({ type: "actions", elements: subs.slice(i, i + 25).map((n, j) => button(`📁 ${n} ›`, `picker_open_${i + j}`, n)) });
-    // Enter creates the folder and opens it. The block id follows the folder, so a new one starts empty.
-    blocks.push({
-      type: "input",
-      block_id: `mkdir:${p.cwd}`.slice(0, 255),
-      optional: true,
-      dispatch_action: true,
-      label: plain(`➕ New folder in ${nameOf(p.cwd)}`),
-      element: { type: "plain_text_input", action_id: "picker_mkdir", placeholder: plain("Name, then Enter"), dispatch_action_config: { trigger_actions_on: ["on_enter_pressed"] } },
-    });
+  // Step 1, the folder. At the base: suggested and recent folders, a search, then browsing; inside a folder it only
+  // browses. "Use <folder>" takes the searched or ticked one, else the one browsed.
+  async function folderView(p: Pick, error?: string, ticked?: string, naming = false) {
+    const blocks: unknown[] = [];
+    let on: string | undefined; // the ticked folder
+    // At the base: the folders the message names (🪄), then recent ones, one list with the first ticked: 5, a line
+    // each, so browsing shows below without scrolling. Older ones are a search away.
     if (!p.cwd) {
-      const recent = [...new Set((await sessions()).map((x) => x.rel))].slice(0, 10);
+      const first = pending.get(p.thread);
+      const at = first?.text.indexOf("\n\n[Context from the Slack relay") ?? -1;
+      const list = await sessions();
+      const found = first ? named(at >= 0 ? first.text.slice(0, at) : first.text, list) : [];
       // Slack rejects an empty option value: the base folder ("") goes as ".".
-      if (recent.length) blocks.push({ type: "input", block_id: "recent", optional: true, label: plain("Or a recent one"), element: { type: "static_select", action_id: "recent", placeholder: plain("Pick a recent folder"), options: recent.map((r) => ({ text: plain(short(abs(r))), value: r || "." })) } });
-      // No emoji in the placeholder: Slack's mobile app shows it as its :name:.
-      blocks.push({ type: "input", block_id: "search", optional: true, label: plain("Or search all folders"), element: { type: "external_select", action_id: "picker_search", placeholder: plain("Type a name…"), min_query_length: 1 } });
+      const options = [...new Set([...found, ...list.map((x) => x.rel)])].slice(0, 5).map((r) => ({ text: plain(`${short(abs(r))}${found.includes(r) ? "  🪄" : ""}`), value: r || "." }));
+      // A tick redraws the modal (dispatch_action), so the submit button names the folder it takes.
+      const tick = options.find((o) => o.value === ticked) ?? options[0];
+      on = tick?.value;
+      if (options.length) blocks.push({ type: "input", block_id: "recent", optional: true, dispatch_action: true, label: plain("Suggested and recent"), ...(found.length && { hint: plain("🪄 Suggested from your message") }), element: { type: "radio_buttons", action_id: "picker_recent", options, initial_option: tick } });
     }
+    // No emoji in the placeholder: Slack's mobile app shows it as its :name:.
+    if (!p.cwd) blocks.push({ type: "input", block_id: "search", optional: true, label: plain("Or search all folders"), element: { type: "external_select", action_id: "picker_search", placeholder: plain("Type a name…"), min_query_length: 1 } });
+    // The folder browsed, Back beside it inside one; then its subfolders and New folder as one run of buttons.
+    blocks.push(section(`📁 \`${abs(p.cwd)}\``, p.cwd ? button(`⬅️ ${nameOf(parentOf(p.cwd))}`, "picker_up", "up") : undefined));
+    const subs = subfolders(p.cwd);
+    // Rows of 25 (Slack's limit per block), each action_id unique in its block. ponytail: the first 99 subfolders only.
+    const buttons = [...subs.slice(0, 99).map((n, j) => button(`📁 ${n} ›`, `picker_open_${j}`, n)), ...(naming ? [] : [button("➕ New folder", "picker_naming", "new")])];
+    for (let i = 0; i < buttons.length; i += 25) blocks.push({ type: "actions", elements: buttons.slice(i, i + 25) });
+    // Enter creates the folder and opens it. The block id follows the folder, so a new one starts empty.
+    if (naming)
+      blocks.push({
+        type: "input",
+        block_id: `mkdir:${p.cwd}`.slice(0, 255),
+        optional: true,
+        dispatch_action: true,
+        label: plain(`➕ New folder in ${nameOf(p.cwd)}`),
+        element: { type: "plain_text_input", action_id: "picker_mkdir", focus_on_load: true, placeholder: plain("Name, then Enter"), dispatch_action_config: { trigger_actions_on: ["on_enter_pressed"] } },
+      });
     if (error) blocks.push({ type: "context", elements: [{ type: "plain_text", text: `⚠️ ${error}` }] });
-    // Slack's submit label holds 24 characters.
-    const use = `Use ${nameOf(p.cwd)}`;
+    // Slack's submit label holds 24 characters. At the base a ticked suggestion wins over the base folder itself.
+    const use = `Use ${nameOf(on === undefined ? p.cwd : on === "." ? "" : on)}`;
     return modal("picker_folder", "Choose folder", use.length > 24 ? `${use.slice(0, 23)}…` : use, p, blocks);
   }
 
@@ -884,47 +878,22 @@ export function createDaemon(cfg: DaemonConfig) {
   const previous = async (p: Pick) =>
     (await sessions()).filter((x) => x.rel === p.cwd && (isDM(p.channel) || bySession.get(x.sessionId)?.channel === p.channel));
 
-  // The thread's question once the folder is chosen, when it has sessions to continue.
-  function question(p: Pick) {
-    const text = `📁 \`${abs(p.cwd)}\`\nNew session, or continue one?`;
-    return {
-      text,
-      blocks: [
-        section(text),
-        { type: "actions", elements: [{ ...button("🆕 New session", "session_new", p.thread), style: "primary" }, button("↩ Previous session…", "session_previous", p.thread)] },
-      ],
-    };
-  }
-
-  // "Previous session…": the folder's last 10 sessions, then Continue.
+  // Step 2, on top of step 1 (Slack's back arrow returns there): a new session, or one of the folder's last 10.
   async function sessionView(p: Pick) {
-    const list = (await previous(p)).slice(0, 10); // radio buttons hold 10 options
-    const options = list.map((x) => {
-      const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
-      return { text: plain((x.title || "Untitled").slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
-    });
-    return modal("picker_session", "Previous session", "Continue", p, [
+    const list = (await previous(p)).slice(0, 10);
+    const options = [
+      { text: plain("🆕 New session"), value: "new" },
+      ...list.map((x) => {
+        const info = [ago(x.updatedAt), bySession.has(x.sessionId) && "open in another thread, moves here"].filter(Boolean).join(" · ");
+        return { text: plain((x.title || "Untitled").slice(0, 75)), ...(info && { description: plain(info) }), value: x.sessionId };
+      }),
+    ];
+    return modal("picker_session", "Choose session", "Start", p, [
       section(`📁 \`${abs(p.cwd)}\``),
-      { type: "input", block_id: "session", label: plain("Session"), element: { type: "radio_buttons", action_id: "session", options, ...(options[0] && { initial_option: options[0] }) } },
+      list.length
+        ? { type: "input", block_id: "session", label: plain("Session"), element: { type: "static_select", action_id: "session", options, initial_option: options[0] } }
+        : section("_No sessions here yet: a new one starts._"),
     ]);
-  }
-
-  // The folder is chosen: the greeting becomes a link to the thread, where the session is asked for.
-  // The first message still waits.
-  async function chose(p: Pick) {
-    const first = pending.get(p.thread);
-    if (!first) return void (await expired(p.channel));
-    if (first.cwd !== undefined) return; // a second tap
-    Object.assign(first, { cwd: p.cwd, picker: p.picker });
-    save();
-    // No session to continue there: a new one starts, nothing to ask.
-    if (!(await previous(p)).length) return void start(p, "new").catch((err) => log("session_start_failed", { error: String(err) }));
-    const q: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread({ thread: p.thread, top: first.top }), ...question(p) } as any);
-    first.question = q.ts;
-    save();
-    // In a channel the greeting is in the thread already: it only loses its buttons.
-    const link = isDM(p.channel) ? await slack.chat.getPermalink({ channel: p.channel, message_ts: q.ts }).then((r) => r.permalink, () => undefined) : undefined;
-    await slack.chat.update({ channel: p.channel, ts: p.picker, text: `📁 \`${nameOf(p.cwd)}\`${link ? ` → <${link}|Open thread>` : ""}`, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
   }
 
   // A thread's header: its folder, its session (title and id, to resume it elsewhere), its previous thread.
@@ -942,7 +911,6 @@ export function createDaemon(cfg: DaemonConfig) {
     let t: Thread;
     let head: string;
     let recap = "";
-    let status = "new session";
     try {
       if (choice === "new") {
         const { sessionId, configOptions } = await withTools(p.thread, cwd, (mcpServers) => agent.newSession({ cwd, mcpServers }));
@@ -970,24 +938,23 @@ export function createDaemon(cfg: DaemonConfig) {
           return [`> **${who}:** ${s}`];
         });
         if (lines.length) recap = `**📜 Session recap**\n\n${lines.join("\n>\n")}`;
-        status = `continuing *${title}*`;
         head = header(cwd, `*${title}*`, choice, before);
       }
     } catch (err: any) {
       log("session_start_failed", { cwd, error: err?.message ?? String(err) });
-      return void (await say(where, `⚠️ Could not start a session in \`${cwd}\`: ${err?.message ?? err}`));
+      // In place of the greeting's "Starting…", or posted if it is gone.
+      const text = `⚠️ Could not start a session in \`${cwd}\`: ${err?.message ?? err}`;
+      const shown = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, text, blocks: [] }).then(() => true, () => false));
+      return void (shown || (await say(where, text)));
     }
     threads[p.thread] = t;
     bySession.set(t.sessionId, t);
     save();
     await contextBar(t);
-    // The question gives way to the header and the recap; the greeting, in the DM's main view, links to them.
-    if (first.question) await slack.chat.delete({ channel: p.channel, ts: first.question }).catch(() => {});
-    const posted: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), text: head, unfurl_links: false });
+    // The greeting becomes the header; a new one is posted if it is gone.
+    const headed = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, text: head, blocks: [] }).then(() => true, () => false));
+    if (!headed) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), text: head, unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
-    const link = isDM(p.channel) ? await slack.chat.getPermalink({ channel: p.channel, message_ts: posted.ts }).then((r) => r.permalink, () => undefined) : undefined;
-    const done = `📁 \`${nameOf(p.cwd)}\` · ${status}${link ? ` → <${link}|Open thread>` : ""}`;
-    await slack.chat.update({ channel: p.channel, ts: p.picker, text: done, blocks: [] }).catch((err) => log("picker_update_failed", { error: String(err) }));
     // No reaction on a code channel's first message: it is in the channel it was opened from.
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.top ? undefined : first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
@@ -1287,34 +1254,26 @@ export function createDaemon(cfg: DaemonConfig) {
     }
     const where = { channel: m.channel, thread: m.thread_ts ?? m.ts };
     const held = pending.get(key);
-    if (held) return void (await say(where, held.cwd === undefined ? "Choose a folder above first." : "Choose a new or previous session above first."));
+    if (held) return void (await say(where, "Choose a folder and a session above first."));
     if (!isDM(m.channel)) return; // a channel's other threads are not the agent's: no reply there
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
 
-  // A new message waits for the picker, in the DM's main view (in a channel, in the message's thread; in a code
-  // channel, top-level): its button (re)opens the modal. The thread opens once a session starts.
+  // A new message waits for the picker: a greeting in its thread (in a code channel, top-level) whose button opens
+  // the modal. Its first reply notifies; the main view keeps only the message.
   async function offerPicker(p: Pending & { ts: string }, key = p.ts) {
     pending.set(key, p);
     save();
     // A greeting by first name, then what to do: this message is not the agent, it only opens one.
     const name = (await person(p.user)).first;
-    const to = name ? ` ${name}` : "";
-    // Folders the message names are offered first: one tap chooses it.
-    const at = p.text.indexOf("\n\n[Context from the Slack relay");
-    const found = named(at >= 0 ? p.text.slice(0, at) : p.text, await sessions());
-    // Slack wants each button's action_id unique in its block: numbered.
-    const use = found.map((cwd, i) => button(`📁 ${short(abs(cwd))}`, `picker_suggest_${i}`, JSON.stringify({ thread: key, cwd })));
-    const choose = button("📂 Choose folder", "picker_open_modal", key);
-    const hi =
-      found.length === 1 ? `👋 Hi${to}! Work in \`${found[0]}\`?`
-      : found.length ? `👋 Hi${to}! Work in one of these folders?`
-      : `👋 Hi${to}! Pick the folder to work in.`;
-    const hint = found.length ? "Found in your message. " : "";
-    return (await slack.chat.postMessage({ channel: p.channel, thread_ts: isDM(p.channel) || p.top ? undefined : p.ts, text: hi, blocks: [
-      section(`${hi}\n${hint}Then choose a new or previous session ${p.top ? "here" : "in the thread"}; your message goes to the agent once it starts.`),
-      { type: "actions", elements: found.length ? [{ ...use[0], style: "primary" }, ...use.slice(1), choose] : [{ ...choose, style: "primary" }] },
-    ] as any })) as any;
+    const hi = `👋 Hi${name ? ` ${name}` : ""}! Pick the folder to work in, then the session.`;
+    const r: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.top ? undefined : p.ts, text: hi, blocks: [
+      section(`${hi}\nYour message goes to the agent once it starts.`),
+      { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", key), style: "primary" }] },
+    ] as any });
+    p.picker = r.ts;
+    save();
+    return r;
   }
 
   // A mention in a code channels' origin opens a Slack code channel (its author is invited), which is the session:
@@ -1351,8 +1310,8 @@ export function createDaemon(cfg: DaemonConfig) {
     // Posting to the user's id lands in our DM with them, which the reply names.
     const root: any = await slack.chat.postMessage({ channel: b.user.id, text: `📎 ${link ? `<${link}|Shared message>` : "Shared message"}:\n${quoted}` });
     const first = { channel: root.channel, text: `${text}${link ? `\n\n[Shared from this Slack message: ${link}]` : ""}${context}`, user: b.user.id, ts: root.ts };
-    const picker = await offerPicker(first);
-    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, picker: picker.ts, cwd: "" }) });
+    await offerPicker(first);
+    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, cwd: "" }) });
   });
 
   app.event("agent_session_stopped", async ({ event }) => {
@@ -1360,8 +1319,10 @@ export function createDaemon(cfg: DaemonConfig) {
     if (t && outputs.has(t.sessionId)) await stop(t);
   });
 
-  // The picker: block actions redraw the modal in place; its submits move to the next screen.
+  // The picker: block actions redraw the modal in place; "Use" pushes the session step, "Start" runs.
   const pickOf = (body: any): Pick => JSON.parse(body.view.private_metadata);
+  // A redraw keeps the user's tick: Slack keeps it in the radio list, and the submit button must name it too.
+  const tickOf = (body: any): string | undefined => body.view.state?.values?.recent?.picker_recent?.selected_option?.value;
   const redraw = async (body: any, view: Promise<ReturnType<typeof modal>>) =>
     slack.views.update({ view_id: body.view.id, view: await view });
 
@@ -1372,15 +1333,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const thread = (action as any).value as string;
     const first = pending.get(thread);
     if (!first) return void (await expired(b.channel.id));
-    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, picker: b.message.ts, cwd: "" }) });
-  });
-  // A folder the first message named: chosen without the modal.
-  app.action(/^picker_suggest_\d+$/, async ({ ack, body, action }) => {
-    await ack();
-    const b = body as any;
-    const { thread, cwd } = JSON.parse((action as any).value);
-    if (String(cwd).split("/").includes("..") || !isDir(abs(cwd))) return;
-    await chose({ channel: b.channel.id, thread, picker: b.message.ts, cwd });
+    await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread, cwd: "" }) });
   });
   app.action(/^picker_open_\d+$/, async ({ ack, body, action }) => {
     await ack();
@@ -1394,55 +1347,56 @@ export function createDaemon(cfg: DaemonConfig) {
     const p = pickOf(body);
     await redraw(body, folderView({ ...p, cwd: parentOf(p.cwd) }));
   });
+  app.action("picker_recent", async ({ ack, body, action }) => {
+    await ack();
+    await redraw(body, folderView(pickOf(body), undefined, (action as any).selected_option?.value));
+  });
   app.options("picker_search", async ({ ack, body }) => {
     const found = search((body as any).value ?? "").filter((r) => r.length <= 150); // Slack's limit on an option's value
     await ack({ options: found.map((r) => ({ text: plain(r.length > 75 ? `…${r.slice(-74)}` : r), value: r })) });
+  });
+  app.action("picker_naming", async ({ ack, body }) => {
+    await ack();
+    await redraw(body, folderView(pickOf(body), undefined, tickOf(body), true));
   });
   app.action("picker_mkdir", async ({ ack, body, action }) => {
     await ack();
     const p = pickOf(body);
     const name = (((action as any).value as string) ?? "").trim();
-    if (!/^[^/\\.][^/\\]*$/.test(name)) return void (await redraw(body, folderView(p, `"${name}" can't be a folder here: one name, no slashes, not starting with a dot.`)));
+    if (!/^[^/\\.][^/\\]*$/.test(name)) return void (await redraw(body, folderView(p, `"${name}" can't be a folder here: one name, no slashes, not starting with a dot.`, tickOf(body), true)));
     try {
       mkdirSync(join(abs(p.cwd), name), { recursive: true }); // an existing folder just opens
     } catch (err: any) {
-      return void (await redraw(body, folderView(p, `Couldn't create "${name}": ${err.code ?? err}`)));
+      return void (await redraw(body, folderView(p, `Couldn't create "${name}": ${err.code ?? err}`, tickOf(body), true)));
     }
     await redraw(body, folderView({ ...p, cwd: join(p.cwd, name) }));
   });
-  // "Use": the searched folder, else the recent one, else the one being browsed.
+  // "Use": the searched folder, else the ticked suggestion (at the base), else the one being browsed.
   app.view("picker_folder", async ({ ack, view }) => {
     const p: Pick = JSON.parse(view.private_metadata);
     const v = view.state.values as any;
-    const picked: string = v.search?.picker_search?.selected_option?.value ?? v.recent?.recent?.selected_option?.value ?? p.cwd;
+    const picked: string = v.search?.picker_search?.selected_option?.value ?? v.recent?.picker_recent?.selected_option?.value ?? p.cwd;
     const rel = picked === "." ? "" : picked;
-    if (rel.split("/").includes("..") || !isDir(abs(rel))) return void (await ack({ response_action: "errors", errors: { search: "That folder is gone." } }));
-    await ack({ response_action: "clear" });
-    await chose({ ...p, cwd: rel }).catch((err) => log("picker_failed", { error: String(err) }));
+    // The error shows in the redrawn modal: an "errors" response needs an input block, and Search is only at the base.
+    const fail = async (error: string) => ack({ response_action: "update", view: await folderView(isDir(abs(p.cwd)) ? p : { ...p, cwd: "" }, error, tickOf({ view })) });
+    if (rel.split("/").includes("..") || !isDir(abs(rel))) return void (await fail("That folder is gone."));
+    if (!pending.has(p.thread)) return void (await fail("This picker has expired. Send a new message."));
+    await ack({ response_action: "push", view: await sessionView({ ...p, cwd: rel }) });
   });
-
-  // The thread's question: a new session, or a previous one from a small modal.
-  const pickFor = (thread: string): Pick | undefined => {
-    const f = pending.get(thread);
-    return f?.cwd !== undefined && f.picker ? { channel: f.channel, thread, picker: f.picker, cwd: f.cwd } : undefined;
-  };
-  app.action("session_new", async ({ ack, body, action }) => {
-    await ack();
-    const p = pickFor((action as any).value);
-    if (!p) return void (await expired((body as any).channel.id));
-    void start(p, "new").catch((err) => log("session_start_failed", { error: String(err) }));
-  });
-  app.action("session_previous", async ({ ack, body, action }) => {
-    await ack();
-    const p = pickFor((action as any).value);
-    if (!p) return void (await expired((body as any).channel.id));
-    await slack.views.open({ trigger_id: (body as any).trigger_id, view: await sessionView(p) });
-  });
+  // "Start": the chosen session, or a new one.
   app.view("picker_session", async ({ ack, view }) => {
-    const choice = (view.state.values as any).session?.session?.selected_option?.value;
-    if (!choice) return void (await ack({ response_action: "errors", errors: { session: "Pick a session." } }));
+    const choice = (view.state.values as any).session?.session?.selected_option?.value ?? "new";
     await ack({ response_action: "clear" });
-    void start(JSON.parse(view.private_metadata), choice).catch((err) => log("session_start_failed", { error: String(err) }));
+    const p: Pick = JSON.parse(view.private_metadata);
+    // Starting takes a moment (a cold folder connects its tools first): the greeting says so at once, and loses its
+    // button; Slack's own "Working…" follows when the turn begins.
+    const first = pending.get(p.thread);
+    const title = (view.state.values as any).session?.session?.selected_option?.text?.text;
+    const what = choice === "new" ? "a new session" : `*${title ?? "the session"}*`;
+    void (async () => {
+      if (first?.picker) await slack.chat.update({ channel: p.channel, ts: first.picker, text: `⏳ Starting ${what} in \`${nameOf(p.cwd)}\`…`, blocks: [] }).catch(() => {});
+      await start(p, choice); // the header replaces it
+    })().catch((err) => log("session_start_failed", { error: String(err) }));
   });
 
   app.action(/^cfg:/, async ({ ack, body, action }) => {

@@ -78,8 +78,10 @@ new acp.AgentSideConnection(
         return { sessions: [...sessions].map(([sessionId, x]) => ({ sessionId, cwd: x.cwd, title: x.titled ? `Session ${sessionId}` : `New session - ${new Date(x.updated ?? 0).toISOString()}`, updatedAt: new Date(x.updated ?? 0).toISOString() })) };
       },
       async newSession({ cwd, mcpServers }) {
+        const connected = await connect(cwd, mcpServers);
+        if (cwd.endsWith("/unstartable")) throw new Error("model gateway down");
         const sessionId = `ses_${++n}`;
-        sessions.set(sessionId, { cwd, mcpServers: await connect(cwd, mcpServers) });
+        sessions.set(sessionId, { cwd, mcpServers: connected });
         touch(sessionId);
         log({ m: "new", sessionId, cwd });
         announce(sessionId);
