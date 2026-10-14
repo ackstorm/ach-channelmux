@@ -267,7 +267,15 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
   const filled = new Set<string>(); // "<card>:<field>" and "<card>:<tool>:<field>" given content in a b<n> card
   const sentTasks = new Map<string, Chunk>(); // card id -> last update delivered; replayed into a rolled-over stream
-  let layout: ({ text: string } | { card: string })[] = []; // the current stream message as sent, in order
+  type Layout = ({ text: string } | { card: string })[];
+  let layout: Layout = []; // the current stream message as sent, in order
+  // A tool that finishes waits for what comes next (another tool, or text), to go out in the same append: the cards
+  // keep their height instead of shrinking and growing again between tools.
+  let later: Chunk[] = [];
+  const shownIn = new Map<string, string>(); // card id -> the message it is in
+  const stopped = new Map<string, Layout>(); // earlier messages of the turn, by ts
+  const left = new Set<string>(); // cards of runs already closed when their message stopped: they stay there
+  const rewritten = new Map<string, string>(); // message ts -> its blocks as last rewritten
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
     (chain = chain.then(fn).catch((err) => log("output_failed", { error: String(err) })));
@@ -280,23 +288,26 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     if (!stream) return;
     const ts = stream.ts;
     stream = null;
+    stopped.set(ts, layout);
+    for (const x of layout) if ("card" in x && closedRun(x.card)) left.add(x.card);
     await api("chat.stopStream", { channel, ts, ...(blocks && { blocks }) }); // also sets the session back to active
-    await rewrite(ts, blocks);
+    await rewrite(ts, layout, blocks);
   }
 
   // A stopped message is sent again with each run's cards as one, its count, with nothing inside.
   // ponytail: a rewrite Slack refuses (size, more than 50 blocks) leaves the message as streamed.
-  async function rewrite(ts: string, extra: unknown[] = []) {
+  async function rewrite(ts: string, lay: Layout, extra: unknown[] = []) {
     const runOfCard = (card: string) => runs[Number(card.slice(1)) - 1];
     const folded = (card: string) => card[0] === "b" || (card[0] === "a" && (runOfCard(card).closed || runOfCard(card).tools.length > 1));
-    if (!layout.some((x) => "card" in x && folded(x.card))) return;
-    const blocks = layout.flatMap((x): unknown[] => {
+    if (!lay.some((x) => "card" in x && folded(x.card))) return;
+    const blocks = lay.flatMap((x): unknown[] => {
       if ("text" in x) {
         const t = x.text.trim();
         return t ? [{ type: "markdown", text: openFence(x.text) ? `${t}\n\`\`\`` : t }] : [];
       }
       if (x.card[0] === "b") return [];
-      const { title, status } = sentTasks.get(x.card) as { title: string; status: string };
+      // As it stands now: a run's count may have grown since the message stopped.
+      const { title, status } = (x.card[0] === "a" ? head(runOfCard(x.card)) : sentTasks.get(x.card)) as { title: string; status: string };
       // One still running here goes on in the next message, as settle() says.
       const done = finished(status);
       if (folded(x.card)) return [taskCard(x.card, title, done ? status : "complete", {})];
@@ -307,7 +318,11 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         ...(t.sources ? { sources: t.sources } : {}),
       })];
     });
-    await api("chat.update", { channel, ts, text: sent.trim().slice(0, 3000) || "🔧", blocks: [...blocks, ...extra] })
+    const text = lay.map((x) => ("text" in x ? x.text : "")).join("").trim();
+    const body = JSON.stringify([...blocks, ...extra]);
+    if (rewritten.get(ts) === body) return;
+    rewritten.set(ts, body);
+    await api("chat.update", { channel, ts, text: text.slice(0, 3000) || "🔧", blocks: [...blocks, ...extra] })
       .catch((err) => log("rewrite_failed", { error: String(err) }));
   }
 
@@ -318,27 +333,29 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       if (c.type === "markdown_text") {
         if (last && "text" in last) last.text += c.text;
         else layout.push({ text: c.text as string });
-      } else if (!layout.some((x) => "card" in x && x.card === c.id)) layout.push({ card: c.id as string });
+      } else {
+        if (!layout.some((x) => "card" in x && x.card === c.id)) layout.push({ card: c.id as string });
+        if (stream) shownIn.set(c.id as string, stream.ts);
+      }
     }
   }
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
 
   const finished = (status: unknown) => status === "complete" || status === "error";
-  const running = () => [...sentTasks.values()].filter((t) => !finished(t.status));
+  // The cards a new message carries on: the open run's, and a running thought. A closed run stays where it is.
+  const goesOn = (t: Chunk) =>
+    (current !== null && [`a${current.n}`, `b${current.n}`].includes(t.id as string)) || ((t.id as string).startsWith("thought") && !finished(t.status));
+  const closedRun = (id: string) => /^[ab]\d+$/.test(id) && runs[Number(id.slice(1)) - 1]?.closed;
 
-  // A new stream message carries, whole, the cards still running and the open run's, and, before text, the fence
-  // the last one left open.
+  // A new stream message carries, whole, the cards that go on, and, before text, the fence the last one left open.
   async function start(chunks: Chunk[]) {
-    const keep = current ? [`a${current.n}`, `b${current.n}`] : [];
-    const open = [...sentTasks.values()].filter((t) => (!finished(t.status) || keep.includes(t.id as string)) && !chunks.some((c) => c.id === t.id)).map((t) => whole(t.id as string));
-    const lead = reopen && chunks[0]?.type === "markdown_text" ? [{ type: "markdown_text", text: `${reopen}\n` }] : [];
-    reopen = "";
-    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...lead, ...chunks] });
+    const open = [...sentTasks.values()].filter((t) => goesOn(t) && !chunks.some((c) => c.id === t.id)).map((t) => whole(t.id as string));
+    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...chunks] });
     stream = { ts: r.ts, started: Date.now() };
-    sent = textOf(lead);
+    sent = "";
     layout = [];
-    record([...open, ...lead]);
+    record(open);
   }
 
   // Ends the stream message for a new one to go on; a fence left open is closed when the message still takes it.
@@ -353,7 +370,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   // A card still running when its message ends would stay unfinished there (red after a pause, a spinner
   // after a rollover): it is closed with a pointer, and the next message shows it running again.
   async function settle() {
-    const open = running();
+    const open = [...sentTasks.values()].filter((t) => !finished(t.status) && goesOn(t));
     if (!stream || !open.length) return;
     const chunks = open.map((t) => ({ type: "task_update", id: t.id, title: t.title, status: "complete", output: "↓ continues below" }));
     await api("chat.appendStream", { channel, ts: stream.ts, chunks }).catch(() => {});
@@ -363,16 +380,30 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     if (!streaming) return false;
     try {
       if (stream && Date.now() - stream.started > STREAM_MAX_AGE_MS) await roll(true);
-      if (stream) {
+      // A card left in an earlier message is not shown again here: that message is rewritten as it now stands.
+      // The fence the last message left open is reopened before the first text of this one, not before its cards.
+      const drop = async () => {
+        const behind = new Set(chunks.filter((c) => left.has(c.id as string)).map((c) => shownIn.get(c.id as string)!));
+        for (const ts of behind) await rewrite(ts, stopped.get(ts)!);
+        chunks = chunks.filter((c) => !left.has(c.id as string));
+        const at = chunks.findIndex((c) => c.type === "markdown_text");
+        if (reopen && at >= 0) {
+          chunks = [...chunks.slice(0, at), { type: "markdown_text", text: `${reopen}\n` }, ...chunks.slice(at)];
+          reopen = "";
+        }
+      };
+      await drop();
+      if (stream && chunks.length) {
         try {
           await api("chat.appendStream", { channel, ts: stream.ts, chunks });
         } catch (err) {
           // A message full to Slack's size limit: the turn goes on in a new one.
           if (!String(err).includes("msg_too_long")) throw err;
           await roll(false);
-          await start(chunks);
+          await drop();
+          if (chunks.length) await start(chunks);
         }
-      } else {
+      } else if (chunks.length) {
         await start(chunks);
       }
       sent += textOf(chunks);
@@ -394,6 +425,9 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     timer = undefined;
     const text = pending;
     pending = "";
+    await put(text);
+  }
+  async function put(text: string) {
     if (!text.trim()) return;
     const pieces = text.match(/[\s\S]{1,12000}/g)!;
     if (await send(pieces.map((t) => ({ type: "markdown_text", text: t })))) return;
@@ -427,23 +461,26 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     // A text that only grew sends what it gained.
     const gain = (k: string) => (typeof prev?.[k] === "string" && (task[k] as string).startsWith(prev[k] as string) ? (task[k] as string).slice((prev[k] as string).length) : task[k]);
     const added = Object.fromEntries(CONTENT.filter((k) => task[k] && !same(k)).map((k) => [k, gain(k)]));
-    if (id.startsWith("thought")) return emit([update(id, task as { title: string; status: string }, added)]);
+    if (id.startsWith("thought")) return emit([update(id, task as { title: string; status: string }, added)], false);
     let r = runOf.get(id);
     if (!r) {
       r = current ??= runs[runs.push({ n: runs.length + 1, tools: [], closed: false }) - 1];
       r.tools.push(id);
       runOf.set(id, r);
     }
-    return show(r, id, added);
+    if (!r.closed && id === r.tools.at(-1) && finished(task.status)) {
+      later.push(...cards(r, id, added).filter((c) => c !== null));
+      return run(flush); // the text before it is not held back
+    }
+    return emit(cards(r, id, added));
   }
 
   // A run's cards as they stand, with what tool `id` added to its own.
-  function show(r: Run, id?: string, added: Record<string, unknown> = {}) {
+  function cards(r: Run, id?: string, added: Record<string, unknown> = {}) {
     const a = update(`a${r.n}`, head(r), !r.closed && r.tools.length === 1 ? added : {});
-    if (r.tools.length < 2) return emit([a]);
+    if (r.tools.length < 2) return [a];
     const last = r.tools.at(-1)!;
-    const b = update(`b${r.n}`, now(r), !r.closed && id === last ? headed(`b${r.n}`, last, added) : {});
-    return emit([a, b]);
+    return [a, update(`b${r.n}`, now(r), !r.closed && id === last ? headed(`b${r.n}`, last, added) : {})];
   }
   // The first card's title and status: its tool alone and running, else the count of those before the running one.
   function head(r: Run) {
@@ -481,12 +518,14 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     queued.set(card, { title: state.title, status: state.status });
     return { type: "task_update", id: card, title: state.title, status: state.status, ...content };
   }
-  function emit(updates: (Chunk | null)[]) {
-    const chunks = updates.filter((c) => c !== null);
-    if (!chunks.length) return chain;
+  // What waits from a finished tool goes first, except with a thought: thinking does not end a tool's turn on screen.
+  // The text before the cards goes first; `before`, when given, is all of it (text after them is pending too).
+  function emit(updates: (Chunk | null)[], merge = true, before?: string) {
+    const chunks = [...(merge ? later.splice(0) : []), ...updates.filter((c) => c !== null)];
+    if (!chunks.length) return before ? run(() => put(before)) : chain;
     return run(async () => {
       if (suspended) return void chunks.forEach((c) => held.add(c.id as string));
-      await flush();
+      await (before === undefined ? flush() : put(before));
       await send(chunks);
     });
   }
@@ -508,13 +547,15 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     held.clear();
     if (cards.length) await send(cards);
   }
-  // Text, or the turn's end, closes the run: its first card counts all its tools.
+  // Text, or the turn's end, closes the run: its first card counts all its tools, before the text that follows.
   function close() {
     const r = current;
     if (!r) return;
     current = null;
     r.closed = true;
-    void show(r);
+    const before = pending;
+    pending = "";
+    void emit(cards(r), true, before);
   }
 
   // The model's thinking between two texts is one folded card: it runs while the model thinks, and each stretch's
@@ -560,6 +601,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     },
     /** Before posting buttons (blocks only go out when a stream stops). */
     pause: () => {
+      void emit([]); // a finished tool's card, before the stream stops
       suspended = true;
       return run(async () => {
         await flush();

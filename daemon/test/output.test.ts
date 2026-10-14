@@ -40,8 +40,8 @@ test("a turn streams text and tool cards into one message, then stops the stream
   out.text("Done.");
   await out.end();
   assert.deepEqual(calls.map((c) => c.method), [
-    "agents.sessions.setStatus", "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update",
-  ]);
+    "agents.sessions.setStatus", "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update",
+  ]); // the finished tool waits for the text, to go out with its count
   assert.deepEqual(calls[0].params, { channel_id: "D1", thread_ts: "1.0", status: "processing", title: "repo: fix the bug" });
   assert.equal(chunks(calls).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
   assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
@@ -112,8 +112,7 @@ test("a card running when the stream pauses is closed there with a pointer and r
     ["chat.startStream", "execute:in_progress"],
     ["chat.appendStream", "execute:complete:↓ continues below"],
     ["chat.stopStream"],
-    ["chat.startStream", "slack.ask_user:complete"],
-    ["chat.appendStream", "🔧 1 tool used:complete"],
+    ["chat.startStream", "slack.ask_user:complete", "🔧 1 tool used:complete"],
     ["chat.stopStream"],
     ["chat.update"],
   ]);
@@ -133,8 +132,7 @@ test("a card updated while paused for the user waits for the resume: no message 
   const after = calls.slice(paused).filter((c) => c.method.startsWith("chat.")).map((c) => [c.method, ...(c.params.chunks ?? []).map((x: any) => `${x.title}:${x.status}${x.details ? `:${x.details}` : ""}`)]);
   assert.deepEqual(after, [
     ["chat.startStream", "slack.ask_user:in_progress:Which colour?"],
-    ["chat.appendStream", "slack.ask_user:complete"],
-    ["chat.appendStream", "🔧 1 tool used:complete"],
+    ["chat.appendStream", "slack.ask_user:complete", "🔧 1 tool used:complete"],
     ["chat.stopStream"],
     ["chat.update"],
   ]);
@@ -362,10 +360,10 @@ test("a stream message full to Slack's size limit goes on in a new one, reopenin
   out.text("+b\n```\nDone.");
   await out.end();
   assert.deepEqual(calls.map((c) => c.method).filter((m) => m.startsWith("chat.")), [
-    "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update", "chat.startStream", "chat.appendStream", "chat.stopStream", "chat.update",
+    "chat.startStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update", "chat.startStream", "chat.stopStream",
   ]);
   const second = calls.filter((c) => c.method === "chat.startStream")[1].params.chunks;
-  assert.deepEqual(second.map((c: any) => c.type), ["task_update", "markdown_text", "markdown_text"]); // the running card comes along
+  assert.deepEqual(second.map((c: any) => c.type), ["markdown_text", "markdown_text"]); // text closed the run: its card stays above
   assert.equal(texts(calls, "chat.startStream")[1], "```diff\n\n\n+b\n```\nDone.");
 });
 
@@ -382,7 +380,9 @@ test("a stream rolled over for its age closes an open code fence and the next me
   await out.end();
   const streamed = calls.filter((c) => c.method === "chat.appendStream" || c.method === "chat.startStream").map((c) => c.params.chunks.filter((x: any) => x.type === "markdown_text").map((x: any) => x.text).join(""));
   assert.ok(streamed.includes("\n```"), "the old message's fence is closed");
-  assert.equal(texts(calls, "chat.startStream")[1], "```ts\n\n\nconst b = 2;\n```");
+  const second = calls.slice(calls.findLastIndex((c) => c.method === "chat.startStream"));
+  assert.equal(texts(second, "chat.startStream")[0], undefined); // the run's count opens the new message, then the text
+  assert.equal(texts(second, "chat.appendStream").join(""), "```ts\n\n\nconst b = 2;\n```");
 });
 
 test("when the stream breaks inside a code fence, the plain message that follows reopens it", async () => {
@@ -395,4 +395,45 @@ test("when the stream breaks inside a code fence, the plain message that follows
   out.text("+b\n```");
   await out.end();
   assert.deepEqual(texts(calls, "chat.postMessage"), ["```diff\n+b\n```"]);
+});
+
+test("a finished tool stays on screen until what follows: the next tool and the count go out in one append, text after its count", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.tool("g", { title: "grep X", status: "in_progress" });
+  const started = calls.length;
+  await out.tool("g", { status: "completed" });
+  assert.equal(calls.length, started, "grep's finish waits for the next tool");
+  await out.tool("l", { title: "ls", status: "in_progress" });
+  await out.tool("l", { status: "completed" });
+  out.text("Found it.");
+  await out.end();
+  const sends = calls.filter((c) => c.method === "chat.startStream" || c.method === "chat.appendStream");
+  const row = (c: any) => c.params.chunks.map((x: any) => (x.type === "markdown_text" ? x.text.trim() : `${x.id} ${x.title}:${x.status}`));
+  assert.deepEqual(sends.map(row), [
+    ["a1 grep X:in_progress"],
+    ["a1 grep X:complete", "a1 🔧 1 tool used:complete", "b1 ls:in_progress"], // one append: the cards keep their height
+    ["b1 ls:complete", "a1 🔧 2 tools used:complete"],
+    ["Found it."], // the count goes out before the text
+  ]);
+});
+
+test("a run closed when its message rolls over keeps its card there: the count is updated in place, not repeated below", async () => {
+  const { api, calls, failNext } = failingOnce("msg_too_long");
+  const out = createOutput(api, where);
+  for (let i = 0; i < 3; i++) {
+    await out.tool(`t${i}`, { title: `tool ${i}`, status: "in_progress" });
+    await out.tool(`t${i}`, { status: "completed" });
+  }
+  failNext(); // the message is full: the text closing the run goes on in a new one
+  out.text("El servidor");
+  await out.tool("x", { title: "fetch", status: "completed" });
+  out.text("Done.");
+  await out.end();
+  const second = calls.filter((c) => c.method === "chat.startStream")[1];
+  const after = calls.slice(calls.indexOf(second)).flatMap((c) => c.params.chunks ?? []).filter((x: any) => x.type === "task_update").map((x: any) => x.id);
+  assert.ok(!after.includes("a1") && !after.includes("b1"), `run 1 is not repeated below: ${after}`);
+  const firstTs = calls.find((c) => c.method === "chat.stopStream")!.params.ts;
+  const rewrites = calls.filter((c) => c.method === "chat.update" && c.params.ts === firstTs);
+  assert.equal(rewrites.at(-1)!.params.blocks.find((b: any) => b.type === "task_card").title, "🔧 3 tools used");
 });

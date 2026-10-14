@@ -717,13 +717,12 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   await say("! echo shell-$((40+2)) &amp;&amp; echo then", "500.000005"); // Slack escapes & < > in text
   const out = await waitFor(() => posts.find((p) => p.params.thread_ts === T && p.params.markdown_text?.includes("$ echo shell")));
   assert.match(out.params.markdown_text, /\$ echo shell-\$\(\(40\+2\)\) && echo then\n[\s\S]*shell-42\nthen/);
-  const asked = mark();
   await say("what did I run?", "500.000006");
   const next = await waitFor(() => agentLog().slice(before).find((e) => e.m === "prompt" && e.text.includes("what did I run?")));
   assert.match(next.text, /shell-42/); // the command and its output reach the agent with the next message
   assert.equal(agentLog().slice(before).some((e) => e.m === "prompt" && e.text.startsWith("! echo")), false);
 
-  await waitFor(() => since(asked).some((c) => c.method === "chat.stopStream")); // $clear refuses while a turn runs
+  await turnEnded("500.000006"); // $clear refuses while a turn runs, which the stream's stop does not end yet
   const session = agentLog().filter((e) => e.m === "prompt" && e.text.includes("what did I run?")).at(-1).sessionId;
   await say("$clear", "500.000007");
   const fresh = await waitFor(() => agentLog().slice(before).find((e) => e.m === "new"));
