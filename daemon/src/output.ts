@@ -14,7 +14,8 @@ const FLUSH_MS = 1_000;
 const STREAM_MAX_AGE_MS = 240_000;
 // Slack drops a session's "processing" status after an hour unless it is sent again.
 const STATUS_REFRESH_MS = 30 * 60_000;
-const TASK_STATUS: Record<string, string> = { pending: "pending", in_progress: "in_progress", completed: "complete", failed: "error" };
+// A pending card shows nothing below its title, unlike a running one: sent as running, a tool keeps its card's height.
+const TASK_STATUS: Record<string, string> = { pending: "in_progress", in_progress: "in_progress", completed: "complete", failed: "error" };
 
 // task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
 // with msg_too_long; the margins are deliberate.

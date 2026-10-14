@@ -44,7 +44,7 @@ test("a turn streams text and tool cards into one message, then stops the stream
   ]); // the finished tool waits for the text, to go out with its count
   assert.deepEqual(calls[0].params, { channel_id: "D1", thread_ts: "1.0", status: "processing", title: "repo: fix the bug" });
   assert.equal(chunks(calls).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
+  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "in_progress"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]); // pending goes as running
 });
 
 test("blocks given to end() go under the streamed reply; without a stream there is nothing to attach them to", async () => {
@@ -255,7 +255,7 @@ test("a card's details and output reach the stream, and a repeated identical upd
   await out.tool("x", { status: "completed", output: "a.txt" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["pending", "$ ls", undefined], ["complete", undefined, "a.txt"], ["complete", undefined, undefined]]);
+  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["in_progress", "$ ls", undefined], ["complete", undefined, "a.txt"], ["complete", undefined, undefined]]);
 });
 
 test("the model's thinking is one card, opened when it starts and filled when text follows", async () => {
@@ -436,4 +436,18 @@ test("a run closed when its message rolls over keeps its card there: the count i
   const firstTs = calls.find((c) => c.method === "chat.stopStream")!.params.ts;
   const rewrites = calls.filter((c) => c.method === "chat.update" && c.params.ts === firstTs);
   assert.equal(rewrites.at(-1)!.params.blocks.find((b: any) => b.type === "task_card").title, "🔧 3 tools used");
+});
+
+test("a tool the agent reports as pending goes out running: a pending card shows less and the run's cards would jump", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  for (const [id, title] of [["g", "grep X"], ["c", "cat Y"]]) {
+    await out.tool(id, { title, status: "pending" });
+    await out.tool(id, { title, status: "in_progress", details: "d" });
+    await out.tool(id, { status: "completed" });
+  }
+  out.text("done");
+  await out.end();
+  const statuses = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => c.status);
+  assert.ok(!statuses.includes("pending"), statuses.join());
 });

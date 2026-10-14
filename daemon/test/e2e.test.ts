@@ -204,7 +204,7 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
   assert.equal(firstStatus.params.title, "beta - fix the bug");
   const chunks = streamed(since(n));
   assert.equal(chunks.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "pending"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
+  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "in_progress"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
 });
 
 test("a permission request becomes buttons whose click answers the agent", async () => {
