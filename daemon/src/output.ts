@@ -254,7 +254,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let refresh: ReturnType<typeof setInterval> | undefined;
   let suspended = false;
   const held = new Set<string>(); // cards updated during a pause: a new message would show them running under the question
-  let thinking: { id: string; text: string } | null = null; // the model's thinking since its last text or tool
+  let thinking: { id: string; text: string; heading: string; shown: number } | null = null; // the model's thinking since its last text or tool
   let texts = 0; // texts so far: the thinking between two texts is one card
   const tasks = new Map<string, Chunk>(); // ACP tool call id (or thoughtN) -> its card's last known fields, whole
   // A run is the tools called between two texts; it takes two cards, each on its own line. a<n> shows its first
@@ -568,7 +568,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const tail = text.trim().replaceAll("\`\`\`", "ˋˋˋ");
     const before = tasks.get(id)?.output as string | undefined;
     const add = tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail;
-    void tool(id, { status: "completed", ...((add || before) && { output: before && add ? `${before}\n\n${add}` : before || add }) });
+    void tool(id, { title: "Thinking", status: "completed", ...((add || before) && { output: before && add ? `${before}\n\n${add}` : before || add }) });
   }
 
   return {
@@ -590,10 +590,19 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       pending += s;
       if (streaming && !timer) timer = setTimeout(() => run(flush), FLUSH_MS);
     },
+    // While the model thinks, its card's title follows the heading it is on ("**Planning the Steps**", as Gemini
+    // writes them), at most once a second; the finished card is "Thinking" again.
     thought(s: string) {
-      if (thinking) return void (thinking.text += s);
-      thinking = { id: `thought${texts}`, text: s };
-      void tool(thinking.id, { title: "Thinking", status: "in_progress" });
+      if (!thinking) {
+        thinking = { id: `thought${texts}`, text: "", heading: "", shown: -Infinity }; // its first heading shows at once
+        void tool(thinking.id, { title: "Thinking", status: "in_progress" });
+      }
+      thinking.text += s;
+      const heading = [...thinking.text.matchAll(/\*\*([^*\n]+)\*\*/g)].at(-1)?.[1].trim() ?? "";
+      if (heading && heading !== thinking.heading && Date.now() - thinking.shown >= FLUSH_MS) {
+        Object.assign(thinking, { heading, shown: Date.now() });
+        void tool(thinking.id, { title: `Thinking · ${heading}` });
+      }
     },
     tool,
     /** True when the turn has no reply text yet, or none after its last tool call. */

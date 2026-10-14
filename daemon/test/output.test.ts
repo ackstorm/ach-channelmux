@@ -451,3 +451,24 @@ test("a tool the agent reports as pending goes out running: a pending card shows
   const statuses = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => c.status);
   assert.ok(!statuses.includes("pending"), statuses.join());
 });
+
+test("while the model thinks, its card shows the heading it is on; the finished card is Thinking again", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  out.thought("**Testing Slack Interface**\n\nI'm checking");
+  out.thought(" the tools.\n\n**Planning ");
+  t.mock.timers.tick(1_000);
+  out.thought("the Steps**\n\nFirst ls.");
+  out.thought("\n\n**Too Soon**\n\nskipped title"); // under a second after the last one: not sent
+  t.mock.timers.tick(1_000);
+  out.text("Done.");
+  await out.end();
+  const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.title}:${c.status}`);
+  assert.deepEqual(titles, [
+    "Thinking:in_progress",
+    "Thinking · Testing Slack Interface:in_progress",
+    "Thinking · Planning the Steps:in_progress",
+    "Thinking:complete",
+  ]);
+});
