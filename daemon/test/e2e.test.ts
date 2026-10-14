@@ -873,11 +873,20 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await slack.emit("events_api", slack.dm("UPEPE", "$model", { ts: "920.000009", thread_ts: "920.000001" }));
   await waitFor(() => !menu(published().at(-1)).includes("Model nine") && menu(published().at(-1)).includes("Model two"));
 
-  // The next new session gets it.
+  // Effort picked before the model (as saved): the agent sets the effort back to default when the model changes, so
+  // the model is applied first.
+  await daemon.stop();
+  const picked = JSON.parse(readFileSync(stateFile, "utf8"));
+  picked.defaults = { effort: "high", model: "m2" };
+  writeFileSync(stateFile, JSON.stringify(picked));
+  daemon = newDaemon();
+  await daemon.start();
+
+  // The next new session gets both.
   await slack.emit("events_api", slack.dm("UPEPE", "alpha please", { ts: "930.000001" }));
   await startNew("930.000001", "alpha");
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "alpha please"));
-  assert.deepEqual(agentLog().filter((e) => e.m === "config").at(-1), { m: "config", configId: "model", value: "m2" });
+  assert.deepEqual(agentLog().filter((e) => e.m === "config").slice(-2), [{ m: "config", configId: "model", value: "m2" }, { m: "config", configId: "effort", value: "high" }]);
   await turnEnded("930.000001"); // a turn still running when the relay stops keeps retrying, and the test process never exits
 });
 

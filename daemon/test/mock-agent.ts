@@ -24,10 +24,13 @@ const touch = (sessionId: string) => {
   const x = sessions.get(sessionId);
   if (x) x.updated = ++clock;
 };
-const models = (currentValue: string): acp.SessionConfigOption[] => [
+const models = (currentValue: string, effort = "default"): acp.SessionConfigOption[] => [
   { id: "model", name: "Model", category: "model", type: "select", currentValue, options: [{ value: "m1", name: "Model one" }, { value: "m2", name: "Model two" }] },
+  { id: "effort", name: "Effort", category: "thought_level", type: "select", currentValue: effort, options: ["low", "high", "default"].map((value) => ({ value, name: value })) },
   { id: "mode", name: "Session Mode", category: "mode", type: "select", currentValue: "build", options: [{ value: "build", name: "Build" }, { value: "plan", name: "Plan" }] },
 ];
+// Like opencode (2.0.29): a session's model and effort; changing the model sets the effort back to default.
+const settingsOf = new Map<string, { model: string; effort: string }>();
 
 // Like opencode (2.0.26): it connects to a session's MCP servers as it creates or loads the session,
 // and drops one that does not answer for the rest of the session. It keeps them per folder, not per
@@ -207,9 +210,13 @@ new acp.AgentSideConnection(
         await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 24_000, size: 200_000, cost: { amount: 0.0123, currency: "USD" } } });
         return { stopReason: "end_turn" };
       },
-      async setSessionConfigOption({ configId, value }) {
+      async setSessionConfigOption({ sessionId, configId, value }) {
         log({ m: "config", configId, value });
-        return { configOptions: models(String(value)) };
+        const s = settingsOf.get(sessionId) ?? { model: "m1", effort: "default" };
+        if (configId === "model") Object.assign(s, { model: String(value), effort: "default" });
+        if (configId === "effort") s.effort = String(value);
+        settingsOf.set(sessionId, s);
+        return { configOptions: models(s.model, s.effort) };
       },
       async cancel({ sessionId }) {
         log({ m: "cancel", sessionId });

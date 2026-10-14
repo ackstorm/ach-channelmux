@@ -1063,10 +1063,11 @@ export function createDaemon(cfg: DaemonConfig) {
     };
   }
 
-  // A new session starts with the Home tab's defaults (e.g. the model), where the agent offers them.
+  // A new session starts with the Home tab's defaults (e.g. the model), where the agent offers them. The model goes
+  // first: opencode sets the effort back to its default when the model changes.
   async function applyDefaults(sessionId: string, options?: acp.SessionConfigOption[] | null) {
     let current = options;
-    for (const [configId, value] of Object.entries(defaults)) {
+    for (const [configId, value] of Object.entries(defaults).sort(([a], [b]) => Number(b === "model") - Number(a === "model"))) {
       const o: any = current?.find((x) => x.id === configId);
       if (!o || o.currentValue === value || !choicesOf(o).some((c) => c.value === value)) continue;
       const r = await agent.setSessionConfigOption({ sessionId, configId, value }).catch((err) => void log("default_failed", { configId, error: String(err) }));
