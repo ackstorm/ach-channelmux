@@ -46,7 +46,8 @@ Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, 
 `message.groups`, `app_home_opened` and `agent_session_stopped` events, interactivity, App Home Home and
 Messages tabs, the `agent_view` feature with `assistant:write`, the `code_channels` feature with
 `code_channels:manage`, and `channels:history`/`read`, `groups:history`/`read`). Invite the bot to each
-`CHANNELS` channel. After updating an existing app's manifest, reinstall it.
+`CHANNELS` channel. After updating an existing app's manifest, reinstall it. The manifest can't carry an icon:
+upload `slack-app-icon.png` under the app's **Basic Information → Display Information → App icon**.
 
 ## Deploy
 
