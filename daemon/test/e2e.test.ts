@@ -256,20 +256,12 @@ test("when Slack refuses streaming, replies arrive as one message per segment", 
   }
 });
 
-const stopEvent = (thread: string) => ({
-  type: "event_callback",
-  event_id: `EvStop${thread}`,
-  team_id: "T1",
-  api_app_id: "A1",
-  event: { type: "agent_session_stopped", channel: DM, thread_ts: thread, user: "UPEPE" },
-});
-
-test("Slack's stop button cancels the running turn; a message meanwhile is queued with a notice", async () => {
+test("$stop cancels the running turn; a message meanwhile is queued with a notice", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "wait", { ts: "100.000005", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait"));
   await slack.emit("events_api", slack.dm("UPEPE", "and then this", { ts: "100.000006", thread_ts: "100.000001" }));
   const notice = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && /Queued/.test(p.params.text ?? "")));
-  await slack.emit("events_api", stopEvent("100.000001"));
+  await slack.emit("events_api", slack.dm("UPEPE", "$stop", { ts: "100.000031", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
   await waitFor(() => calls("chat.update").some((c) => c.params.ts === notice.ts && c.params.text === "📬 Queued, now running." && c.params.blocks === "[]")); // no Send now left
@@ -1006,7 +998,7 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   await turnEnded("960.000004");
   await inCode(cc, "wait", { ts: "960.000005" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait" && e.sessionId === ccSession));
-  await slack.emit("events_api", { type: "event_callback", event_id: "EvStopCode", team_id: "T1", api_app_id: "A1", event: { type: "agent_session_stopped", channel: cc, user: "UPEPE" } });
+  await inCode(cc, "$stop", { ts: "960.000006" });
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "960.000005" && c.params.name === "black_square_for_stop"));
 
   // The Home tab still draws: a code channel's session has no thread ts.

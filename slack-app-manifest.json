@@ -54,7 +54,7 @@
   },
   "settings": {
     "event_subscriptions": {
-      "bot_events": ["message.im", "message.channels", "message.groups", "agent_session_stopped", "app_home_opened"]
+      "bot_events": ["message.im", "message.channels", "message.groups", "app_home_opened"]
     },
     "interactivity": {
       "is_enabled": true

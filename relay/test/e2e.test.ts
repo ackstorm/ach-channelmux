@@ -56,9 +56,6 @@ async function daemon(name: string, token: string, gwUrl = GW): Promise<Daemon> 
   app.view("settings", async ({ ack }) => {
     await ack({ response_action: "errors", errors: { cwd: `rejected by ${name}` } });
   });
-  app.event("agent_session_stopped", async ({ event }) => {
-    d.got.push(event);
-  });
   app.event("app_home_opened", async ({ event }) => {
     d.got.push(event);
   });
@@ -149,13 +146,10 @@ test("a message in a channel goes to the owner's daemon even when someone else w
   await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "from xavi"));
   await waitFor(() => pepe1.got.length === before + 1);
   assert.equal(pepe1.got.at(-1).text, "from xavi");
-  // So do their edits and a stop of the agent session in the channel.
+  // So do their edits.
   await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "", { user: undefined, subtype: "message_changed", message: { type: "message", ts: "1.1", user: "UXAVI", text: "fixed" }, previous_message: { text: "old" } }));
   await waitFor(() => pepe1.got.length === before + 2);
   assert.equal(pepe1.got.at(-1).message.text, "fixed");
-  await slack.emit("events_api", { type: "event_callback", event_id: "EvStopC", team_id: "T1", api_app_id: "A1", event: { type: "agent_session_stopped", channel: "C_DEV", thread_ts: "90.0", user: "UXAVI" } });
-  await waitFor(() => pepe1.got.length === before + 3);
-  assert.equal(pepe1.got.at(-1).type, "agent_session_stopped");
   // The channel's name is looked up once.
   assert.equal(slack.calls.filter((c) => c.method === "conversations.info" && c.params.channel === "C_DEV").length, 1);
 });
@@ -416,23 +410,12 @@ test("a 429 from Slack is retried by the relay, not returned to the daemon", asy
   }
 });
 
-test("agent sessions: streams and status are scoped to the owner's DM; stop events reach the owner", async () => {
+test("agent sessions: streams and status are scoped to the owner's DM", async () => {
   const c = pepe1.app.client;
   assert.ok((await c.apiCall("chat.startStream", { channel: "D_UPEPE", thread_ts: "80.0", markdown_text: "hi" })).ok);
   assert.ok((await c.apiCall("agents.sessions.setStatus", { channel_id: "D_UPEPE", thread_ts: "80.0", status: "processing" })).ok);
   await assert.rejects(c.apiCall("chat.startStream", { channel: "D_UXAVI", thread_ts: "80.0", markdown_text: "x" }), /restricted_action/);
   await assert.rejects(c.apiCall("agents.sessions.setStatus", { thread_ts: "80.0", status: "processing" }), /restricted_action/);
-
-  const n = pepe1.got.length;
-  await slack.emit("events_api", {
-    type: "event_callback",
-    event_id: "EvStop1",
-    team_id: "T1",
-    api_app_id: "A1",
-    event: { type: "agent_session_stopped", channel: "D_UPEPE", thread_ts: "80.0", user: "UPEPE" },
-  });
-  await waitFor(() => pepe1.got.length > n);
-  assert.equal(pepe1.got.at(-1).type, "agent_session_stopped");
 });
 
 test("Home tab: opening it reaches the owner's daemon, which may publish only the owner's Home", async () => {

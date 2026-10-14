@@ -366,10 +366,6 @@ export function createGateway(cfg: GatewayConfig) {
   function routeKey(type: string, body: any): { userId?: string; channel?: string } | null {
     if (type === "events_api") {
       const ev = body?.event;
-      if (ev?.type === "agent_session_stopped") {
-        if (ev.channel && !ev.channel.startsWith("D")) return { channel: ev.channel };
-        return ev.user ? { userId: ev.user, channel: ev.channel } : null;
-      }
       if (ev?.type === "app_home_opened") return ev.tab === "home" && ev.user ? { userId: ev.user } : null;
       const inChannel = ev?.channel_type === "channel" || ev?.channel_type === "group";
       if (!ev || ev.type !== "message" || (ev.channel_type !== "im" && !inChannel)) return null;

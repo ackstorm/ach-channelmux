@@ -1315,11 +1315,6 @@ export function createDaemon(cfg: DaemonConfig) {
     await slack.views.open({ trigger_id: b.trigger_id, view: await folderView({ channel: first.channel, thread: root.ts, cwd: "" }) });
   });
 
-  app.event("agent_session_stopped", async ({ event }) => {
-    const t = threads[(event as any).thread_ts ?? (event as any).channel]; // a code channel's session: no thread
-    if (t && outputs.has(t.sessionId)) await stop(t);
-  });
-
   // The picker: block actions redraw the modal in place; "Use" pushes the session step, "Start" runs.
   const pickOf = (body: any): Pick => JSON.parse(body.view.private_metadata);
   // A redraw keeps the user's tick: Slack keeps it in the radio list, and the submit button must name it too.
