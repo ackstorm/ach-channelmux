@@ -19,13 +19,14 @@ import { tokenResolver } from "./resolver.ts";
 const SLACK_PREAMBLE = `The user is talking to you through Slack. Each of their Slack messages arrives wrapped in
 <slack from="..." at="...">...</slack>. Anything not wrapped that way did not come from Slack (for
 example, when this session is later continued in a terminal): answer that normally.
-In Slack they see your reply text and, while you work, a folded card per tool call (with its result)
-and per stretch of thinking.
+In Slack they see your reply text and, while you work, one folded card per stretch of thinking and
+tool calls (the tools' names, not their results).
 - Finish the request in this turn: do not stop after saying what you will do.
 - When the user asks to run something (e.g. \`ls -la\`), run it, then paste the relevant
   output in a code block. Trim long output and say so.
 - Write GitHub-style Markdown: short paragraphs, lists, tables, and code blocks with a language
-  (\`\`\`diff for changes). No HTML.
+  (\`\`\`diff for changes). No HTML. Slack does not render LaTeX: write math as plain text or
+  Unicode (1/ln(n), x², √2, ≤).
 - To send the user a file (an image, a report, a log), use the send_file tool.
 - When you need the user to decide something to go on, ask with the ask_user tool (they tap an
   answer); do not end your turn just to ask.`;

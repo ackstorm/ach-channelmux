@@ -114,14 +114,16 @@ async function tap(view: any, action_id: string, value: string, action: object =
 const submit = (view: any, values: Record<string, unknown> = {}) =>
   slack.emit("interactive", { type: "view_submission", user: { id: "UPEPE" }, trigger_id: "T_submit", view: { id: "V_OPENED", callback_id: view.callback_id, private_metadata: view.private_metadata, state: { values } } }, true) as Promise<any>;
 const sessionChoice = (value: string) => ({ session: { session: { type: "static_select", selected_option: { value } } } });
-// The picker's greeting sits in the message's thread; its button carries the message (thread) it is for.
+// The picker's greeting (in a DM's main view, else in the message's thread); its button carries the thread it is for.
 const pickerFor = (thread: string) =>
-  waitFor(() => posts.find((p) => p.params.thread_ts === thread && p.params.blocks?.includes("picker_open_modal")));
+  waitFor(() => posts.find((p) => p.params.blocks?.includes("picker_open_modal") && p.params.blocks.includes(`"value":"${thread}"`)));
+// In a DM the greeting leaves the main view at start; the header goes in the thread.
+const headerIn = (thread: string) => waitFor(() => posts.find((p) => p.params.thread_ts === thread && p.params.text?.includes("💬")));
 async function openPicker(thread: string) {
   const msg = await pickerFor(thread);
   assert.equal(msg.params.text, "👋 Hi Mary Ann! Pick the folder to work in, then the session."); // Slack's first_name, whole, not the real name's first word
   const n = views().length;
-  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts, thread_ts: thread }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: `T_${thread}`, channel: { id: DM }, message: { ts: msg.ts }, actions: [{ type: "button", action_id: "picker_open_modal", value: thread }] }, true);
   await waitFor(() => views().length > n);
   return { msg, view: lastView() };
 }
@@ -172,10 +174,10 @@ after(async () => {
   stt.close();
 });
 
-test("a new DM gets the picker in its thread; browsing to a folder and starting a new session runs the thread there", async () => {
+test("a new DM gets the picker in the main view; browsing to a folder and starting a new session runs the thread there", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "fix the bug", { ts: "100.000001" }));
   let { msg, view } = await openPicker("100.000001");
-  assert.equal(msg.params.thread_ts, "100.000001"); // in the message's thread: the main view keeps only the message
+  assert.equal(msg.params.thread_ts, undefined); // in the main view: no thread to open first
   assert.deepEqual(browse(view), ["alpha", "beta", "gamma"]); // no hidden folders or node_modules; symlinks count
   assert.equal(view.blocks.some((b: any) => b.block_id === "recent"), false); // no sessions yet: no Recent
   const at = (id: string) => view.blocks.findIndex((b: any) => b.block_id === id || b.elements?.some((e: any) => e.action_id === id));
@@ -202,10 +204,11 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
     { m: "new", sessionId: "ses_1", cwd: join(base, "beta") },
     { m: "prompt", sessionId: "ses_1", text: "fix the bug" },
   ]);
-  // Start says so in the greeting at once; then the greeting becomes the thread's header.
+  // Start says so in the greeting at once; then the greeting goes and the header opens the thread.
   const updates = calls("chat.update").filter((c) => c.params.ts === msg.ts);
-  assert.equal(updates[0].params.text, "⏳ Starting a new session in `beta`…");
-  const header = updates.at(-1)!;
+  assert.deepEqual(updates.map((c) => c.params.text), ["⏳ Starting a new session in `beta`…"]);
+  assert.ok(calls("chat.delete").some((c) => c.params.ts === msg.ts));
+  const header = await headerIn("100.000001");
   const head = header.params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
   assert.deepEqual(JSON.parse(header.params.blocks).map((b: any) => b.type), ["section", "divider"]); // a rule under the header
@@ -401,8 +404,9 @@ test("a turn that edits ends with a line of its changes (branch, files, lines) a
   const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
   // The turn's edits, in one line under the reply with the context and cost so far: the only block there.
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] });
-  assert.equal(end.length, 1);
+  assert.deepEqual(end[0], { type: "divider" }); // a rule between the reply and its footer
+  assert.deepEqual(end[1], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] });
+  assert.equal(end.length, 2);
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
   assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
   assert.equal(done.params.thread_ts, "100.000001");
@@ -609,8 +613,7 @@ test("the picker searches folders under the base, and creates a new one where it
   view = await tap(view, "picker_up", "up");
   assert.ok(view.blocks.some((b: any) => b.block_id === "search"));
   await startIn(await useFolder(view, searched("gamma/deep")));
-  const greeting = await pickerFor("910.000001");
-  assert.match((await waitFor(() => calls("chat.update").find((c) => c.params.ts === greeting.ts && c.params.text.includes("💬")))).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
+  assert.match((await headerIn("910.000001")).params.text, new RegExp(`^📁 \`${join(base, "gamma/deep")}\``));
   await turnEnded("910.000001");
 });
 
@@ -672,7 +675,7 @@ test("Recent folders in step 1; step 2 offers the folder's sessions, continued i
 
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "carry on"));
   assert.deepEqual(agentLog().filter((e) => e.m === "load").at(-1), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
-  const head = await waitFor(() => calls("chat.update").find((c) => c.params.ts === msg.ts && c.params.text.includes("💬"))?.params.text);
+  const head = (await headerIn("300.000001")).params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 *Session ses_1* · \`ses_1\`\n↩️ <https://example.slack.com/archives/D_UPEPE/p100000001|previous thread>`);
   // The last exchanges, out of their envelopes, each turn its answer only; the history itself is not re-posted.
   const recap = posts.find((p) => p.params.thread_ts === "300.000001" && p.params.markdown_text?.includes("Session recap"))!.params.markdown_text;
@@ -931,7 +934,7 @@ test("a reply without edits ends with its folder and model, not in a git repo no
   await slack.emit("events_api", slack.dm("UPEPE", "hi again", { ts: "930.000002", thread_ts: "930.000001" }));
   await turnEnded("930.000002");
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end, [{ type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }]);
+  assert.deepEqual(end, [{ type: "divider" }, { type: "context", elements: [{ type: "mrkdwn", text: "📁 `alpha` · Model two · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }]);
 });
 
 // A message in #dev, and a tap in a channel.
@@ -1029,7 +1032,7 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   await turnEnded("960.000002");
   // The context bar shows folder, branch and model: the footer only context and cost.
   const footer = JSON.parse(since(plain).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.equal(footer[0].elements[0].text, "*Context* 24k / 200k (12%) · *Cost* $0.012");
+  assert.equal(footer[1].elements[0].text, "*Context* 24k / 200k (12%) · *Cost* $0.012");
   await inCode(cc, "in a thread", { ts: "960.000003", thread_ts: "960.000002" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "in a thread" && e.sessionId === ccSession));
   await turnEnded("960.000003");
@@ -1099,7 +1102,7 @@ test("a turn that edits in a git folder sets the code channel's Changes tab to t
   assert.match(content, /^diff --git a\/big\.py b\/big\.py\n[\s\S]*\n-old\n\+new\ndiff --git a\/done\.txt b\/done\.txt\n[\s\S]*\n\+committed\n$/);
   await turnEnded("963.000001");
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.deepEqual(end[0], { type: "context", elements: [{ type: "mrkdwn", text: "1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }); // the bar has the rest
+  assert.deepEqual(end[1], { type: "context", elements: [{ type: "mrkdwn", text: "1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] }); // the bar has the rest
 });
 
 test("$done closes a code channel: a summary, then the channel archived with it; elsewhere it explains", async () => {

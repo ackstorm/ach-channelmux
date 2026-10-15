@@ -98,7 +98,7 @@ interface Pending {
   files?: any[];
   user?: string;
   ts?: string;
-  picker?: string; // ts of the greeting in the thread, which becomes its header
+  picker?: string; // ts of the greeting: in a DM's main view, deleted at start; elsewhere in the thread, its header
   top?: boolean; // the session's messages go in the channel itself (a Slack code channel), not in a thread
 }
 
@@ -690,7 +690,7 @@ export function createDaemon(cfg: DaemonConfig) {
         const edits = turnEdits.get(t.sessionId);
         turnEdits.delete(t.sessionId);
         const line = await footer(t, edits);
-        await out.end(line ? [{ type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
+        await out.end(line ? [{ type: "divider" }, { type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
         // The whole turn's changes as one diff snippet: the cards list the tools, not their diffs.
         const diffs = turnDiffs.get(t.sessionId);
         turnDiffs.delete(t.sessionId);
@@ -994,8 +994,11 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(t.sessionId, t);
     save();
     await contextBar(t);
-    // The greeting becomes the header; a new one is posted if it is gone.
-    const shown = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, ...headed(head) }).then(() => true, () => false));
+    // The greeting becomes the header; a new one is posted if it is gone. In a DM it leaves the main view: the header
+    // goes in the thread.
+    const inMain = isDM(p.channel) && !first.top;
+    if (inMain && first.picker) await slack.chat.delete({ channel: p.channel, ts: first.picker }).catch(() => {});
+    const shown = !inMain && first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, ...headed(head) }).then(() => true, () => false));
     if (!shown) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), ...headed(head), unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
@@ -1303,15 +1306,15 @@ export function createDaemon(cfg: DaemonConfig) {
     await say(where, "This thread has no agent session. Send a new message to start one.");
   });
 
-  // A new message waits for the picker: a greeting in its thread (in a code channel, top-level) whose button opens
-  // the modal. Its first reply notifies; the main view keeps only the message.
+  // A new message waits for the picker: a greeting whose button opens the modal, in a DM's main view (no thread to
+  // open first) or a code channel, else in the message's thread.
   async function offerPicker(p: Pending & { ts: string }, key = p.ts) {
     pending.set(key, p);
     save();
     // A greeting by first name, then what to do: this message is not the agent, it only opens one.
     const name = (await person(p.user)).first;
     const hi = `👋 Hi${name ? ` ${name}` : ""}! Pick the folder to work in, then the session.`;
-    const r: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.top ? undefined : p.ts, text: hi, blocks: [
+    const r: any = await slack.chat.postMessage({ channel: p.channel, thread_ts: p.top || isDM(p.channel) ? undefined : p.ts, text: hi, blocks: [
       section(`${hi}\nYour message goes to the agent once it starts.`),
       { type: "actions", elements: [{ ...button("📂 Choose folder", "picker_open_modal", key), style: "primary" }] },
     ] as any });
