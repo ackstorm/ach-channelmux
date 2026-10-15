@@ -211,7 +211,7 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   const header = await headerIn("100.000001");
   const head = header.params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
-  assert.deepEqual(JSON.parse(header.params.blocks).map((b: any) => b.type), ["section", "divider"]); // a rule under the header
+  assert.equal(header.params.blocks, undefined); // plain text: no rule under it
   await turnEnded("100.000001");
   assert.equal(calls("reactions.add").length, 0); // no outcome reaction on the message
   const firstStatus = calls("agents.sessions.setStatus")[0];
