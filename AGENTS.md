@@ -53,5 +53,5 @@ Slack ⇄ relay (one bot token: the trust boundary) ⇄ N daemons (one active pe
   otherwise a new stream opens under the question.
 - ❌ `chat.postMessage` with both `text` and `markdown_text`: Slack refuses it. ✅ One of them.
 - ❌ e2e tests waiting on the mock agent's log before the next command. ✅ Wait for the daemon's own signal (its post,
-  or `turnEnded`: the ✅ reaction comes last). Tests run in sequence and share state.
+  or `turnEnded`: the `turn_ended` log line comes last). Tests run in sequence and share state.
 - ❌ Reading or printing the bot token to test against real Slack. ✅ Pipe it from the k8s secret into `curl -H @-`.
