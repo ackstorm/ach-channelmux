@@ -395,6 +395,18 @@ test("a status line stays 2 s before the next replaces it; clearing it does not 
   assert.deepEqual(lines(calls), ["line: Running execute…", "line: Running read…", "line: "]);
 });
 
+test("a long status line is cut to Slack's 50 characters", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  await out.tool("x", { title: `npm test -- ${"a".repeat(80)}`, status: "in_progress" });
+  out.text("Done.");
+  await out.end();
+  const shown = calls.find((c) => c.method === "assistant.threads.setStatus")!.params;
+  assert.equal(shown.status.length, 50);
+  assert.ok(shown.status.startsWith("Running npm test -- a") && shown.status.endsWith("…"));
+  assert.equal(shown.loading_messages[0], shown.status);
+});
+
 test("a stretch cut by a rollover keeps its summary in the first message, counting there; the new one shows the running tool", async () => {
   const { api, calls, failNext } = failingOnce("msg_too_long");
   const out = createOutput(api, where);

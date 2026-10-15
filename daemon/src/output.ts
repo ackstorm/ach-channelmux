@@ -25,6 +25,8 @@ const WORKING_MS = 15_000;
 // with msg_too_long; the margins are deliberate.
 const TITLE_MAX = 200;
 const OUTPUT_MAX = 500;
+// A status line: Slack refuses a longer loading_messages entry (invalid_arguments, seen 2026-10-15).
+const LINE_MAX = 50;
 
 /** What a tool card shows. Missing fields keep their earlier value. */
 export interface ToolInfo {
@@ -487,7 +489,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
   // What the status line should say: set now, shown when the stream allows it.
   function say(text: string) {
-    line = clip(text, TITLE_MAX);
+    line = clip(text, LINE_MAX);
     run(showLine);
   }
   // A card's update, or null when it shows nothing new.
