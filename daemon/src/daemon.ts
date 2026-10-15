@@ -1403,7 +1403,15 @@ export function createDaemon(cfg: DaemonConfig) {
     const o = t && selects(t).find((x) => `cfg:${x.id}` === a.action_id);
     if (!o || a.selected_option.value === o.currentValue) return;
     try {
-      const r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
+      const before = selects(t);
+      let r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
+      // A new model sets the effort back to the agent's default (opencode): the one in use is set again where offered.
+      for (const was of o.category === "model" ? before.filter((x) => x.category === "thought_level") : []) {
+        const now: any = r.configOptions.find((x) => x.id === was.id);
+        if (now && now.currentValue !== was.currentValue && choicesOf(now).some((c) => c.value === was.currentValue)) {
+          r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: was.id, value: was.currentValue });
+        }
+      }
       setConfigs(t.sessionId, r.configOptions);
     } catch (err: any) {
       await say(t, `⚠️ Could not change ${o.name}: ${err?.message ?? err}`);

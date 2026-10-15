@@ -690,10 +690,15 @@ test("$ commands: $help, $model changes a setting, $compact, the agent's $review
   assert.doesNotMatch(panel.params.text, /Session Mode/);
   const menu = JSON.parse(panel.params.blocks).find((b: any) => b.accessory?.action_id === "cfg:model");
   assert.deepEqual([menu.text.text, menu.accessory.initial_option.value], ["*Model*", "m1"]);
+  await click({ ts: panel.ts, thread_ts: T }, { type: "static_select", action_id: "cfg:effort", selected_option: { value: "high" } });
+  await waitFor(() => agentLog().some((e) => e.m === "config" && e.configId === "effort" && e.value === "high"));
   await click({ ts: panel.ts, thread_ts: T }, { type: "static_select", action_id: "cfg:model", selected_option: { value: "m2" } });
   await waitFor(() => agentLog().some((e) => e.m === "config" && e.configId === "model" && e.value === "m2"));
   const redrawn = await waitFor(() => calls("chat.update").find((c) => c.params.ts === panel.ts && /`Model two`/.test(c.params.text)));
   assert.equal(JSON.parse(redrawn.params.blocks).find((b: any) => b.accessory?.action_id === "cfg:model").accessory.initial_option.value, "m2");
+  // The agent sets the effort back to default with a new model: the one picked is set again.
+  assert.deepEqual(agentLog().filter((e) => e.m === "config").slice(-2), [{ m: "config", configId: "model", value: "m2" }, { m: "config", configId: "effort", value: "high" }]);
+  assert.equal(JSON.parse(redrawn.params.blocks).find((b: any) => b.accessory?.action_id === "cfg:effort").accessory.initial_option.value, "high");
 
   await say("$compact", "500.000004");
   await waitFor(() => agentLog().slice(before).some((e) => e.m === "prompt" && e.text === "/compact"));
