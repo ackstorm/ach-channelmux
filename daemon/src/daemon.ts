@@ -937,9 +937,16 @@ export function createDaemon(cfg: DaemonConfig) {
     ]);
   }
 
-  // A thread's header: its folder, its session (title and id, to resume it elsewhere), its previous thread.
-  const header = (cwd: string, title: string, id: string, before?: string) =>
-    `📁 \`${cwd}\`\n💬 ${title} · \`${id}\`${before ? `\n↩️ <${before}|previous thread>` : ""}`;
+  // A thread's header: its folder, its session (title and id, to resume it elsewhere), its previous thread. It shows
+  // as a folded card ("snake-retro · New session"), apart from the conversation; the text is the notification's.
+  const header = (cwd: string, title: string, id: string, before?: string) => {
+    const t = (text: string, style?: Record<string, boolean>) => ({ type: "text", text, ...(style && { style }) });
+    const details = [t("📁 "), t(cwd, { code: true }), t("\n💬 "), t(id, { code: true }), ...(before ? [t("\n↩️ "), { type: "link", url: before, text: "previous thread" }] : [])];
+    return {
+      text: `📁 \`${cwd}\`\n💬 ${title} · \`${id}\`${before ? `\n↩️ <${before}|previous thread>` : ""}`,
+      blocks: [{ type: "task_card", task_id: "header", title: `${basename(cwd)} · ${title.replaceAll("*", "")}`.slice(0, 200), status: "complete", output: { type: "rich_text", elements: [{ type: "rich_text_section", elements: details }] } }],
+    };
+  };
 
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
@@ -950,7 +957,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const where = { channel: p.channel, thread: p.thread, top: first.top, ...(first.top && { opened: first.ts }) };
     const cwd = abs(p.cwd);
     let t: Thread;
-    let head: string;
+    let head: ReturnType<typeof header>;
     let recap = "";
     try {
       if (choice === "new") {
@@ -996,8 +1003,8 @@ export function createDaemon(cfg: DaemonConfig) {
     // goes in the thread.
     const inMain = isDM(p.channel) && !first.top;
     if (inMain && first.picker) await slack.chat.delete({ channel: p.channel, ts: first.picker }).catch(() => {});
-    const shown = !inMain && first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, text: head, blocks: [] }).then(() => true, () => false));
-    if (!shown) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), text: head, unfurl_links: false });
+    const shown = !inMain && first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, ...head }).then(() => true, () => false));
+    if (!shown) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), ...head, unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
@@ -1193,7 +1200,8 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, fresh);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await say(t, `🧹 ${header(t.cwd, "New session", sessionId)}`);
+    const head = header(t.cwd, "New session", sessionId);
+    await say(t, `🧹 ${head.text}`, head.blocks);
     await contextBar(fresh); // its model may differ
   }
 

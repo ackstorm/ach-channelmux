@@ -211,7 +211,8 @@ test("a new DM gets the picker in the main view; browsing to a folder and starti
   const header = await headerIn("100.000001");
   const head = header.params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
-  assert.equal(header.params.blocks, undefined); // plain text: no rule under it
+  const card = JSON.parse(header.params.blocks)[0]; // a folded card, apart from the conversation
+  assert.deepEqual([card.type, card.title, card.status], ["task_card", "beta · New session", "complete"]);
   await turnEnded("100.000001");
   assert.equal(calls("reactions.add").length, 0); // no outcome reaction on the message
   const firstStatus = calls("agents.sessions.setStatus")[0];
