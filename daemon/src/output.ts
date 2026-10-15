@@ -3,7 +3,7 @@
 // two texts) is one task card. If a stream cannot start or breaks (feature off, or the relay refusing
 // it because the shared rate budget is spent), the rest of the turn goes out as plain messages, one per
 // finished text segment (cut at tool calls), split to Slack's 12k limit. Above the reply box, the
-// thread's status line says what the agent is doing ("🔧 Tool use: npm test", "Thinking · <heading>…", or a working
+// thread's status line says what the agent is doing ("Tool use: npm test", "Thinking · <heading>…", or a working
 // phrase) until the reply's text starts.
 
 import { realpathSync } from "node:fs";
@@ -466,7 +466,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     // model working on what came back.
     void emit(cs);
     const running = done(id) ? s.tools.find((t) => !done(t)) : id;
-    if (!s.closed) say(running ? `🔧 Tool use: ${tools.get(running)!.title}` : phrase);
+    if (!s.closed) say(running ? `Tool use: ${tools.get(running)!.title}` : phrase);
     return chain;
   }
 
