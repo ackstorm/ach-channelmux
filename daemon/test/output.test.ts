@@ -4,6 +4,7 @@ import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { changed, createOutput, describePermission, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
+import { WORKING } from "../src/working.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
   const calls: { method: string; params: any }[] = [];
@@ -150,9 +151,7 @@ test("a stretch is one card: thinking, then a count of the tools before the one 
   await out.end();
   const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.id} ${c.title}:${c.status}`);
   assert.deepEqual(titles, [
-    "s1 Thinking…:in_progress",
-    "s1 Thinking · Reading:in_progress",
-    "s1 Thought for 10s:in_progress", // grep runs: the status line names it
+    "s1 Thought for 10s:in_progress", // no card while it thinks; grep runs: the status line names it
     "s1 Thought for 10s · 1 tool used:in_progress",
     "s1 Thought for 10s · 2 tools used · 1 failed:in_progress",
     "s1 Thought for 10s · 2 tools used · 1 failed:complete", // text ends the stretch; never "error"
@@ -161,7 +160,7 @@ test("a stretch is one card: thinking, then a count of the tools before the one 
   ]);
 });
 
-test("a stopped message is rewritten with one card per stretch: its thinking in bold and its tools, no running card", async () => {
+test("a stopped message is rewritten with one card per stretch: its thinking in bold, a rule, then its tools", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
   out.thought("**Reading**\n\nThe user wants X.");
@@ -174,6 +173,8 @@ test("a stopped message is rewritten with one card per stretch: its thinking in 
   assert.equal(blocks[0].status, "complete");
   assert.deepEqual(blocks[0].output.elements, [
     { type: "rich_text_section", elements: [{ type: "text", text: "Reading", style: { bold: true } }, { type: "text", text: "\n\nThe user wants X." }] },
+    { type: "rich_text_section", elements: [{ type: "text", text: "\n────────────\n" }] },
+    { type: "rich_text_section", elements: [{ type: "text", text: "Used tools:", style: { bold: true } }] },
     { type: "rich_text_list", style: "bullet", elements: [
       { type: "rich_text_section", elements: [{ type: "text", text: "grep X", style: { code: true } }] },
       { type: "rich_text_section", elements: [{ type: "text", text: "ls", style: { code: true } }, { type: "text", text: " (failed)", style: { italic: true } }] },
@@ -355,8 +356,9 @@ const lines = (calls: { method: string; params: any }[]) =>
 test("the status line says what runs until the reply's text starts; Slack shows its own after that", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where, { lineMinMs: 0 });
+  await out.begin();
   out.thought("**Planning**\n\nfirst ls.");
-  await new Promise((r) => setTimeout(r, 10)); // the stream opens with the thinking card
+  await new Promise((r) => setTimeout(r, 10));
   await out.tool("l", { title: "ls -la", status: "in_progress" });
   await out.tool("l", { status: "completed" });
   await out.tool("t", { title: "npm test", status: "in_progress" });
@@ -365,13 +367,14 @@ test("the status line says what runs until the reply's text starts; Slack shows 
   await out.end();
   const steps = calls.filter((c) => c.method === "assistant.threads.setStatus" || c.method === "chat.startStream" || (c.method === "agents.sessions.setStatus" && c.params.status === "active"))
     .map((c) => (c.method === "assistant.threads.setStatus" ? `line: ${c.params.status}` : c.method === "chat.startStream" ? "stream" : "active"));
+  const working = steps[5].slice("line: ".length);
+  assert.ok(WORKING.includes(working), working);
   assert.deepEqual(steps, [
-    "stream", "active", // the line shows only with the session active, after the stream starts
-    "line: Thinking · Planning…", // the heading the model is on
-    "line: Running ls -la…",
-    "line: Thinking…", // the tool is done: the model reads what came back
+    "active", "line: Thinking · Planning…", // no message yet: the line shows with the session active, not "processing"
+    "stream", "active", "line: Running ls -la…", // the card opens a stream, which needs the session set active again
+    `line: ${working}`, // the tool is done: the model works on what came back
     "line: Running npm test…",
-    "line: Thinking…",
+    `line: ${working}`,
     "line: ", // text ends the stretch: the line is cleared, Slack's own shows while the text streams
   ]);
   assert.ok(calls.filter((c) => c.method === "assistant.threads.setStatus").every((c) => !c.params.status || c.params.loading_messages?.[0] === c.params.status));
@@ -422,23 +425,22 @@ test("a tool the agent reports as pending goes out running: a pending card shows
   assert.ok(!statuses.includes("pending"), statuses.join());
 });
 
-test("while the model thinks, its card shows the heading it is on; the finished card says for how long", async (t) => {
+test("while the model thinks, the status line shows the heading it is on; its card then says for how long", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
+  const settle = () => new Promise((r) => setImmediate(r)); // the line goes out after what is queued before it
   out.thought("**Testing Slack Interface**\n\nI'm checking");
   out.thought(" the tools.\n\n**Planning ");
+  await settle();
   t.mock.timers.tick(1_000);
   out.thought("the Steps**\n\nFirst ls.");
   out.thought("\n\n**Too Soon**\n\nskipped title"); // under a second after the last one: not sent
-  t.mock.timers.tick(1_000);
+  t.mock.timers.tick(1_000); // the line held 2 s goes now
+  await settle();
   out.text("Done.");
   await out.end();
   const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.title}:${c.status}`);
-  assert.deepEqual(titles, [
-    "Thinking…:in_progress",
-    "Thinking · Testing Slack Interface:in_progress",
-    "Thinking · Planning the Steps:in_progress",
-    "Thought for 2s:complete",
-  ]);
+  assert.deepEqual(titles, ["Thought for 2s:complete"]); // no card while it thinks
+  assert.deepEqual(lines(calls).slice(0, 2), ["line: Thinking · Testing Slack Interface…", "line: Thinking · Planning the Steps…"]);
 });

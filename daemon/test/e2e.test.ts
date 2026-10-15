@@ -11,6 +11,7 @@ import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-slack.ts";
 import { createDaemon, short, trimWav } from "../src/daemon.ts";
+import { WORKING } from "../src/working.ts";
 
 const DM = "D_UPEPE";
 const DEV = "C_DEV"; // #dev: its mentions go to this daemon
@@ -204,9 +205,9 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
   const updates = calls("chat.update").filter((c) => c.params.ts === msg.ts);
   assert.equal(updates[0].params.text, "⏳ Starting a new session in `beta`…");
   const header = updates.at(-1)!;
-  assert.equal(header.params.blocks, "[]");
   const head = header.params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
+  assert.deepEqual(JSON.parse(header.params.blocks).map((b: any) => b.type), ["section", "divider"]); // a rule under the header
   await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000001" && c.params.name === "white_check_mark"));
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
@@ -344,12 +345,15 @@ test("Slack's escaped & < > reach the agent as typed", async () => {
   await turnEnded("100.000053");
 });
 
-test("the model's thinking shows as a Thinking card", async () => {
+test("while the model thinks the status line says so; its card shows when the thinking ends", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "think", { ts: "100.000017", thread_ts: "100.000001" }));
   await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
   const cards = streamed(since(n)).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thinking…", "in_progress", undefined], ["Thought for 1s", "complete", "Weighing it."]]);
+  assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thought for 1s", "complete", "Weighing it."]]);
+  const line = since(n).find((c) => c.method === "assistant.threads.setStatus")!;
+  assert.ok(since(n).indexOf(line) < since(n).findIndex((c) => c.method === "chat.startStream")); // before any message
+  assert.ok(WORKING.includes(line.params.status), line.params.status);
 });
 
 test("a failed turn offers Retry, which sends the same message again", async () => {

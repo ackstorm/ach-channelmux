@@ -3,9 +3,11 @@
 // two texts) is one task card. If a stream cannot start or breaks (feature off, or the relay refusing
 // it because the shared rate budget is spent), the rest of the turn goes out as plain messages, one per
 // finished text segment (cut at tool calls), split to Slack's 12k limit. Above the reply box, the
-// thread's status line says what the agent is doing ("Running npm test…") until the reply's text starts.
+// thread's status line says what the agent is doing ("Running npm test…", "Thinking · <heading>…", or a working
+// phrase) until the reply's text starts.
 
 import { realpathSync } from "node:fs";
+import { WORKING } from "./working.ts";
 
 export const MAX_TEXT = 12_000;
 // chat.appendStream is Tier 4 (100+/min) shared by every user: at most one append a second.
@@ -16,6 +18,8 @@ const STREAM_MAX_AGE_MS = 240_000;
 const STATUS_REFRESH_MS = 30 * 60_000;
 // A status line stays at least this long before another replaces it: a fast tool's line flashed by unread.
 const LINE_MIN_MS = 2_000;
+// The working phrase on the status line changes this often.
+const WORKING_MS = 15_000;
 
 // task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
 // with msg_too_long; the margins are deliberate.
@@ -207,10 +211,9 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 // A stretch is the model's thinking and the tools it calls between two texts, or up to a question: card s<n> sums it
 // up, and stays in the message that first showed it. The tool running now is in the status line, not in a card:
 // a stream cannot remove a card, and one for the running tool stayed under the reply until the message stopped.
-type Entry = { thought: string } | { tool: string };
-type Stretch = { n: number; entries: Entry[]; tools: string[]; thought: boolean; thinkMs: number; closed: boolean; out: string; sent: number };
+type Stretch = { n: number; thoughts: string[]; tools: string[]; thought: boolean; thinkMs: number; closed: boolean; out: string; sent: number };
 
-export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number; lineMinMs?: number } = {}) {
+export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number; lineMinMs?: number; workingMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
   let streaming = true; // until a stream call fails, for the rest of this turn
@@ -239,6 +242,12 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let line = "";
   let lineShown = "";
   let lineAt = 0; // when the line shown was set
+  const pick = (not?: string) => {
+    const w = WORKING.filter((x) => x !== not);
+    return w[Math.floor(Math.random() * w.length)];
+  };
+  let phrase = pick(); // the line while the agent works on nothing more specific
+  let rotate: ReturnType<typeof setInterval> | undefined;
   let lineTimer: ReturnType<typeof setTimeout> | undefined;
   const shownIn = new Map<string, string>(); // card id -> the message it is in
   const stopped = new Map<string, Layout>(); // earlier messages of the turn, by ts
@@ -263,18 +272,16 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   const stretchOfCard = (card: string) => stretches[Number(card.slice(1)) - 1];
   const done = (t: string) => ["completed", "failed"].includes(tools.get(t)!.status);
 
-  // What a stretch did, in order: each thought, and each run of tools as a list of their titles.
+  // What a stretch did: its thinking, then a rule and the tools it used, as a list of their titles.
   function inside(s: Stretch) {
-    const elements: any[] = [];
-    for (const e of s.entries) {
-      if ("thought" in e) elements.push({ type: "rich_text_section", elements: bold(clip(e.thought, THOUGHT_MAX)) });
-      else {
-        const t = tools.get(e.tool)!;
-        const item = { type: "rich_text_section", elements: [txt(t.title, { code: true }), ...(t.status === "failed" ? [txt(" (failed)", { italic: true })] : [])] };
-        const last = elements.at(-1);
-        if (last?.type === "rich_text_list") last.elements.push(item);
-        else elements.push({ type: "rich_text_list", style: "bullet", elements: [item] });
-      }
+    const elements: any[] = s.thoughts.map((t) => ({ type: "rich_text_section", elements: bold(clip(t, THOUGHT_MAX)) }));
+    if (s.tools.length) {
+      if (elements.length) elements.push({ type: "rich_text_section", elements: [txt("\n────────────\n")] });
+      elements.push({ type: "rich_text_section", elements: [txt("Used tools:", { bold: true })] });
+      elements.push({ type: "rich_text_list", style: "bullet", elements: s.tools.map((id) => {
+        const t = tools.get(id)!;
+        return { type: "rich_text_section", elements: [txt(t.title, { code: true }), ...(t.status === "failed" ? [txt(" (failed)", { italic: true })] : [])] };
+      }) });
     }
     return elements.length ? { output: { type: "rich_text", elements } } : {};
   }
@@ -333,9 +340,10 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     lineShown = "";
     await status("active");
   }
-  // The status line as it should be now; Slack shows its own once the message has text.
+  // The status line as it should be now; Slack shows its own once the message has text. Before a stream opens
+  // (the model thinking), it shows only with the session not "processing".
   async function showLine() {
-    const want = stream && !sent.trim() ? line : "";
+    const want = streaming && !(stream && sent.trim()) ? line : "";
     if (want === lineShown || (!want && !lineShown && !stream)) return;
     // Another line waits its turn; clearing does not (Slack's own takes over, or the turn ends).
     const wait = lineAt + (opts.lineMinMs ?? LINE_MIN_MS) - Date.now();
@@ -344,6 +352,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       lineTimer = setTimeout(() => run(showLine), wait);
       return;
     }
+    if (want && !lineShown && !stream) await status("active");
     lineShown = want;
     lineAt = Date.now();
     await api("assistant.threads.setStatus", { channel_id: channel, thread_ts: thread, status: want, ...(want && { loading_messages: [want] }) })
@@ -437,7 +446,6 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     if (!s) {
       s = current ??= newStretch();
       s.tools.push(id);
-      s.entries.push({ tool: id });
       stretchOf.set(id, s);
     }
     const cs = cards(s);
@@ -446,23 +454,24 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       const ts = shownIn.get(`s${s.n}`);
       if (ts && stopped.has(ts)) run(() => rewrite(ts, stopped.get(ts)!));
     }
-    // A finished tool leaves another one running, or the model thinking about what came back.
+    // The card first: the stream it may open shows the line. A finished tool leaves another one running, or the
+    // model working on what came back.
+    void emit(cs);
     const running = done(id) ? s.tools.find((t) => !done(t)) : id;
-    if (!s.closed) say(running ? `Running ${tools.get(running)!.title}…` : "Thinking…");
-    return emit(cs);
+    if (!s.closed) say(running ? `Running ${tools.get(running)!.title}…` : phrase);
+    return chain;
   }
 
   function newStretch() {
-    const s: Stretch = { n: stretches.length + 1, entries: [], tools: [], thought: false, thinkMs: 0, closed: false, out: "", sent: 0 };
+    const s: Stretch = { n: stretches.length + 1, thoughts: [], tools: [], thought: false, thinkMs: 0, closed: false, out: "", sent: 0 };
     stretches.push(s);
     return s;
   }
 
-  // The summary card: thinking now; the one tool of a stretch without thinking; else what the stretch did, counting
-  // the tools before the one running. It spins until the stretch ends.
+  // The summary card: the one tool of a stretch without thinking; else what the stretch did, counting the tools
+  // before the one running. It spins until the stretch ends.
   function head(s: Stretch) {
     const status = s.closed ? "complete" : "in_progress";
-    if (thinking && s === current) return { title: clip(thinking.heading ? `Thinking · ${thinking.heading}` : "Thinking…", TITLE_MAX), status };
     if (!s.thought && !s.closed && s.tools.length === 1) return { title: clip(`${USING}${tools.get(s.tools[0])!.title}`, TITLE_MAX), status };
     const running = s.closed ? undefined : s.tools.find((t) => !done(t));
     const counted = s.tools.filter((t) => t !== running);
@@ -538,7 +547,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     current.thinkMs += Date.now() - since;
     const body = text.trim();
     if (body) {
-      current.entries.push({ thought: body });
+      current.thoughts.push(body);
       const tail = body.replaceAll("\`\`\`", "ˋˋˋ");
       current.out += `${current.out ? "\n\n" : ""}${tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail}`;
     }
@@ -548,6 +557,11 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   return {
     begin: () => {
       refresh = setInterval(() => !suspended && run(() => status("processing")), opts.statusRefreshMs ?? STATUS_REFRESH_MS);
+      rotate = setInterval(() => {
+        const was = phrase;
+        phrase = pick(was);
+        if (line === was) say(phrase);
+      }, opts.workingMs ?? WORKING_MS);
       return run(() => status("processing", opts.title ? { title: opts.title.slice(0, 200) } : {}));
     },
     text(s: string) {
@@ -562,24 +576,21 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       pending += s;
       if (streaming && !timer) timer = setTimeout(() => run(flush), FLUSH_MS);
     },
-    // While the model thinks, its card's title follows the heading it is on ("**Planning the Steps**", as Gemini
-    // writes them), at most once a second.
+    // While the model thinks, the status line follows the heading it is on ("**Planning the Steps**", as Gemini
+    // writes them), at most once a second; its card shows when the thinking ends.
     thought(s: string) {
       if (!thinking) {
-        const st = (current ??= newStretch());
-        st.thought = true;
+        (current ??= newStretch()).thought = true;
         thinking = { text: "", heading: "", shown: -Infinity, since: Date.now() }; // its first heading shows at once
         afterTool = true;
         quiet = true;
-        say("Thinking…");
-        void emit(cards(st));
+        say(phrase);
       }
       thinking.text += s;
       const heading = [...thinking.text.matchAll(/\*\*([^*\n]+)\*\*/g)].at(-1)?.[1].trim() ?? "";
       if (heading && heading !== thinking.heading && Date.now() - thinking.shown >= FLUSH_MS) {
         Object.assign(thinking, { heading, shown: Date.now() });
         say(`Thinking · ${heading}…`);
-        void emit(cards(current!));
       }
     },
     tool,
@@ -607,6 +618,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     /** Blocks (e.g. the footer line) go under the streamed reply; without a stream they are dropped. */
     end: (blocks?: unknown[]) => {
       clearInterval(refresh);
+      clearInterval(rotate);
       close();
       suspended = false;
       return run(async () => {

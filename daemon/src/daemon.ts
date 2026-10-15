@@ -943,6 +943,8 @@ export function createDaemon(cfg: DaemonConfig) {
   // A thread's header: its folder, its session (title and id, to resume it elsewhere), its previous thread.
   const header = (cwd: string, title: string, id: string, before?: string) =>
     `📁 \`${cwd}\`\n💬 ${title} · \`${id}\`${before ? `\n↩️ <${before}|previous thread>` : ""}`;
+  // The header as posted: a rule under it, between it and the turn.
+  const headed = (text: string) => ({ text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }, { type: "divider" }] });
 
   // Runs the thread's first message in the picked session: a new one, or an existing one moved here.
   async function start(p: Pick, choice: string) {
@@ -996,8 +998,8 @@ export function createDaemon(cfg: DaemonConfig) {
     save();
     await contextBar(t);
     // The greeting becomes the header; a new one is posted if it is gone.
-    const headed = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, text: head, blocks: [] }).then(() => true, () => false));
-    if (!headed) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), text: head, unfurl_links: false });
+    const shown = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, ...headed(head) }).then(() => true, () => false));
+    if (!shown) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), ...headed(head), unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
     // No reaction on a code channel's first message: it is in the channel it was opened from.
     await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.top ? undefined : first.ts }); // Slack shows ":" and "·" as "_" in titles
@@ -1194,7 +1196,8 @@ export function createDaemon(cfg: DaemonConfig) {
     bySession.set(sessionId, fresh);
     loaded.set(sessionId, Promise.resolve());
     save();
-    await say(t, `🧹 ${header(t.cwd, "New session", sessionId)}`);
+    const h = headed(`🧹 ${header(t.cwd, "New session", sessionId)}`);
+    await say(t, h.text, h.blocks);
     await contextBar(fresh); // its model may differ
   }
 
