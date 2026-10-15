@@ -79,7 +79,6 @@ export const WORKING = [
   "🎵 Harmonizing…",
   "🐣 Hatching…",
   "🐑 Herding…",
-  "🦢 Honking…",
   "🎉 Hullaballooing…",
   "🔬 Hypothesizing…",
   "🚀 Hyperspacing…",

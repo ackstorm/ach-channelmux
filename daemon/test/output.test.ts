@@ -42,11 +42,15 @@ test("a turn streams text and tool cards into one message, then stops the stream
   await out.end();
   assert.deepEqual(calls.map((c) => c.method + (c.params.status ? `:${c.params.status}` : "")), [
     "agents.sessions.setStatus:processing", "chat.startStream", "agents.sessions.setStatus:active", // active: our status line shows, not Slack's
-    "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update",
+    "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.appendStream", "chat.stopStream", "chat.update",
   ]); // the message has text from the start: no status line of ours
   assert.deepEqual(calls[0].params, { channel_id: "D1", thread_ts: "1.0", status: "processing", title: "repo: fix the bug" });
   assert.equal(chunks(calls).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["Using tool: ls", "in_progress"], ["1 tool used", "complete"]]); // pending goes as running
+  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status, c.output]), [
+    ["Using tool: ls", "complete", undefined], // never spinning: the status line says it runs
+    ["Using tool: ls", "complete", "`ls`"], // done: it joins the card's details
+    ["1 tool used", "complete", undefined],
+  ]);
 });
 
 test("with a slow Slack, text that comes while cards wait does not jump ahead of them or of the text before them", async () => {
@@ -64,7 +68,7 @@ test("with a slow Slack, text that comes while cards wait does not jump ahead of
   out.text("Done.");
   await out.end();
   const order = calls.flatMap((c) => c.params.chunks ?? []).map((x: any) => (x.type === "markdown_text" ? x.text.trim() : x.title));
-  assert.deepEqual(order, ["On it, checking.", "Using tool: ls", "1 tool used", "Done."]);
+  assert.deepEqual(order, ["On it, checking.", "Using tool: ls", "Using tool: ls", "1 tool used", "Done."]);
 });
 
 test("blocks given to end() go under the streamed reply; without a stream there is nothing to attach them to", async () => {
@@ -135,7 +139,7 @@ test("a question ends the stretch: its tool finishing after the answer updates t
   assert.ok(!second.includes("s1") && !second.includes("r1"), String(second));
 });
 
-test("a stretch is one card: thinking, then a count of the tools before the one running; it spins until text ends it", async (t) => {
+test("a stretch is one card: thinking, then a count of the tools before the one running; finished tools join its details", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
@@ -149,21 +153,20 @@ test("a stretch is one card: thinking, then a count of the tools before the one 
   await out.tool("c", { title: "cat y", status: "completed" });
   out.text("Done.");
   await out.end();
-  const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.id} ${c.title}:${c.status}`);
+  const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.id} ${c.title}:${c.status}${c.output ? ` + ${c.output.replaceAll("\n", "⏎")}` : ""}`);
   assert.deepEqual(titles, [
-    "s1 Thought for 10s:in_progress", // no card while it thinks; grep runs: the status line names it
-    "s1 Thought for 10s · 1 tool used:in_progress",
-    "s1 Thought for 10s · 2 tools used · 1 failed:in_progress",
-    "s1 Thought for 10s · 2 tools used · 1 failed:complete", // text ends the stretch; never "error"
-    "s2 Using tool: cat y:in_progress", // no thinking: the first tool is the card
+    "s1 Thought for 10s:complete + **Reading**⏎⏎The user wants X.", // no card while it thinks; grep runs: the status line names it
+    "s1 Thought for 10s · 1 tool used:complete + ⏎`grep X`",
+    "s1 Thought for 10s · 2 tools used · 1 failed:complete + ⏎`ls` _(failed)_", // never "error", never spinning
+    "s2 Using tool: cat y:complete + `cat y`", // no thinking: the first tool is the card
     "s2 1 tool used:complete",
   ]);
 });
 
-test("a stopped message is rewritten with one card per stretch: its thinking in bold, a rule, then its tools", async () => {
+test("a stopped message is rewritten with one card per stretch: its thinking in bold and code, a rule, then its tools", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
-  out.thought("**Reading**\n\nThe user wants X.");
+  out.thought("**Reading**\n\nThe user wants `x`.");
   await out.tool("g", { title: "grep X", status: "completed" });
   await out.tool("l", { title: "ls", status: "failed" });
   out.text("Done.");
@@ -172,9 +175,9 @@ test("a stopped message is rewritten with one card per stretch: its thinking in 
   assert.deepEqual(blocks.map((b: any) => b.type), ["task_card", "markdown"]);
   assert.equal(blocks[0].status, "complete");
   assert.deepEqual(blocks[0].output.elements, [
-    { type: "rich_text_section", elements: [{ type: "text", text: "Reading", style: { bold: true } }, { type: "text", text: "\n\nThe user wants X." }] },
+    { type: "rich_text_section", elements: [{ type: "text", text: "Reading", style: { bold: true } }, { type: "text", text: "\n\nThe user wants " }, { type: "text", text: "x", style: { code: true } }, { type: "text", text: "." }] },
     { type: "rich_text_section", elements: [{ type: "text", text: "\n────────────\n" }] },
-    { type: "rich_text_section", elements: [{ type: "text", text: "Used tools:", style: { bold: true } }] },
+    { type: "rich_text_section", elements: [{ type: "text", text: "Used tools:", style: { bold: true } }, { type: "text", text: "\n" }] },
     { type: "rich_text_list", style: "bullet", elements: [
       { type: "rich_text_section", elements: [{ type: "text", text: "grep X", style: { code: true } }] },
       { type: "rich_text_section", elements: [{ type: "text", text: "ls", style: { code: true } }, { type: "text", text: " (failed)", style: { italic: true } }] },
@@ -191,7 +194,7 @@ test("task cards get short ids and repeated identical updates are not sent", asy
   await out.tool(long, { status: "completed" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["s1", "in_progress"], ["s1", "complete"]]);
+  assert.deepEqual(tasks.map((c: any) => [c.id, c.title, c.output]), [["s1", "Using tool: ls -la", undefined], ["s1", "Using tool: ls -la", "`ls -la`"], ["s1", "1 tool used", undefined]]);
 });
 
 test("describePermission says what the agent wants to do to what", () => {
@@ -371,9 +374,9 @@ test("the status line says what runs until the reply's text starts; Slack shows 
   assert.ok(WORKING.includes(working), working);
   assert.deepEqual(steps, [
     "active", "line: Thinking · Planning…", // no message yet: the line shows with the session active, not "processing"
-    "stream", "active", "line: Running ls -la…", // the card opens a stream, which needs the session set active again
+    "stream", "active", "line: 🔧 Tool use: ls -la", // the card opens a stream, which needs the session set active again
     `line: ${working}`, // the tool is done: the model works on what came back
-    "line: Running npm test…",
+    "line: 🔧 Tool use: npm test",
     `line: ${working}`,
     "line: ", // text ends the stretch: the line is cleared, Slack's own shows while the text streams
   ]);
@@ -387,12 +390,12 @@ test("a status line stays 2 s before the next replaces it; clearing it does not 
   await out.tool("x", { status: "completed" });
   await out.tool("y", { title: "read", status: "in_progress" });
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(lines(calls), ["line: Running execute…"]); // the fast tool's line is still up
+  assert.deepEqual(lines(calls), ["line: 🔧 Tool use: execute"]); // the fast tool's line is still up
   await new Promise((r) => setTimeout(r, 60));
-  assert.deepEqual(lines(calls), ["line: Running execute…", "line: Running read…"]); // the last one wins, the ones between are skipped
+  assert.deepEqual(lines(calls), ["line: 🔧 Tool use: execute", "line: 🔧 Tool use: read"]); // the last one wins, the ones between are skipped
   out.text("Done.");
   await out.end();
-  assert.deepEqual(lines(calls), ["line: Running execute…", "line: Running read…", "line: "]);
+  assert.deepEqual(lines(calls), ["line: 🔧 Tool use: execute", "line: 🔧 Tool use: read", "line: "]);
 });
 
 test("a long status line is cut to Slack's 50 characters", async () => {
@@ -403,7 +406,7 @@ test("a long status line is cut to Slack's 50 characters", async () => {
   await out.end();
   const shown = calls.find((c) => c.method === "assistant.threads.setStatus")!.params;
   assert.equal(shown.status.length, 50);
-  assert.ok(shown.status.startsWith("Running npm test -- a") && shown.status.endsWith("…"));
+  assert.ok(shown.status.startsWith("🔧 Tool use: npm test -- a") && shown.status.endsWith("…"));
   assert.equal(shown.loading_messages[0], shown.status);
 });
 

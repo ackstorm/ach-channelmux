@@ -3,7 +3,7 @@
 // two texts) is one task card. If a stream cannot start or breaks (feature off, or the relay refusing
 // it because the shared rate budget is spent), the rest of the turn goes out as plain messages, one per
 // finished text segment (cut at tool calls), split to Slack's 12k limit. Above the reply box, the
-// thread's status line says what the agent is doing ("Running npm test…", "Thinking · <heading>…", or a working
+// thread's status line says what the agent is doing ("🔧 Tool use: npm test", "Thinking · <heading>…", or a working
 // phrase) until the reply's text starts.
 
 import { realpathSync } from "node:fs";
@@ -204,7 +204,10 @@ const USING = "Using tool: ";
 const THOUGHT_MAX = 3_000; // a rewritten card's thinking; Slack took 24k characters in a chat.update (probed 2026-10-15)
 const txt = (text: string, style?: Record<string, boolean>) => ({ type: "text", text, ...(style && { style }) });
 // "**Heading**" in the model's thinking as bold text, the rest as typed.
-const bold = (s: string) => s.split(/\*\*([^*\n]+)\*\*/).flatMap((p, i) => (p ? [txt(p, i % 2 ? { bold: true } : undefined)] : []));
+const styled = (s: string) =>
+  s.split(/\*\*([^*\n]+)\*\*/).flatMap((p, i) =>
+    i % 2 ? [txt(p, { bold: true })] : p.split(/`([^`\n]+)`/).flatMap((q, j) => (q ? [txt(q, j % 2 ? { code: true } : undefined)] : [])),
+  );
 const taskCard = (id: string, title: string, status: string, fields: Record<string, unknown>) => ({
   type: "task_card", task_id: id, title, status: status === "complete" ? "complete" : "in_progress", ...fields,
 });
@@ -276,10 +279,10 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
 
   // What a stretch did: its thinking, then a rule and the tools it used, as a list of their titles.
   function inside(s: Stretch) {
-    const elements: any[] = s.thoughts.map((t) => ({ type: "rich_text_section", elements: bold(clip(t, THOUGHT_MAX)) }));
+    const elements: any[] = s.thoughts.map((t) => ({ type: "rich_text_section", elements: styled(clip(t, THOUGHT_MAX)) }));
     if (s.tools.length) {
       if (elements.length) elements.push({ type: "rich_text_section", elements: [txt("\n────────────\n")] });
-      elements.push({ type: "rich_text_section", elements: [txt("Used tools:", { bold: true })] });
+      elements.push({ type: "rich_text_section", elements: [txt("Used tools:", { bold: true }), txt("\n")] });
       elements.push({ type: "rich_text_list", style: "bullet", elements: s.tools.map((id) => {
         const t = tools.get(id)!;
         return { type: "rich_text_section", elements: [txt(t.title, { code: true }), ...(t.status === "failed" ? [txt(" (failed)", { italic: true })] : [])] };
@@ -441,6 +444,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     };
     // Agents repeat unchanged updates; each would cost an append from the shared budget.
     if (prev && prev.title === next.title && prev.status === next.status) return chain;
+    const wasDone = prev && ["completed", "failed"].includes(prev.status);
     tools.set(id, next);
     afterTool = true;
     quiet = true;
@@ -450,6 +454,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       s.tools.push(id);
       stretchOf.set(id, s);
     }
+    // A finished tool joins the card's details, by then with its real title.
+    if (done(id) && !wasDone) s.out += `${s.out ? "\n" : ""}\`${next.title.replaceAll("`", "ˋ")}\`${next.status === "failed" ? " _(failed)_" : ""}`;
     const cs = cards(s);
     if (s.closed) {
       // Its message may have stopped already: it is rewritten with the tool as it now stands.
@@ -460,7 +466,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     // model working on what came back.
     void emit(cs);
     const running = done(id) ? s.tools.find((t) => !done(t)) : id;
-    if (!s.closed) say(running ? `Running ${tools.get(running)!.title}…` : phrase);
+    if (!s.closed) say(running ? `🔧 Tool use: ${tools.get(running)!.title}` : phrase);
     return chain;
   }
 
@@ -471,9 +477,9 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
 
   // The summary card: the one tool of a stretch without thinking; else what the stretch did, counting the tools
-  // before the one running. It spins until the stretch ends.
+  // before the one running. It never spins: the status line says the agent is busy.
   function head(s: Stretch) {
-    const status = s.closed ? "complete" : "in_progress";
+    const status = "complete";
     if (!s.thought && !s.closed && s.tools.length === 1) return { title: clip(`${USING}${tools.get(s.tools[0])!.title}`, TITLE_MAX), status };
     const running = s.closed ? undefined : s.tools.find((t) => !done(t));
     const counted = s.tools.filter((t) => t !== running);
