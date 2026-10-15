@@ -58,6 +58,9 @@ export function short(path: string, max = 60) {
   return head > 0 ? `${path.slice(0, head)}[...]/${name}` : `[...]/${name.slice(-(max - "[...]/".length))}`;
 }
 
+// A host name for people: a Kubernetes pod's generated suffix ("-7c5cbf9c49-zmzpd") goes.
+export const shortHost = (host: string) => host.replace(/-[a-z0-9]{6,10}-[a-z0-9]{5}$/, "");
+
 /** A WAV without its last `ms`: Gemini's speech ends with a burst of noise after a short silence (measured
  * 2026-10-15). ponytail: the 44-byte header TTS models send; anything else comes back as it is. */
 export function trimWav(wav: Buffer, ms: number) {
@@ -1088,10 +1091,10 @@ export function createDaemon(cfg: DaemonConfig) {
     await say(t, summary(t), panel(t));
   }
 
-  // A setting as a menu: provider-prefixed values ("ackstorm/claude-fable-5") are grouped by provider.
-  function settingMenu(o: any) {
+  // A setting as a menu (each option's text after `prefix`): provider-prefixed values ("ackstorm/claude-fable-5") are grouped by provider.
+  function settingMenu(o: any, prefix = "") {
     const choices = choicesOf(o).slice(0, 100);
-    const option = (c: { value: string; name: string }) => ({ text: plain(c.name.replace(/^[^/]+\//, "").slice(0, 75)), value: String(c.value) });
+    const option = (c: { value: string; name: string }) => ({ text: plain(`${prefix}${c.name.replace(/^[^/]+\//, "")}`.slice(0, 75)), value: String(c.value) });
     const providers = [...new Set(choices.map((c) => (c.name.includes("/") ? c.name.split("/")[0] : "")))];
     const grouped = providers.length > 1 && providers.every(Boolean);
     const current = choices.find((c) => c.value === o.currentValue);
@@ -1145,33 +1148,33 @@ export function createDaemon(cfg: DaemonConfig) {
     }));
     const note = (text: string) => ({ type: "context", elements: [{ type: "mrkdwn", text }] });
     const header = (text: string) => ({ type: "header", text: plain(text) });
-    // A default shows by its short name (no provider prefix), the menu only changes it.
-    const chosen = (o: any) => {
-      const c = choicesOf(o).find((x) => x.value === defaults[o.id]);
-      return c ? `\`${c.name.replace(/^[^/]+\//, "")}\`` : "agent default";
-    };
+    // A default's menu names itself in each option: Slack shows only the chosen option's text.
+    const defaultMenu = (o: any) => ({ ...settingMenu({ ...o, currentValue: defaults[o.id] }, `${o.name}: `), action_id: `home_default:${o.id}`, placeholder: plain(`${o.name}: agent default`) });
+    const image = await (icon ??= appIcon());
+    const field = (text: string) => ({ type: "mrkdwn", text });
     return {
       type: "home" as const,
       blocks: [
-        section(
-          `*Your coding agent*\nIt runs \`${basename(cfg.agentCmd[0])}\` in your workspace: each thread is one agent session in a folder you pick.`,
-          (await (icon ??= appIcon())) && { type: "image", image_url: await icon, alt_text: "agent" },
-        ),
-        note(`🟢 *Online* · \`${cfg.baseDir}\` · on ${hostname()}`),
+        {
+          type: "section",
+          fields: [field("*Status*\n🟢 Online"), field(`*Agent*\n\`${basename(cfg.agentCmd[0])}\``), field(`*Folders under*\n\`${cfg.baseDir}\``), field(`*Host*\n${shortHost(hostname())}`)],
+          ...(image && { accessory: { type: "image", image_url: image, alt_text: "agent" } }),
+        },
         { type: "divider" },
         header("How to use it"),
         section(
           "💬 *Message me* to start: pick the folder and the session, then talk in the thread.\n" +
             "📎 *Send files, images or voice clips*; ask for a voice note back.\n" +
-            "⌨️ *`$help`* in a thread lists its commands: `$model`, `$compact`, `$clear`, `$stop`; `!` runs a shell command.",
+            "⌨️ *`$help`* lists the thread's commands; `!` runs a shell command.",
         ),
         { type: "divider" },
         header("Defaults for new sessions"),
-        ...(options.length
-          ? options.map((o) => section(`*${o.name}*   ${chosen(o)}`, { ...settingMenu(o), action_id: `home_default:${o.id}`, initial_option: undefined, placeholder: plain("Change…") }))
-          : [note("Start a thread first: the agent's settings show up here.")]),
+        options.length ? { type: "actions", elements: options.map(defaultMenu) } : note("Start a thread first: the agent's settings show up here."),
+        { type: "divider" },
         header("Recent threads"),
         section(rows.join("\n") || "None yet."),
+        { type: "divider" },
+        note("💬 Message me to start · 📎 files, images and voice clips · ⌨️ `$help` in a thread · `!` runs a shell command"),
       ] as any[],
     };
   }

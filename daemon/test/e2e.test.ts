@@ -6,11 +6,11 @@ import { createServer as createHttpServer } from "node:http";
 import { execFileSync } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-slack.ts";
-import { createDaemon, short, trimWav } from "../src/daemon.ts";
+import { createDaemon, short, shortHost, trimWav } from "../src/daemon.ts";
 import { WORKING } from "../src/working.ts";
 
 const DM = "D_UPEPE";
@@ -874,11 +874,15 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   let home = JSON.parse(published().at(-1)!.params.view);
   assert.equal(published().at(-1)!.params.user_id, "UPEPE");
   assert.deepEqual(home.blocks.filter((b: any) => b.type === "header").map((b: any) => b.text.text), ["How to use it", "Defaults for new sessions", "Recent threads"]);
-  assert.match(home.blocks[0].text.text, /^\*Your coding agent\*\nIt runs `node` in your workspace/);
-  assert.deepEqual(home.blocks[0].accessory, { type: "image", image_url: "https://example.com/bot-512.png", alt_text: "agent" }); // the app's icon: its bot user's avatar
-  assert.match(home.blocks[1].elements[0].text, new RegExp(`^🟢 \\*Online\\* · \`${base}\` · on `));
-  const model = home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model");
-  assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["*Model*   agent default", undefined, "Change…"]);
+  // A status card with the app's icon (its bot user's avatar); every section apart; the help in the footer.
+  assert.deepEqual(home.blocks[0].fields.map((f: any) => f.text), ["*Status*\n🟢 Online", "*Agent*\n`node`", `*Folders under*\n\`${base}\``, `*Host*\n${shortHost(hostname())}`]);
+  assert.deepEqual(home.blocks[0].accessory, { type: "image", image_url: "https://example.com/bot-512.png", alt_text: "agent" });
+  assert.equal(home.blocks.filter((b: any) => b.type === "divider").length, 4);
+  assert.match(home.blocks.at(-1).elements[0].text, /^💬 Message me to start/);
+  // The defaults side by side, each menu showing its value with its own name.
+  const defaultMenu = (view: any) => view.blocks.find((b: any) => b.type === "actions").elements.find((e: any) => e.action_id === "home_default:model");
+  const model = defaultMenu(home);
+  assert.deepEqual([model.initial_option, model.placeholder.text], [undefined, "Model: agent default"]);
   const recent = home.blocks[home.blocks.findIndex((b: any) => b.text?.text === "Recent threads") + 1].text.text;
   assert.match(recent, /📁 \*deep-sea\* · <https:\/\/example\.slack\.com\/archives\/D_UPEPE\/p\d+\|[^>]+>/); // the title is the link
 
@@ -886,7 +890,7 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, view: { id: "V_HOME", type: "home" }, actions: [{ type: "static_select", action_id: "home_default:model", selected_option: { value: "m2" } }] }, true);
   await waitFor(() => published().length > n);
   home = JSON.parse(published().at(-1)!.params.view);
-  assert.equal(home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
+  assert.equal(defaultMenu(home).initial_option.text.text, "Model: Model two");
   assert.deepEqual(JSON.parse(readFileSync(join(base, ".state", "threads.json"), "utf8")).defaults, { model: "m2" });
 
   // After a restart, before any session loads, the Home tab still knows the agent's settings: those saved,
@@ -901,13 +905,13 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   n = published().length;
   await opened();
   await waitFor(() => published().length > n);
-  assert.equal(JSON.parse(published().at(-1)!.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").text.text, "*Model*   `Model two`");
+  assert.equal(defaultMenu(JSON.parse(published().at(-1)!.params.view)).initial_option.text.text, "Model: Model two");
 
   // Settings that change its menus redraw the open Home tab: a loaded session's list drops the old model.
-  const menu = (c: any) => JSON.parse(c.params.view).blocks.find((b: any) => b.accessory?.action_id === "home_default:model").accessory.options.map((o: any) => o.text.text);
-  assert.ok(menu(published().at(-1)).includes("Model nine"));
+  const menu = (c: any) => defaultMenu(JSON.parse(c.params.view)).options.map((o: any) => o.text.text);
+  assert.ok(menu(published().at(-1)).includes("Model: Model nine"));
   await slack.emit("events_api", slack.dm("UPEPE", "$model", { ts: "920.000009", thread_ts: "920.000001" }));
-  await waitFor(() => !menu(published().at(-1)).includes("Model nine") && menu(published().at(-1)).includes("Model two"));
+  await waitFor(() => !menu(published().at(-1)).includes("Model: Model nine") && menu(published().at(-1)).includes("Model: Model two"));
 
   // Effort picked before the model (as saved): the agent sets the effort back to default when the model changes, so
   // the model is applied first.
@@ -1137,4 +1141,10 @@ test("a long folder path keeps its start and its name, the middle cut", () => {
   assert.equal(short(long), `${long.slice(0, 60 - "ach-project".length - 6)}[...]/ach-project`);
   assert.equal(short(long).length, 60);
   assert.equal(short(`/w/${"n".repeat(80)}`), `[...]/${"n".repeat(54)}`);
+});
+
+test("a host name loses a Kubernetes pod's generated suffix", () => {
+  assert.equal(shortHost("coder-juancarlosmoreno-ai-platform-pod-v1-1-7c5cbf9c49-zmzpd"), "coder-juancarlosmoreno-ai-platform-pod-v1-1");
+  assert.equal(shortHost("devbox"), "devbox");
+  assert.equal(shortHost("web-1"), "web-1");
 });
