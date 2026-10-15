@@ -602,9 +602,9 @@ export function createDaemon(cfg: DaemonConfig) {
     for (const [a, r] of edits?.values() ?? []) [added, removed] = [added + a, removed + r];
     const files = edits && `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
     const where = t.top ? [] : [`📁 \`${basename(t.cwd)}\``, await branchOf(t.cwd).then((b) => b && `🌿 \`${b}\``), modelName(t)];
-    // This turn's tokens (ACP's experimental usage), reasoning and cache only when the agent reports them.
+    // This turn's tokens (ACP's experimental usage), cache only when the agent reports it.
     const u = turn.usage;
-    const spent = u && [`↓ ${tokens(u.inputTokens)} in`, `↑ ${tokens(u.outputTokens)} out`, u.thoughtTokens && `${tokens(u.thoughtTokens)} thinking`,
+    const spent = u && [`↓ ${tokens(u.inputTokens)} in`, `↑ ${tokens(u.outputTokens)} out`,
       u.cachedReadTokens && `${tokens(u.cachedReadTokens)} cached`, u.cachedWriteTokens && `${tokens(u.cachedWriteTokens)} cache write`].filter(Boolean).join(" · ");
     // The turn's cost: what the session's grew by, when it was known before the turn.
     const [context, cost] = usageOf(t);
