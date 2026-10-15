@@ -6,7 +6,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { hostname, tmpdir } from "node:os";
@@ -56,6 +56,20 @@ export function short(path: string, max = 60) {
   const name = basename(path);
   const head = max - name.length - "[...]/".length;
   return head > 0 ? `${path.slice(0, head)}[...]/${name}` : `[...]/${name.slice(-(max - "[...]/".length))}`;
+}
+
+/** A WAV without its last `ms`: Gemini's speech ends with a burst of noise after a short silence (measured
+ * 2026-10-15). ponytail: the 44-byte header TTS models send; anything else comes back as it is. */
+export function trimWav(wav: Buffer, ms: number) {
+  if (wav.toString("ascii", 0, 4) !== "RIFF" || wav.toString("ascii", 36, 40) !== "data") return wav;
+  const rate = wav.readUInt32LE(28); // bytes per second
+  const align = wav.readUInt16LE(32);
+  const size = Math.min(wav.readUInt32LE(40), wav.length - 44);
+  const keep = Math.max(0, size - Math.floor((rate * ms) / 1000 / align) * align);
+  const out = Buffer.from(wav.subarray(0, 44 + keep));
+  out.writeUInt32LE(36 + keep, 4);
+  out.writeUInt32LE(keep, 40);
+  return out;
 }
 
 export interface DaemonConfig {
@@ -358,7 +372,8 @@ export function createDaemon(cfg: DaemonConfig) {
     name: "send_voice",
     description:
       "Speak a short message to the user as an audio clip in this Slack thread. Use it when the user asks for " +
-      "audio or talks to you with voice notes; keep it under a minute. Your text replies reach the user without it.",
+      "audio or talks to you with voice notes; keep it under a minute. The clip is your reply: do not write the same " +
+      "thing as text too, at most one short line next to it (a command, a path, a link).",
     inputSchema: {
       type: "object",
       properties: { text: { type: "string", description: "What to say, as plain spoken text (no Markdown)" } },
@@ -438,10 +453,39 @@ export function createDaemon(cfg: DaemonConfig) {
       signal: AbortSignal.timeout(120_000),
     });
     if (!res.ok) throw new Error(`speech service: HTTP ${res.status}`);
+    const audio = Buffer.from(await res.arrayBuffer());
     // ponytail: wav or mp3 (OpenAI's default) only; map more types if a model sends them.
-    const ext = res.headers.get("content-type")?.includes("wav") ? "wav" : "mp3";
-    await upload(t, `voice.${ext}`, Buffer.from(await res.arrayBuffer()));
+    if (!res.headers.get("content-type")?.includes("wav")) await upload(t, "voice-note.mp3", audio);
+    else {
+      const wav = trimWav(audio, 200);
+      const m4a = await aac(wav).catch((err) => void log("voice_encode_failed", { error: String(err) }));
+      await upload(t, m4a ? "voice-note.m4a" : "voice-note.wav", m4a ?? wav);
+    }
     return "Sent the voice message to the user.";
+  }
+
+  // A WAV as AAC in an m4a, a tenth of its size; Slack plays both. Needs ffmpeg on the PATH.
+  function aac(wav: Buffer) {
+    return new Promise<Buffer>((done, fail) => {
+      const dir = mkdtempSync(join(tmpdir(), "ach-channelmux-voice-"));
+      const out = join(dir, "voice.m4a");
+      const p = spawn("ffmpeg", ["-v", "error", "-y", "-i", "pipe:0", "-c:a", "aac", "-b:a", "48k", out], { stdio: ["pipe", "ignore", "pipe"] });
+      let err = "";
+      p.stderr.on("data", (c) => (err += c));
+      p.on("error", fail);
+      p.on("close", (code) => {
+        try {
+          if (code !== 0) throw new Error(`ffmpeg exited with ${code}: ${err.trim().slice(0, 200)}`);
+          done(readFileSync(out));
+        } catch (e) {
+          fail(e);
+        } finally {
+          rmSync(dir, { recursive: true, force: true });
+        }
+      });
+      p.stdin.on("error", () => {}); // ffmpeg gone early: "close" reports it
+      p.stdin.end(wav);
+    });
   }
 
   const mcp = createServer(async (req, res) => {

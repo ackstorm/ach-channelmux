@@ -15,7 +15,8 @@
 //   AUDIO_STT_KEY          the key, or
 //   AUDIO_STT_KEY_COMMAND  a shell command printing it, run for each clip (for short-lived tokens)
 //
-// The agent gets a send_voice tool (text to an audio clip in the thread) when AUDIO_TTS_BASE_URL is set:
+// The agent gets a send_voice tool (text to an audio clip in the thread) when AUDIO_TTS_BASE_URL is set
+// (clips are encoded to m4a with ffmpeg when it is on the PATH):
 //   AUDIO_TTS_BASE_URL     OpenAI-compatible API, e.g. https://llm.example.com/v1
 //   AUDIO_TTS_MODEL        its model (default tts-1)
 //   AUDIO_TTS_VOICE        its voice (default alloy; Gemini models take names like Kore or Puck)

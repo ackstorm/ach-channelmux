@@ -10,7 +10,7 @@ import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { createGateway } from "../../relay/src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "../../relay/test/mock-slack.ts";
-import { createDaemon, short } from "../src/daemon.ts";
+import { createDaemon, short, trimWav } from "../src/daemon.ts";
 
 const DM = "D_UPEPE";
 const DEV = "C_DEV"; // #dev: its mentions go to this daemon
@@ -33,6 +33,16 @@ const GW_PORT = await new Promise<number>((r) => {
 });
 const GW = `http://127.0.0.1:${GW_PORT}`;
 
+// A 16-bit mono 24 kHz WAV of `ms` milliseconds, as Gemini's TTS sends.
+const wav = (ms: number) => {
+  const data = Buffer.alloc((24_000 * 2 * ms) / 1000);
+  const h = Buffer.alloc(44);
+  h.write("RIFF", 0); h.writeUInt32LE(36 + data.length, 4); h.write("WAVEfmt ", 8); h.writeUInt32LE(16, 16);
+  h.writeUInt16LE(1, 20); h.writeUInt16LE(1, 22); h.writeUInt32LE(24_000, 24); h.writeUInt32LE(48_000, 28);
+  h.writeUInt16LE(2, 32); h.writeUInt16LE(16, 34); h.write("data", 36); h.writeUInt32LE(data.length, 40);
+  return Buffer.concat([h, data]);
+};
+
 // A speech API: transcripts (failing while sttDown is set) and speech (failing while ttsDown is set).
 const sttCalls: { url?: string; auth?: string; body: string }[] = [];
 const ttsCalls: { auth?: string; body: any }[] = [];
@@ -45,7 +55,7 @@ const stt = createHttpServer((req, res) => {
     if (req.url === "/v1/audio/speech") {
       ttsCalls.push({ auth: req.headers.authorization, body: JSON.parse(body) });
       if (ttsDown) return void res.writeHead(500).end();
-      return void res.writeHead(200, { "content-type": "audio/wav" }).end("RIFF fake wav");
+      return void res.writeHead(200, { "content-type": "audio/wav" }).end(wav(1_000));
     }
     sttCalls.push({ url: req.url, auth: req.headers.authorization, body });
     if (sttDown) return void res.writeHead(500).end();
@@ -523,11 +533,14 @@ test("the agent's send_voice tool speaks through the tts model into the thread; 
   await slack.emit("events_api", slack.dm("UPEPE", "speak all done, captain", { ts: "100.000028", thread_ts: "100.000001" }));
   assert.deepEqual(await spoke(0), { m: "spoke", tools: ["send_file", "ask_user", "send_voice"], result: "Sent the voice message to the user." });
   assert.deepEqual(ttsCalls, [{ auth: "Bearer k-2", body: { model: "tts-test", voice: "Puck", input: "Like a pirate: all done, captain" } }]);
+  // Without its last 200 ms (the model ends with a burst of noise), as AAC: a tenth of the size, the same player in Slack.
   const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
-  assert.equal(get.params.filename, "voice.wav");
+  assert.equal(get.params.filename, "voice-note.m4a");
   const done = since(n).find((c) => c.method === "files.completeUploadExternal")!;
   assert.equal(done.params.thread_ts, "100.000001");
-  assert.equal(slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body, "RIFF fake wav");
+  const m4a = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
+  assert.equal(m4a.slice(4, 8), "ftyp");
+  assert.ok(Number(get.params.length) < wav(1_000).length / 4, `${get.params.length} bytes`);
 
   ttsDown = true;
   await slack.emit("events_api", slack.dm("UPEPE", "speak again", { ts: "100.000029", thread_ts: "100.000001" }));
@@ -543,6 +556,16 @@ test("the agent's send_voice tool speaks through the tts model into the thread; 
   await daemon.stop();
   daemon = newDaemon();
   await daemon.start();
+});
+
+test("trimWav cuts a WAV's last milliseconds and fixes its header; anything else is left as it is", () => {
+  const cut = trimWav(wav(1_000), 200);
+  assert.equal(cut.length, 44 + 24_000 * 2 * 0.8);
+  assert.equal(cut.readUInt32LE(40), 24_000 * 2 * 0.8);
+  assert.equal(cut.readUInt32LE(4), cut.length - 8);
+  assert.equal(trimWav(wav(100), 200).readUInt32LE(40), 0); // shorter than the cut: empty, not negative
+  const mp3 = Buffer.from("ID3 not a wav");
+  assert.equal(trimWav(mp3, 200), mp3);
 });
 
 test("a file-only message (no text) still reaches the agent", async () => {
