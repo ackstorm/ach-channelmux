@@ -126,6 +126,12 @@ new acp.AgentSideConnection(
           await new Promise<void>((r) => cancels.set(sessionId, r));
           return { stopReason: "cancelled" };
         }
+        if (text === "count tokens") {
+          // Like opencode: the session's cost so far, then the turn's tokens in its result.
+          await say(sessionId, "Counted.");
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "usage_update", used: 30_000, size: 200_000, cost: { amount: 0.0203, currency: "USD" } } });
+          return { stopReason: "end_turn", usage: { inputTokens: 29_500, outputTokens: 480, totalTokens: 30_000, thoughtTokens: 20, cachedReadTokens: 12_000 } };
+        }
         if (text === "big edit") {
           const { cwd } = sessions.get(sessionId)!;
           const oldText = Array.from({ length: 30 }, (_, i) => `old line ${i}`).join("\n");
