@@ -214,7 +214,7 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
   assert.equal(firstStatus.params.title, "beta - fix the bug");
   const chunks = streamed(since(n));
   assert.equal(chunks.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["Using tool: ls", "in_progress"], ["Using tool: ls", "complete"], ["1 tool used", "complete"]]);
+  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["Using tool: ls", "in_progress"], ["1 tool used", "complete"]]);
 });
 
 test("a permission request becomes buttons whose click answers the agent", async () => {
@@ -308,13 +308,14 @@ test("$stop (or /stop) in the thread cancels too", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "/stop", { ts: "100.000008", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().filter((e) => e.m === "cancel").length > cancels);
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
+  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000007" && c.params.name === "black_square_for_stop")); // its turn has ended
 });
 
 test("a turn that ends after its tools with no reply gets one nudge, and the reply reaches the thread", async () => {
   const n = mark();
   const before = agentLog().length;
   await slack.emit("events_api", slack.dm("UPEPE", "silent", { ts: "100.000012", thread_ts: "100.000001" }));
-  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  await turnEnded("100.000012");
   const prompts = agentLog().slice(before).filter((e) => e.m === "prompt").map((e) => e.text);
   assert.equal(prompts.length, 2);
   assert.match(prompts[1], /without replying/);
@@ -324,7 +325,7 @@ test("a turn that ends after its tools with no reply gets one nudge, and the rep
 test("when the nudge gets no reply either, the thread says the agent ended without one", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "mute", { ts: "100.000039", thread_ts: "100.000001" }));
-  await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
+  await turnEnded("100.000039");
   assert.match(streamed(since(n)).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), /_The agent ended its turn without a reply\._$/);
 });
 

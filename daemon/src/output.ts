@@ -1,10 +1,9 @@
 // Renders one agent turn into a Slack thread. With native streaming (chat.startStream),
 // text grows in one message and each stretch (the model's thinking and the tools it calls between
-// two texts) is a task card, with the tool running now in a second one. If a stream cannot start or
-// breaks (feature off, or the relay refusing it because the shared rate budget is spent),
-// the rest of the turn goes out as plain messages, one per finished text segment (cut at
-// tool calls), split to Slack's 12k limit. The session status (Slack's "Working…" and stop
-// button) brackets the turn.
+// two texts) is one task card. If a stream cannot start or breaks (feature off, or the relay refusing
+// it because the shared rate budget is spent), the rest of the turn goes out as plain messages, one per
+// finished text segment (cut at tool calls), split to Slack's 12k limit. Above the reply box, the
+// thread's status line says what the agent is doing ("Running npm test…") until the reply's text starts.
 
 import { realpathSync } from "node:fs";
 
@@ -204,8 +203,8 @@ const taskCard = (id: string, title: string, status: string, fields: Record<stri
 const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 
 // A stretch is the model's thinking and the tools it calls between two texts, or up to a question: card s<n> sums it
-// up and stays; while a tool runs after something else was shown, r<n> shows it. A stream cannot remove r<n>: each
-// stopped message is rewritten without it.
+// up, and stays in the message that first showed it. The tool running now is in the status line, not in a card:
+// a stream cannot remove a card, and one for the running tool stayed under the reply until the message stopped.
 type Entry = { thought: string } | { tool: string };
 type Stretch = { n: number; entries: Entry[]; tools: string[]; thought: boolean; thinkMs: number; closed: boolean; out: string; sent: number };
 
@@ -231,12 +230,12 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   const stretchOf = new Map<string, Stretch>(); // ACP tool call id -> its stretch
   const tools = new Map<string, { title: string; status: string }>(); // ACP status: in_progress, completed, failed
   const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
-  const sentCards = new Set<string>(); // card ids delivered to a stream
   type Layout = ({ text: string } | { card: string })[];
   let layout: Layout = []; // the current stream message as sent, in order
-  // A tool that finishes waits for what comes next (another tool, or text), to go out in the same append: the cards
-  // keep their height instead of shrinking and growing again between tools.
-  let later: Chunk[] = [];
+  // The status line above the reply box: shown while the message has no text yet (Slack shows its own once text
+  // streams), and only with the session "active", which an open stream needs after it starts (verified 2026-10-15).
+  let line = "";
+  let lineShown = "";
   const shownIn = new Map<string, string>(); // card id -> the message it is in
   const stopped = new Map<string, Layout>(); // earlier messages of the turn, by ts
   const rewritten = new Map<string, string>(); // message ts -> its blocks as last rewritten
@@ -285,7 +284,6 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         const t = x.text.trim();
         return t ? [{ type: "markdown", text: openFence(x.text) ? `${t}\n\`\`\`` : t }] : [];
       }
-      if (x.card[0] === "r") return [];
       const s = stretchOfCard(x.card);
       const h = head(s);
       return [taskCard(x.card, h.title, h.status, inside(s))];
@@ -315,22 +313,29 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
 
-  // The card a new message carries on: the open stretch's running tool. Every other card stays in the message that
-  // first showed it, which is rewritten as it now stands.
-  const goesOn = (id: string) => current !== null && id === `r${current.n}`;
+  // A card stays in the message that first showed it: a stopped one is rewritten as it now stands.
   const behind = (id: string) => {
     const ts = shownIn.get(id);
-    return ts !== undefined && stopped.has(ts) && !goesOn(id);
+    return ts !== undefined && stopped.has(ts);
   };
 
-  // A new stream message carries, whole, the cards that go on, and, before text, the fence the last one left open.
+  // A new stream message; before its text, the fence the last one left open. The session goes "active" for the
+  // status line to show, and the line is set again: it belongs to the thread, not to a message.
   async function start(chunks: Chunk[]) {
-    const open = [...sentCards].filter((id) => goesOn(id) && !chunks.some((c) => c.id === id)).map(whole);
-    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...chunks] });
+    const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks });
     stream = { ts: r.ts, started: Date.now() };
     sent = "";
     layout = [];
-    record(open);
+    lineShown = "";
+    await status("active");
+  }
+  // The status line as it should be now; Slack shows its own once the message has text.
+  async function showLine() {
+    const want = stream && !sent.trim() ? line : "";
+    if (want === lineShown || (!want && !lineShown && !stream)) return;
+    lineShown = want;
+    await api("assistant.threads.setStatus", { channel_id: channel, thread_ts: thread, status: want, ...(want && { loading_messages: [want] }) })
+      .catch((err) => log("line_failed", { error: String(err) }));
   }
 
   // Ends the stream message for a new one to go on; a fence left open is closed when the message still takes it.
@@ -373,7 +378,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       }
       sent += textOf(chunks);
       record(chunks);
-      for (const c of chunks) if (c.type === "task_update") sentCards.add(c.id as string);
+      await showLine();
       return true;
     } catch (err) {
       log("stream_fallback", { error: String(err) });
@@ -385,13 +390,15 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     }
   }
 
-  async function flush() {
+  // The text pending now, taken: what comes after it waits for its turn.
+  function take() {
     clearTimeout(timer);
     timer = undefined;
     const text = pending;
     pending = "";
-    await put(text);
+    return text;
   }
+  const flush = () => put(take());
   async function put(text: string) {
     if (!text.trim()) return;
     const pieces = text.match(/[\s\S]{1,12000}/g)!;
@@ -403,7 +410,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
 
   function tool(id: string, info: ToolInfo) {
-    const ended = endThought();
+    endThought();
     const prev = tools.get(id);
     const next = {
       title: clip(info.title ?? prev?.title ?? "tool", TITLE_MAX - USING.length),
@@ -427,10 +434,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       const ts = shownIn.get(`s${s.n}`);
       if (ts && stopped.has(ts)) run(() => rewrite(ts, stopped.get(ts)!));
     }
-    if (!ended && !s.closed && id === s.tools.at(-1) && done(id)) {
-      later.push(...cs.filter((c) => c !== null));
-      return run(flush); // the text before it is not held back
-    }
+    if (!s.closed) say(done(id) ? "" : `Running ${next.title}…`);
     return emit(cs);
   }
 
@@ -441,32 +445,27 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
 
   // The summary card: thinking now; the one tool of a stretch without thinking; else what the stretch did, counting
-  // the tools before the one running.
+  // the tools before the one running. It spins until the stretch ends.
   function head(s: Stretch) {
-    if (thinking && s === current) return { title: clip(thinking.heading ? `Thinking · ${thinking.heading}` : "Thinking…", TITLE_MAX), status: "in_progress", solo: false };
-    if (!s.thought && !s.closed && s.tools.length === 1) {
-      return { title: clip(`${USING}${tools.get(s.tools[0])!.title}`, TITLE_MAX), status: done(s.tools[0]) ? "complete" : "in_progress", solo: true };
-    }
+    const status = s.closed ? "complete" : "in_progress";
+    if (thinking && s === current) return { title: clip(thinking.heading ? `Thinking · ${thinking.heading}` : "Thinking…", TITLE_MAX), status };
+    if (!s.thought && !s.closed && s.tools.length === 1) return { title: clip(`${USING}${tools.get(s.tools[0])!.title}`, TITLE_MAX), status };
     const running = s.closed ? undefined : s.tools.find((t) => !done(t));
     const counted = s.tools.filter((t) => t !== running);
     const failed = counted.filter((t) => tools.get(t)!.status === "failed").length;
     const parts = [s.thought ? `Thought for ${Math.max(1, Math.round(s.thinkMs / 1000))}s` : "", counted.length ? `${plural(counted.length, "tool")} used` : "", failed ? `${failed} failed` : ""].filter(Boolean);
-    return { title: parts.join(" · "), status: "complete", solo: false };
+    return { title: parts.join(" · ") || "Thinking…", status };
   }
-  // The running tool's card: the stretch's last tool, done once the stretch is.
-  function runningCard(s: Stretch) {
-    const last = s.tools.at(-1)!;
-    return { title: clip(`${USING}${tools.get(last)!.title}`, TITLE_MAX), status: s.closed || done(last) ? "complete" : "in_progress" };
-  }
-  // The stretch's cards as they stand: its summary, and the running tool when the summary says something else
-  // (or did, so it is finished there too).
+  // The stretch's card as it stands.
   function cards(s: Stretch) {
-    const h = head(s);
-    const last = s.tools.at(-1);
-    const r = last !== undefined && !h.solo && (queued.has(`r${s.n}`) || (!s.closed && !done(last)));
     const out = s.out.slice(s.sent); // Slack appends a card's output to what it shows: send only the new part
     s.sent = s.out.length;
-    return [update(`s${s.n}`, h, out ? { output: out } : {}), r ? update(`r${s.n}`, runningCard(s), {}) : null];
+    return [update(`s${s.n}`, head(s), out ? { output: out } : {})];
+  }
+  // What the status line should say: set now, shown when the stream allows it.
+  function say(text: string) {
+    line = clip(text, TITLE_MAX);
+    run(showLine);
   }
   // A card's update, or null when it shows nothing new.
   function update(card: string, state: { title: string; status: string }, content: Record<string, unknown>): Chunk | null {
@@ -475,22 +474,24 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     queued.set(card, { title: state.title, status: state.status });
     return { type: "task_update", id: card, title: state.title, status: state.status, ...content };
   }
-  // What waits from a finished tool goes first. Of several updates to the running-tool card only the last goes out.
-  // The text before the cards goes first; `before`, when given, is all of it (text after them is pending too).
-  function emit(updates: (Chunk | null)[], merge = true, before?: string) {
-    const all = [...(merge ? later.splice(0) : []), ...updates.filter((c) => c !== null)];
-    const chunks = all.filter((c, i) => (c.id as string)[0] !== "r" || !all.slice(i + 1).some((d) => d.id === c.id));
-    if (!chunks.length) return before ? run(() => put(before)) : chain;
+  // The text before the cards goes first: the text pending when they are queued (or `before`), not when they go out,
+  // or text that came meanwhile would jump ahead of them.
+  function emit(updates: (Chunk | null)[], before?: string) {
+    const chunks = updates.filter((c) => c !== null);
+    const text = before ?? take();
+    if (!chunks.length) return text ? run(() => put(text)) : chain;
     return run(async () => {
-      if (suspended) return void chunks.forEach((c) => held.add(c.id as string));
-      await (before === undefined ? flush() : put(before));
+      if (suspended) {
+        pending = text + pending; // nothing goes out under a question
+        return void chunks.forEach((c) => held.add(c.id as string));
+      }
+      await put(text);
       await send(chunks);
     });
   }
   // A card whole, for a message that has not shown it.
   function whole(card: string): Chunk {
     const s = stretchOfCard(card);
-    if (card[0] === "r") return { type: "task_update", id: card, ...runningCard(s) };
     s.sent = s.out.length;
     const { title, status } = head(s);
     return { type: "task_update", id: card, title, status, ...(s.out && { output: s.out }) };
@@ -508,9 +509,10 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     if (!s) return;
     current = null;
     s.closed = true;
+    say("");
     const before = pending;
     pending = "";
-    void emit(cards(s), true, before);
+    void emit(cards(s), before);
   }
 
   // The model's thinking joins its stretch: the card follows the heading it is on while it thinks, and when a tool
@@ -555,12 +557,14 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         thinking = { text: "", heading: "", shown: -Infinity, since: Date.now() }; // its first heading shows at once
         afterTool = true;
         quiet = true;
+        say("Thinking…");
         void emit(cards(st));
       }
       thinking.text += s;
       const heading = [...thinking.text.matchAll(/\*\*([^*\n]+)\*\*/g)].at(-1)?.[1].trim() ?? "";
       if (heading && heading !== thinking.heading && Date.now() - thinking.shown >= FLUSH_MS) {
         Object.assign(thinking, { heading, shown: Date.now() });
+        say(`Thinking · ${heading}…`);
         void emit(cards(current!));
       }
     },
@@ -594,6 +598,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       return run(async () => {
         await release();
         await flush();
+        line = "";
+        await showLine();
         if (stream) await stopStream(blocks).catch(() => status("active"));
         else await status("active");
       });
