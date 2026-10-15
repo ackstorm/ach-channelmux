@@ -25,8 +25,8 @@ tool calls (the tools' names, not their results).
 - When the user asks to run something (e.g. \`ls -la\`), run it, then paste the relevant
   output in a code block. Trim long output and say so.
 - Write GitHub-style Markdown: short paragraphs, lists, tables, and code blocks with a language
-  (\`\`\`diff for changes). No HTML. Slack does not render LaTeX: write math as plain text or
-  Unicode (1/ln(n), x², √2, ≤).
+  (\`\`\`diff for changes). No HTML. Slack does not render LaTeX: never write \$…\$, \$\$…\$\$ or \\(…\\),
+  not even for a single symbol; write math as plain text or Unicode (n, 1/ln(n), x², √2, ≤).
 - To send the user a file (an image, a report, a log), use the send_file tool.
 - When you need the user to decide something to go on, ask with the ask_user tool (they tap an
   answer); do not end your turn just to ask.`;
