@@ -27,11 +27,14 @@ const TITLE_MAX = 200;
 const OUTPUT_MAX = 500;
 // A status line: Slack refuses a longer loading_messages entry (invalid_arguments, seen 2026-10-15).
 const LINE_MAX = 50;
+// A tool on the status line: "Tool use: " and at most this much of it.
+const TOOL_LINE_MAX = 35;
 
 /** What a tool card shows. Missing fields keep their earlier value. */
 export interface ToolInfo {
   title?: string;
   status?: string; // ACP: pending, in_progress, completed, failed
+  line?: string; // for the status line, when it differs from the title: the agent's description of the call
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
@@ -167,7 +170,8 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   // opencode reports a command that exits non-zero, or a tool error, as completed
   const exit = u.rawOutput?.metadata?.exit;
   if (u.status === "completed" && ((typeof exit === "number" && exit !== 0) || u.rawOutput?.metadata?.error === true)) status = "failed";
-  return { ...(title && { title: clip(title, TITLE_MAX) }), ...(status && { status }) };
+  const line = typeof i.description === "string" && i.description !== title ? i.description : undefined;
+  return { ...(title && { title: clip(title, TITLE_MAX) }), ...(status && { status }), ...(line && { line }) };
 }
 
 type Api = (method: string, params: Record<string, unknown>) => Promise<any>;
@@ -238,7 +242,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   const stretches: Stretch[] = [];
   let current: Stretch | null = null; // the open stretch
   const stretchOf = new Map<string, Stretch>(); // ACP tool call id -> its stretch
-  const tools = new Map<string, { title: string; status: string }>(); // ACP status: in_progress, completed, failed
+  const tools = new Map<string, { title: string; status: string; line?: string }>(); // ACP status: in_progress, completed, failed
+  const toolLine = (id: string) => `Tool use: ${clip(tools.get(id)!.line ?? tools.get(id)!.title, TOOL_LINE_MAX)}`;
   const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
   type Layout = ({ text: string } | { card: string })[];
   let layout: Layout = []; // the current stream message as sent, in order
@@ -441,10 +446,12 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const next = {
       title: clip(info.title ?? prev?.title ?? "tool", TITLE_MAX - USING.length),
       status: info.status ? (info.status === "pending" ? "in_progress" : info.status) : (prev?.status ?? "in_progress"),
+      line: info.line ?? prev?.line,
     };
     // Agents repeat unchanged updates; each would cost an append from the shared budget.
-    if (prev && prev.title === next.title && prev.status === next.status) return chain;
+    if (prev && prev.title === next.title && prev.status === next.status && prev.line === next.line) return chain;
     const wasDone = prev && ["completed", "failed"].includes(prev.status);
+    const before = prev && lineShown === clip(toolLine(id), LINE_MAX); // its line, as shown before this update
     tools.set(id, next);
     afterTool = true;
     quiet = true;
@@ -466,7 +473,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     // model working on what came back.
     void emit(cs);
     const running = done(id) ? s.tools.find((t) => !done(t)) : id;
-    if (!s.closed) say(running ? `Tool use: ${tools.get(running)!.title}` : phrase);
+    // The same tool filling in its details (opencode sends its input after it starts) replaces its line at once.
+    if (!s.closed) say(running ? toolLine(running) : phrase, before && running === id);
     return chain;
   }
 
@@ -494,8 +502,9 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     return [update(`s${s.n}`, head(s), out ? { output: out } : {})];
   }
   // What the status line should say: set now, shown when the stream allows it.
-  function say(text: string) {
+  function say(text: string, now = false) {
     line = clip(text, LINE_MAX);
+    if (now) lineAt = 0; // no wait for the line it replaces
     run(showLine);
   }
   // A card's update, or null when it shows nothing new.

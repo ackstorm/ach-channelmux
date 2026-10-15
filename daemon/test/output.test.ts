@@ -229,7 +229,7 @@ test("describeTool turns opencode's tool updates into card title and status", ()
   // A subagent, the tools it runs, a skill, opencode's code tool.
   const meta = { "opencode/child-session": { id: "ses_c", title: "Count txt files" } };
   const sub = describeTool({ title: "subagent", kind: "think", status: "completed", content: [{ type: "content", content: { type: "text", text: '<subagent sessionID="ses_c" state="completed">\nThere are 2.\n</subagent>' } }] }, { agent: "general", description: "Count txt files", prompt: "..." }, cwd);
-  assert.deepEqual(sub, { title: "subagent Count txt files", status: "completed" });
+  assert.deepEqual(sub, { title: "subagent Count txt files", status: "completed", line: "Count txt files" }); // the line: its task
   assert.deepEqual(describeTool({ title: "Count txt files: glob", kind: "search", status: "pending", _meta: meta }, { pattern: "*.txt" }, cwd), { title: "↳ glob", status: "pending" });
   assert.equal(describeTool({ title: "Count txt files: read", kind: "read", status: "pending", _meta: meta }, { path: "a.txt" }, cwd).title, "↳ read a.txt");
   assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
@@ -398,15 +398,30 @@ test("a status line stays 2 s before the next replaces it; clearing it does not 
   assert.deepEqual(lines(calls), ["line: Tool use: execute", "line: Tool use: read", "line: "]);
 });
 
+test("a tool's line is its description or its title, at most 35 characters; its details replace it at once", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where, { lineMinMs: 50 });
+  await out.tool("r", { title: "read", status: "in_progress" }); // opencode: the input comes in a later update
+  await out.tool("r", { title: "read src/components/GameBoard.test.tsx", status: "in_progress" });
+  await new Promise((r) => setTimeout(r, 10)); // within the 2 s another line would wait
+  await out.tool("b", { title: "sleep 5 && ls -la", status: "in_progress", line: "Wait, then list the folder" });
+  await new Promise((r) => setTimeout(r, 60));
+  out.text("Done.");
+  await out.end();
+  assert.deepEqual(lines(calls), ["line: Tool use: read", "line: Tool use: read src/components/GameBoard.test…", "line: Tool use: Wait, then list the folder", "line: "]);
+  assert.deepEqual(describeTool({ title: "bash", kind: "execute" }, { command: "ls", description: "List files" }, "/w"), { title: "ls", line: "List files" });
+});
+
 test("a long status line is cut to Slack's 50 characters", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
-  await out.tool("x", { title: `npm test -- ${"a".repeat(80)}`, status: "in_progress" });
+  out.thought(`**Weighing ${"a".repeat(80)}**\n\nhmm`);
+  await new Promise((r) => setTimeout(r, 10));
   out.text("Done.");
   await out.end();
-  const shown = calls.find((c) => c.method === "assistant.threads.setStatus")!.params;
+  const shown = calls.find((c) => c.method === "assistant.threads.setStatus" && c.params.status)!.params;
   assert.equal(shown.status.length, 50);
-  assert.ok(shown.status.startsWith("Tool use: npm test -- a") && shown.status.endsWith("…"));
+  assert.ok(shown.status.startsWith("Thinking · Weighing a") && shown.status.endsWith("…"));
   assert.equal(shown.loading_messages[0], shown.status);
 });
 
