@@ -14,6 +14,8 @@ const FLUSH_MS = 1_000;
 const STREAM_MAX_AGE_MS = 240_000;
 // Slack drops a session's "processing" status after an hour unless it is sent again.
 const STATUS_REFRESH_MS = 30 * 60_000;
+// A status line stays at least this long before another replaces it: a fast tool's line flashed by unread.
+const LINE_MIN_MS = 2_000;
 
 // task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
 // with msg_too_long; the margins are deliberate.
@@ -208,7 +210,7 @@ const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
 type Entry = { thought: string } | { tool: string };
 type Stretch = { n: number; entries: Entry[]; tools: string[]; thought: boolean; thinkMs: number; closed: boolean; out: string; sent: number };
 
-export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
+export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number; lineMinMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
   let streaming = true; // until a stream call fails, for the rest of this turn
@@ -236,6 +238,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   // streams), and only with the session "active", which an open stream needs after it starts (verified 2026-10-15).
   let line = "";
   let lineShown = "";
+  let lineAt = 0; // when the line shown was set
+  let lineTimer: ReturnType<typeof setTimeout> | undefined;
   const shownIn = new Map<string, string>(); // card id -> the message it is in
   const stopped = new Map<string, Layout>(); // earlier messages of the turn, by ts
   const rewritten = new Map<string, string>(); // message ts -> its blocks as last rewritten
@@ -333,7 +337,15 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   async function showLine() {
     const want = stream && !sent.trim() ? line : "";
     if (want === lineShown || (!want && !lineShown && !stream)) return;
+    // Another line waits its turn; clearing does not (Slack's own takes over, or the turn ends).
+    const wait = lineAt + (opts.lineMinMs ?? LINE_MIN_MS) - Date.now();
+    if (want && lineShown && wait > 0) {
+      clearTimeout(lineTimer);
+      lineTimer = setTimeout(() => run(showLine), wait);
+      return;
+    }
     lineShown = want;
+    lineAt = Date.now();
     await api("assistant.threads.setStatus", { channel_id: channel, thread_ts: thread, status: want, ...(want && { loading_messages: [want] }) })
       .catch((err) => log("line_failed", { error: String(err) }));
   }
@@ -434,7 +446,9 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       const ts = shownIn.get(`s${s.n}`);
       if (ts && stopped.has(ts)) run(() => rewrite(ts, stopped.get(ts)!));
     }
-    if (!s.closed) say(done(id) ? "" : `Running ${next.title}…`);
+    // A finished tool leaves another one running, or the model thinking about what came back.
+    const running = done(id) ? s.tools.find((t) => !done(t)) : id;
+    if (!s.closed) say(running ? `Running ${tools.get(running)!.title}…` : "Thinking…");
     return emit(cs);
   }
 
@@ -599,6 +613,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
         await release();
         await flush();
         line = "";
+        clearTimeout(lineTimer);
         await showLine();
         if (stream) await stopStream(blocks).catch(() => status("active"));
         else await status("active");

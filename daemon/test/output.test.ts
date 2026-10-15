@@ -349,9 +349,12 @@ test("when the stream breaks inside a code fence, the plain message that follows
   assert.deepEqual(texts(calls, "chat.postMessage"), ["```diff\n+b\n```"]);
 });
 
+const lines = (calls: { method: string; params: any }[]) =>
+  calls.filter((c) => c.method === "assistant.threads.setStatus").map((c) => `line: ${c.params.status}`);
+
 test("the status line says what runs until the reply's text starts; Slack shows its own after that", async () => {
   const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
+  const out = createOutput(api, where, { lineMinMs: 0 });
   out.thought("**Planning**\n\nfirst ls.");
   await new Promise((r) => setTimeout(r, 10)); // the stream opens with the thinking card
   await out.tool("l", { title: "ls -la", status: "in_progress" });
@@ -366,11 +369,27 @@ test("the status line says what runs until the reply's text starts; Slack shows 
     "stream", "active", // the line shows only with the session active, after the stream starts
     "line: Thinking · Planning…", // the heading the model is on
     "line: Running ls -la…",
-    "line: ",
+    "line: Thinking…", // the tool is done: the model reads what came back
     "line: Running npm test…",
+    "line: Thinking…",
     "line: ", // text ends the stretch: the line is cleared, Slack's own shows while the text streams
   ]);
   assert.ok(calls.filter((c) => c.method === "assistant.threads.setStatus").every((c) => !c.params.status || c.params.loading_messages?.[0] === c.params.status));
+});
+
+test("a status line stays 2 s before the next replaces it; clearing it does not wait", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where, { lineMinMs: 50 });
+  await out.tool("x", { title: "execute", status: "in_progress" });
+  await out.tool("x", { status: "completed" });
+  await out.tool("y", { title: "read", status: "in_progress" });
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(lines(calls), ["line: Running execute…"]); // the fast tool's line is still up
+  await new Promise((r) => setTimeout(r, 60));
+  assert.deepEqual(lines(calls), ["line: Running execute…", "line: Running read…"]); // the last one wins, the ones between are skipped
+  out.text("Done.");
+  await out.end();
+  assert.deepEqual(lines(calls), ["line: Running execute…", "line: Running read…", "line: "]);
 });
 
 test("a stretch cut by a rollover keeps its summary in the first message, counting there; the new one shows the running tool", async () => {
