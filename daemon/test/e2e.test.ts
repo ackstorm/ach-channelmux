@@ -89,6 +89,7 @@ const newDaemon = (over: Partial<Parameters<typeof createDaemon>[0]> = {}) =>
     agentCmd: ["node", join(import.meta.dirname, "mock-agent.ts")],
     baseDir: base,
     stateFile: join(base, ".state", "threads.json"),
+    homeIcon: "https://example.com/icon.png",
     log: (msg, extra) => void logged.push({ msg, ...(extra as object) }),
     stt: { url: `http://127.0.0.1:${(stt.address() as any).port}/v1/`, model: "stt-test", language: "es", headers: async () => ({ authorization: "Bearer k-1" }) },
     tts: { url: `http://127.0.0.1:${(stt.address() as any).port}/v1`, model: "tts-test", voice: "Puck", prompt: "Like a pirate", headers: async () => ({ authorization: "Bearer k-2" }) },
@@ -873,8 +874,10 @@ test("the Home tab shows the agent, defaults for new sessions and recent threads
   await waitFor(() => published().length > n);
   let home = JSON.parse(published().at(-1)!.params.view);
   assert.equal(published().at(-1)!.params.user_id, "UPEPE");
-  assert.deepEqual(home.blocks.filter((b: any) => b.type === "header").map((b: any) => b.text.text), ["Your agent", "Defaults for new sessions", "Recent threads"]);
-  assert.equal(home.blocks[1].text.text, `🟢 Online · node · ${base}`);
+  assert.deepEqual(home.blocks.filter((b: any) => b.type === "header").map((b: any) => b.text.text), ["How to use it", "Defaults for new sessions", "Recent threads"]);
+  assert.match(home.blocks[0].text.text, /^\*Your coding agent\*\nIt runs `node` in your workspace/);
+  assert.deepEqual(home.blocks[0].accessory, { type: "image", image_url: "https://example.com/icon.png", alt_text: "agent" });
+  assert.match(home.blocks[1].elements[0].text, new RegExp(`^🟢 \\*Online\\* · \`${base}\` · on `));
   const model = home.blocks.find((b: any) => b.accessory?.action_id === "home_default:model");
   assert.deepEqual([model.text.text, model.accessory.initial_option, model.accessory.placeholder.text], ["*Model*   agent default", undefined, "Change…"]);
   const recent = home.blocks[home.blocks.findIndex((b: any) => b.text?.text === "Recent threads") + 1].text.text;

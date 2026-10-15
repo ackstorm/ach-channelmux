@@ -45,6 +45,7 @@ fi
 # Restart on exit with a growing pause; give up after 10 quick failures in a
 # row (about 27 minutes of retries). A run longer than 5 minutes resets the count.
 # Exit code 3: another of the user's daemons is connected to the relay; not restarted.
+HOME_ICON_URL=${HOME_ICON_URL:-https://raw.githubusercontent.com/ackstorm/ach-channelmux/main/slack-app-icon.png} \
 RELAY_URL=$ACH_CHANNELMUX_URL RELAY_TOKEN=$CODER_AGENT_TOKEN BASE_DIR=$BASE_DIR \
 nohup bash -c '
   fails=0

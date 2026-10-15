@@ -88,6 +88,8 @@ export interface DaemonConfig {
   /** Text to speech for the agent's send_voice tool: an OpenAI-compatible API (its /audio/speech). */
   tts?: { url: string; model: string; voice: string; prompt?: string; headers: () => Promise<Record<string, string>> };
   /** Called when the agent process exits on its own. */
+  /** A public image URL for the Home tab, e.g. the Slack app's icon. Unset: none. */
+  homeIcon?: string;
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
 }
@@ -1145,17 +1147,25 @@ export function createDaemon(cfg: DaemonConfig) {
     return {
       type: "home" as const,
       blocks: [
-        header("Your agent"),
-        section(`🟢 Online · ${basename(cfg.agentCmd[0])} · ${cfg.baseDir}`),
-        note(`on ${hostname()}`),
+        section(
+          `*Your coding agent*\nIt runs \`${basename(cfg.agentCmd[0])}\` in your workspace: each thread is one agent session in a folder you pick.`,
+          cfg.homeIcon && { type: "image", image_url: cfg.homeIcon, alt_text: "agent" },
+        ),
+        note(`🟢 *Online* · \`${cfg.baseDir}\` · on ${hostname()}`),
+        { type: "divider" },
+        header("How to use it"),
+        section(
+          "💬 *Message me* to start: pick the folder and the session, then talk in the thread.\n" +
+            "📎 *Send files, images or voice clips*; ask for a voice note back.\n" +
+            "⌨️ *`$help`* in a thread lists its commands: `$model`, `$compact`, `$clear`, `$stop`; `!` runs a shell command.",
+        ),
+        { type: "divider" },
         header("Defaults for new sessions"),
         ...(options.length
           ? options.map((o) => section(`*${o.name}*   ${chosen(o)}`, { ...settingMenu(o), action_id: `home_default:${o.id}`, initial_option: undefined, placeholder: plain("Change…") }))
           : [note("Start a thread first: the agent's settings show up here.")]),
         header("Recent threads"),
         section(rows.join("\n") || "None yet."),
-        { type: "divider" },
-        note("Message me to start · each thread is one agent session · `$help` in a thread lists its commands"),
       ] as any[],
     };
   }
