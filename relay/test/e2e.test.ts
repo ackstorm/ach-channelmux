@@ -233,6 +233,7 @@ test("users.info for any user once the owner has a channel", async () => {
   const info = async (user: string) => (await (await fetch(`${GW}/api/users.info?user=${user}`, { method: "POST", headers: { authorization: "Bearer gw-xavi" } })).json()).error;
   assert.equal(await info("UXAVI"), undefined);
   assert.equal(await info("UPEPE"), "restricted_action");
+  assert.equal(await info("UBOT"), undefined); // the app's bot user: its avatar is the app's icon
 });
 
 test("a button in a channel thread clicked by another user reaches the channel owner's daemon, and its modal's submit too", async () => {

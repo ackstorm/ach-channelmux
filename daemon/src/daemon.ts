@@ -88,8 +88,6 @@ export interface DaemonConfig {
   /** Text to speech for the agent's send_voice tool: an OpenAI-compatible API (its /audio/speech). */
   tts?: { url: string; model: string; voice: string; prompt?: string; headers: () => Promise<Record<string, string>> };
   /** Called when the agent process exits on its own. */
-  /** A public image URL for the Home tab, e.g. the Slack app's icon. Unset: none. */
-  homeIcon?: string;
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
 }
@@ -1125,6 +1123,14 @@ export function createDaemon(cfg: DaemonConfig) {
   // The settings the agent offers, as its latest session reported them; saved, so a restart still knows them.
   const latestSettings = () => [...configs.values()].at(-1) ?? knownSettings;
 
+  // The Slack app's icon: its bot user's avatar. Undefined when the relay does not let us read it.
+  let icon: Promise<string | undefined> | undefined;
+  const appIcon = async () => {
+    const me = await slack.auth.test().catch(() => undefined);
+    const bot = me?.user_id && (await slack.users.info({ user: me.user_id }).catch(() => undefined));
+    return (bot as any)?.user?.profile?.image_512 as string | undefined;
+  };
+
   async function homeView() {
     const options = latestSettings().filter((o) => o.type === "select" && o.category !== "mode") as any[];
     const titles = new Map((await sessions().catch(() => [])).map((x) => [x.sessionId, x.title]));
@@ -1149,7 +1155,7 @@ export function createDaemon(cfg: DaemonConfig) {
       blocks: [
         section(
           `*Your coding agent*\nIt runs \`${basename(cfg.agentCmd[0])}\` in your workspace: each thread is one agent session in a folder you pick.`,
-          cfg.homeIcon && { type: "image", image_url: cfg.homeIcon, alt_text: "agent" },
+          (await (icon ??= appIcon())) && { type: "image", image_url: await icon, alt_text: "agent" },
         ),
         note(`🟢 *Online* · \`${cfg.baseDir}\` · on ${hostname()}`),
         { type: "divider" },

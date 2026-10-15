@@ -532,9 +532,10 @@ export function createGateway(cfg: GatewayConfig) {
     const scoped = CHANNEL_SCOPED[method];
     if (scoped) {
       const targets = scoped.flatMap((f) => channelsOf(f, params[f]));
-      // users.info: anyone once the owner serves a channel (the daemon names who wrote each message).
+      // users.info: anyone once the owner serves a channel (the daemon names who wrote each message); the app's own
+      // bot user always (its avatar, the app's icon, shows on the daemon's Home tab).
       const hasChannels = Object.values(cfg.channels ?? {}).some((c) => c.email === owner.email);
-      const mine = (c: string) => (method === "users.info" && hasChannels) || mayWrite(owner, c);
+      const mine = (c: string) => (method === "users.info" && (hasChannels || c === botUserId)) || mayWrite(owner, c);
       if (targets.length === 0 || !(await Promise.all(targets.map(mine))).every(Boolean)) {
         return { ok: false, error: "restricted_action" };
       }

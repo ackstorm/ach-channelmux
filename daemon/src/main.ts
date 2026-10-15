@@ -51,7 +51,6 @@ const daemon = createDaemon({
   agentCmd: env("AGENT_CMD", "opencode acp").split(" ").filter(Boolean),
   baseDir: resolve(env("BASE_DIR", process.cwd())),
   stateFile: env("STATE_FILE", join(homedir(), ".local/state/ach-channelmux/threads.json")),
-  homeIcon: process.env.HOME_ICON_URL,
   stt: process.env.AUDIO_STT_BASE_URL
     ? {
         url: process.env.AUDIO_STT_BASE_URL,

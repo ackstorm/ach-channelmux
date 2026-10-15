@@ -82,6 +82,7 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
         return send(id ? { ok: true, user: { id } } : { ok: false, error: "users_not_found" });
       }
       case "users.info":
+        if (params.user === "UBOT") return send({ ok: true, user: { id: "UBOT", is_bot: true, profile: { image_512: "https://example.com/bot-512.png" } } });
         return send(users[params.user]
           ? { ok: true, user: { id: params.user, tz: "Europe/Madrid", profile: { email: users[params.user], real_name: `Real ${params.user}`, first_name: "Mary Ann" } } }
           : { ok: false, error: "user_not_found" });
