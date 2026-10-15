@@ -3,7 +3,7 @@
 // two texts) is one task card. If a stream cannot start or breaks (feature off, or the relay refusing
 // it because the shared rate budget is spent), the rest of the turn goes out as plain messages, one per
 // finished text segment (cut at tool calls), split to Slack's 12k limit. Above the reply box, the
-// thread's status line says what the agent is doing ("Tool use: npm test", "Thinking · <heading>…", or a working
+// thread's status line says what the agent is doing ("Tool: npm test", "Thinking · <heading>…", or a working
 // phrase) until the reply's text starts.
 
 import { realpathSync } from "node:fs";
@@ -27,8 +27,8 @@ const TITLE_MAX = 200;
 const OUTPUT_MAX = 500;
 // A status line: Slack refuses a longer loading_messages entry (invalid_arguments, seen 2026-10-15).
 const LINE_MAX = 50;
-// A tool on the status line: "Tool use: " and at most this much of it.
-const TOOL_LINE_MAX = 35;
+// A tool on the status line: "Tool: " and the rest of Slack's 50 characters.
+const TOOL_LINE_MAX = LINE_MAX - "Tool: ".length;
 
 /** What a tool card shows. Missing fields keep their earlier value. */
 export interface ToolInfo {
@@ -243,7 +243,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let current: Stretch | null = null; // the open stretch
   const stretchOf = new Map<string, Stretch>(); // ACP tool call id -> its stretch
   const tools = new Map<string, { title: string; status: string; line?: string }>(); // ACP status: in_progress, completed, failed
-  const toolLine = (id: string) => `Tool use: ${clip(tools.get(id)!.line ?? tools.get(id)!.title, TOOL_LINE_MAX)}`;
+  const toolLine = (id: string) => `Tool: ${clip(tools.get(id)!.line ?? tools.get(id)!.title, TOOL_LINE_MAX)}`;
   const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
   type Layout = ({ text: string } | { card: string })[];
   let layout: Layout = []; // the current stream message as sent, in order

@@ -374,9 +374,9 @@ test("the status line says what runs until the reply's text starts; Slack shows 
   assert.ok(WORKING.includes(working), working);
   assert.deepEqual(steps, [
     "active", "line: Thinking · Planning…", // no message yet: the line shows with the session active, not "processing"
-    "stream", "active", "line: Tool use: ls -la", // the card opens a stream, which needs the session set active again
+    "stream", "active", "line: Tool: ls -la", // the card opens a stream, which needs the session set active again
     `line: ${working}`, // the tool is done: the model works on what came back
-    "line: Tool use: npm test",
+    "line: Tool: npm test",
     `line: ${working}`,
     "line: ", // text ends the stretch: the line is cleared, Slack's own shows while the text streams
   ]);
@@ -390,25 +390,25 @@ test("a status line stays 2 s before the next replaces it; clearing it does not 
   await out.tool("x", { status: "completed" });
   await out.tool("y", { title: "read", status: "in_progress" });
   await new Promise((r) => setTimeout(r, 10));
-  assert.deepEqual(lines(calls), ["line: Tool use: execute"]); // the fast tool's line is still up
+  assert.deepEqual(lines(calls), ["line: Tool: execute"]); // the fast tool's line is still up
   await new Promise((r) => setTimeout(r, 60));
-  assert.deepEqual(lines(calls), ["line: Tool use: execute", "line: Tool use: read"]); // the last one wins, the ones between are skipped
+  assert.deepEqual(lines(calls), ["line: Tool: execute", "line: Tool: read"]); // the last one wins, the ones between are skipped
   out.text("Done.");
   await out.end();
-  assert.deepEqual(lines(calls), ["line: Tool use: execute", "line: Tool use: read", "line: "]);
+  assert.deepEqual(lines(calls), ["line: Tool: execute", "line: Tool: read", "line: "]);
 });
 
-test("a tool's line is its description or its title, at most 35 characters; its details replace it at once", async () => {
+test("a tool's line is its description or its title, at most 44 characters; its details replace it at once", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where, { lineMinMs: 50 });
   await out.tool("r", { title: "read", status: "in_progress" }); // opencode: the input comes in a later update
-  await out.tool("r", { title: "read src/components/GameBoard.test.tsx", status: "in_progress" });
+  await out.tool("r", { title: "read src/components/board/GameBoard.integration.test.tsx", status: "in_progress" });
   await new Promise((r) => setTimeout(r, 10)); // within the 2 s another line would wait
   await out.tool("b", { title: "sleep 5 && ls -la", status: "in_progress", line: "Wait, then list the folder" });
   await new Promise((r) => setTimeout(r, 60));
   out.text("Done.");
   await out.end();
-  assert.deepEqual(lines(calls), ["line: Tool use: read", "line: Tool use: read src/components/GameBoard.test…", "line: Tool use: Wait, then list the folder", "line: "]);
+  assert.deepEqual(lines(calls), ["line: Tool: read", "line: Tool: read src/components/board/GameBoard.integra…", "line: Tool: Wait, then list the folder", "line: "]);
   assert.deepEqual(describeTool({ title: "bash", kind: "execute" }, { command: "ls", description: "List files" }, "/w"), { title: "ls", line: "List files" });
 });
 
