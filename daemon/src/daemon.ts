@@ -16,7 +16,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { changed, createOutput, describePermission, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
+import { changed, createOutput, describePermission, describeTool, editsOf, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -158,7 +158,6 @@ export function createDaemon(cfg: DaemonConfig) {
   const configWaiters = new Map<string, () => void>(); // session -> resolves on its next config_option_update
   const agentCommands = new Map<string, acp.AvailableCommand[]>(); // session -> the agent's own commands (opencode: init, review, compact)
   const usage = new Map<string, { used: number; size: number; cost?: { amount: number; currency: string } | null }>(); // session -> context use, cost so far
-  const turnDiffs = new Map<string, string[]>(); // session -> full diffs of the running turn's edits
   const turnEdits = new Map<string, Map<string, [number, number]>>(); // session -> path -> lines added, removed
   const shellNotes = new Map<string, string[]>(); // session -> "! commands" run since its last turn, told to the agent with the next one
 
@@ -215,11 +214,10 @@ export function createDaemon(cfg: DaemonConfig) {
       else if (update.sessionUpdate === "tool_call" || update.sessionUpdate === "tool_call_update") {
         const cwd = bySession.get(sessionId)?.cwd ?? "";
         void out.tool(update.toolCallId, describeTool(update, inputs.get(update.toolCallId), cwd));
-        const diff = fullDiff(update, cwd, inputs.get(update.toolCallId));
-        if (diff) {
-          turnDiffs.set(sessionId, [...(turnDiffs.get(sessionId) ?? []), diff]);
+        const edits = editsOf(update, inputs.get(update.toolCallId));
+        if (edits.length) {
           const files = turnEdits.get(sessionId) ?? new Map<string, [number, number]>();
-          for (const d of editsOf(update, inputs.get(update.toolCallId))) {
+          for (const d of edits) {
             const [added, removed] = files.get(d.path) ?? [0, 0];
             const c = changed(d.oldText, d.newText);
             files.set(d.path, [added + c.added.length, removed + c.removed.length]);
@@ -419,9 +417,9 @@ export function createDaemon(cfg: DaemonConfig) {
     return true;
   }
 
-  // Uploads to the thread. A snippet_type (e.g. "diff") makes Slack show it as a code snippet.
-  async function upload(t: Thread, filename: string, data: Buffer, opts: { comment?: string; snippet?: string } = {}) {
-    const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: data.length, ...(opts.snippet && { snippet_type: opts.snippet }) })) as any;
+  // Uploads to the thread.
+  async function upload(t: Thread, filename: string, data: Buffer, opts: { comment?: string } = {}) {
+    const up = (await slack.apiCall("files.getUploadURLExternal", { filename, length: data.length })) as any;
     // Pre-signed URL on Slack's side: no token goes there (ours is the relay token).
     const res = await fetch(up.upload_url, { method: "POST", body: new Uint8Array(data) });
     if (!res.ok) throw new Error(`upload failed: HTTP ${res.status}`);
@@ -691,12 +689,6 @@ export function createDaemon(cfg: DaemonConfig) {
         turnEdits.delete(t.sessionId);
         const line = await footer(t, edits);
         await out.end(line ? [{ type: "divider" }, { type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
-        // The whole turn's changes as one diff snippet: the cards list the tools, not their diffs.
-        const diffs = turnDiffs.get(t.sessionId);
-        turnDiffs.delete(t.sessionId);
-        if (diffs?.length) {
-          await upload(t, "changes.diff", Buffer.from(diffs.join("\n")), { snippet: "diff" }).catch((err) => log("diff_upload_failed", { error: String(err) }));
-        }
         if (t.top && edits) await changesTab(t);
         await contextBar(t); // the turn may have changed the branch
         if (outcome === "failed") {

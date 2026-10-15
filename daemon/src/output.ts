@@ -81,25 +81,6 @@ export function changed(oldText: string | null | undefined, newText: string | nu
   const ops = lineOps(oldText, newText);
   return { removed: ops.filter(([op]) => op === "-").map(([, l]) => l), added: ops.filter(([op]) => op === "+").map(([, l]) => l) };
 }
-const CONTEXT = 3; // unchanged lines around each change, as git shows them
-/** Unified diff hunks: changes closer than twice the context share one. */
-const diffLines = (oldText: string | null | undefined, newText: string | null | undefined) => {
-  const ops = lineOps(oldText, newText);
-  const hunks: [number, number][] = []; // first and last change of each
-  ops.forEach(([op], i) => {
-    if (op === " ") return;
-    const last = hunks.at(-1);
-    if (last && i - last[1] <= 2 * CONTEXT + 1) last[1] = i;
-    else hunks.push([i, i]);
-  });
-  const count = (part: [string, string][], skip: string) => part.filter(([op]) => op !== skip).length;
-  return hunks.map(([first, last]) => {
-    const from = Math.max(0, first - CONTEXT);
-    const body = ops.slice(from, last + CONTEXT + 1);
-    const before = ops.slice(0, from);
-    return [`@@ -${count(before, "+") + 1},${count(body, "+")} +${count(before, "-") + 1},${count(body, "-")} @@`, ...body.map(([op, l]) => `${op}${l}`)].join("\n");
-  }).join("\n");
-};
 
 // A path relative to the folder; the agent may report it under the folder's real path (a symlink resolved).
 const relTo = (cwd: string) => {
@@ -135,14 +116,6 @@ export function editsOf(u: any, input: any): { path: string; oldText?: string | 
   // ponytail: an overwritten file counts as all new lines; its old content is not reported.
   if (!diffs.length && typeof input?.content === "string" && typeof path === "string") return [{ path, oldText: null, newText: input.content }];
   return diffs;
-}
-
-/** The full diff of a finished edit, or undefined: "--- path / +++ path" then -/+ lines per file. */
-export function fullDiff(u: any, cwd: string, input?: any): string | undefined {
-  const rel = relTo(cwd);
-  const diffs = editsOf(u, input);
-  if (!diffs.length) return undefined;
-  return diffs.map((d: any) => `--- ${rel(d.path)}\n+++ ${rel(d.path)}\n${diffLines(d.oldText, d.newText)}`).join("\n");
 }
 
 /** Describes an ACP tool_call / tool_call_update for a card. `input` is the tool's latest rawInput. */

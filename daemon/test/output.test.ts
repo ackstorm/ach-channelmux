@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { changed, createOutput, describePermission, describeTool, fullDiff, splitMarkdown } from "../src/output.ts";
+import { changed, createOutput, describePermission, describeTool, splitMarkdown } from "../src/output.ts";
 import { WORKING } from "../src/working.ts";
 
 function fakeApi(fail: Record<string, string> = {}) {
@@ -217,8 +217,6 @@ test("describeTool turns opencode's tool updates into card title and status", ()
   assert.deepEqual(edit, { title: "edit calc.py", status: "completed" });
   // opencode's write reports no diff: its input stands for one (a new file's lines).
   const write = { title: "write", kind: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Created file successfully: hello.txt" } }] };
-  assert.equal(fullDiff(write, cwd, { filePath: "/w/proj/hello.txt", content: "hola\nadiós\n" }), "--- hello.txt\n+++ hello.txt\n@@ -1,0 +1,2 @@\n+hola\n+adiós");
-  assert.equal(fullDiff({ ...write, status: "in_progress" }, cwd, { filePath: "/w/proj/hello.txt", content: "hola\n" }), undefined);
   const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
   assert.deepEqual(shell, { title: "python3 t.py", status: "failed" }); // exit 1
   assert.equal(describeTool({ status: "completed" }, { command: "ls" }, cwd).title, "ls"); // the final update carries no title
@@ -254,15 +252,13 @@ test("a long turn sends its processing status again before Slack drops it", asyn
   assert.ok(n >= 3, `processing sent ${n} times`);
 });
 
-test("an edit reported as the whole file before and after shows only the lines it changed, with 3 lines around", () => {
+test("an edit reported as the whole file before and after counts only the lines it changed", () => {
   const file = (mid: string) => ["a", "b", "c", mid, "e", "f"].join("\n") + "\n";
   assert.deepEqual(changed(file("d"), file("D")), { removed: ["d"], added: ["D"] });
   assert.deepEqual(changed(file("d"), file("d").replace("e\n", "e\nnew\n")), { removed: [], added: ["new"] });
-  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/proj/x.js", oldText: file("d"), newText: file("D") }] };
-  assert.equal(fullDiff(edit, "/w/proj"), "--- x.js\n+++ x.js\n@@ -1,6 +1,6 @@\n a\n b\n c\n-d\n+D\n e\n f");
 });
 
-test("changes far apart in one edit are two hunks, and only the changed lines count", () => {
+test("changes far apart in one edit count only the changed lines", () => {
   const lines = Array.from({ length: 40 }, (_, i) => `line ${i}`);
   const after = lines.map((l, i) => (i === 2 ? "TWO" : i === 30 ? "THIRTY" : l));
   after.splice(20, 0, "inserted");
@@ -270,13 +266,6 @@ test("changes far apart in one edit are two hunks, and only the changed lines co
   const now = `${after.join("\n")}\n`;
   // The middle change is within twice the context of neither: three hunks, nothing in between them shown.
   assert.deepEqual(changed(old, now), { removed: ["line 2", "line 30"], added: ["TWO", "inserted", "THIRTY"] });
-  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/x.js", oldText: old, newText: now }] };
-  assert.equal(fullDiff(edit, "/w"), [
-    "--- x.js", "+++ x.js",
-    "@@ -1,6 +1,6 @@", " line 0", " line 1", "-line 2", "+TWO", " line 3", " line 4", " line 5",
-    "@@ -18,6 +18,7 @@", " line 17", " line 18", " line 19", "+inserted", " line 20", " line 21", " line 22",
-    "@@ -28,7 +29,7 @@", " line 27", " line 28", " line 29", "-line 30", "+THIRTY", " line 31", " line 32", " line 33",
-  ].join("\n"));
 });
 
 test("a path the agent reports under the folder's real path (a symlink) is shown relative to the folder", () => {
@@ -284,8 +273,7 @@ test("a path the agent reports under the folder's real path (a symlink) is shown
   mkdirSync(join(base, "real", "proj"), { recursive: true });
   symlinkSync(join(base, "real"), join(base, "link"));
   const cwd = join(base, "link", "proj");
-  const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: join(base, "real", "proj", "x.js"), oldText: "a\n", newText: "b\n" }] };
-  assert.equal(fullDiff(edit, cwd), "--- x.js\n+++ x.js\n@@ -1,1 +1,1 @@\n-a\n+b");
+  assert.equal(describeTool({ title: "read", kind: "read" }, { filePath: join(base, "real", "proj", "x.js") }, cwd).title, "read x.js");
 });
 
 // A fake Slack whose next appendStream answers with the given error once.

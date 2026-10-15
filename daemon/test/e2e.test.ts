@@ -398,31 +398,25 @@ test("a subagent's own reply is not streamed as the agent's reply", async () => 
   assert.equal(text, "Parent reply.");
 });
 
-test("a turn that edits ends with a line of its changes (branch, files, lines) and its changes as a changes.diff snippet, however short", async () => {
+test("a turn that edits ends with a line of its changes (branch, files, lines); no diff is posted", async () => {
   const n = mark();
   execFileSync("git", ["init", "-q", "-b", "work", join(base, "beta")]);
-  await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
-  const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
+  await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000060", thread_ts: "100.000001" }));
+  await turnEnded("100.000060");
   // The turn's edits, in one line under the reply with the context and cost so far: the only block there.
   const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
   assert.deepEqual(end[0], { type: "divider" }); // a rule between the reply and its footer
   assert.deepEqual(end[1], { type: "context", elements: [{ type: "mrkdwn", text: "📁 `beta` · 🌿 `work` · Model one · 1 file changed +30 −30 · *Context* 24k / 200k (12%) · *Cost* $0.012" }] });
   assert.equal(end.length, 2);
-  const get = since(n).find((c) => c.method === "files.getUploadURLExternal")!;
-  assert.deepEqual([get.params.filename, get.params.snippet_type], ["changes.diff", "diff"]);
-  assert.equal(done.params.thread_ts, "100.000001");
-  const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
-  assert.match(body, /^--- big\.py\n\+\+\+ big\.py\n@@ -1,30 \+1,30 @@\n-old line 0/);
-  assert.match(body, /\+new line 29$/);
+  assert.ok(!since(n).some((c) => c.method === "files.getUploadURLExternal"));
 });
 
-test("a one-line edit also comes as a changes.diff snippet", async () => {
+test("a one-line edit counts its one changed line", async () => {
   const n = mark();
-  await slack.emit("events_api", slack.dm("UPEPE", "small edit", { ts: "100.000054", thread_ts: "100.000001" }));
-  const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
-  const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
-  assert.equal(body, "--- small.py\n+++ small.py\n@@ -1,1 +1,1 @@\n-a = 1\n+a = 2");
-  await turnEnded("100.000054");
+  await slack.emit("events_api", slack.dm("UPEPE", "small edit", { ts: "100.000061", thread_ts: "100.000001" }));
+  await turnEnded("100.000061");
+  const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
+  assert.match(end[1].elements[0].text, /· 1 file changed \+1 −1 ·/);
 });
 
 test("attached files are saved to a temp folder and the agent gets their paths, not their content", async () => {
