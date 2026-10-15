@@ -141,7 +141,8 @@ async function startNew(thread: string, rel = ".") {
   await startIn(await useFolder(view, searched(rel)));
 }
 const since = (n: number) => slack.calls.slice(n);
-const turnEnded = (ts: string) => waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === ts && c.params.name === "white_check_mark"));
+const ended = (ts: string, outcome = "done") => waitFor(() => logged.some((e) => e.msg === "turn_ended" && e.ts === ts && e.outcome === outcome));
+const turnEnded = (ts: string) => ended(ts);
 const streamed = (calls: typeof slack.calls) =>
   calls.flatMap((c) => (c.params.chunks ? JSON.parse(c.params.chunks) : []));
 
@@ -208,7 +209,8 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
   const head = header.params.text;
   assert.equal(head, `📁 \`${join(base, "beta")}\`\n💬 New session · \`ses_1\``);
   assert.deepEqual(JSON.parse(header.params.blocks).map((b: any) => b.type), ["section", "divider"]); // a rule under the header
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000001" && c.params.name === "white_check_mark"));
+  await turnEnded("100.000001");
+  assert.equal(calls("reactions.add").length, 0); // no outcome reaction on the message
   const firstStatus = calls("agents.sessions.setStatus")[0];
   assert.equal(firstStatus.params.status, "processing");
   assert.equal(firstStatus.params.thread_ts, "100.000001");
@@ -276,7 +278,7 @@ test("$stop cancels the running turn; a message meanwhile is queued with a notic
   await waitFor(() => agentLog().some((e) => e.m === "cancel"));
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "and then this"));
   await waitFor(() => calls("chat.update").some((c) => c.params.ts === notice.ts && c.params.text === "📬 Queued, now running." && c.params.blocks === "[]")); // no Send now left
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000005" && c.params.name === "black_square_for_stop"));
+  await ended("100.000005", "stopped");
   assert.ok(!posts.some((p) => p.params.channel === DM && !p.params.thread_ts && /Stopped/.test(p.params.text ?? ""))); // the reaction says it; no notice in the main view
 });
 
@@ -309,7 +311,7 @@ test("$stop (or /stop) in the thread cancels too", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "/stop", { ts: "100.000008", thread_ts: "100.000001" }));
   await waitFor(() => agentLog().filter((e) => e.m === "cancel").length > cancels);
   assert.equal(agentLog().some((e) => e.m === "prompt" && e.text === "/stop"), false);
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000007" && c.params.name === "black_square_for_stop")); // its turn has ended
+  await ended("100.000007", "stopped"); // its turn has ended
 });
 
 test("a turn that ends after its tools with no reply gets one nudge, and the reply reaches the thread", async () => {
@@ -359,11 +361,11 @@ test("while the model thinks the status line says so; its card shows when the th
 test("a failed turn offers Retry, which sends the same message again", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "flaky", { ts: "100.000023", thread_ts: "100.000001" }));
   const failed = await waitFor(() => posts.find((p) => p.params.thread_ts === "100.000001" && p.params.blocks?.includes('"retry"')));
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "x"));
+  await ended("100.000023", "failed");
   const id = JSON.parse(failed.params.blocks)[0].accessory.value;
   await click({ ts: failed.ts, thread_ts: "100.000001" }, { type: "button", action_id: "retry", value: id });
   await waitFor(() => agentLog().filter((e) => e.m === "prompt" && e.text === "flaky").length === 2);
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "100.000023" && c.params.name === "white_check_mark"));
+  await ended("100.000023");
 });
 
 test("a message queued behind a running turn still runs after the daemon restarts", async () => {
@@ -1041,7 +1043,7 @@ test("a mention in a CODE_CHANNELS channel opens a code channel with the picker 
   await inCode(cc, "wait", { ts: "960.000005" });
   await waitFor(() => agentLog().some((e) => e.m === "prompt" && e.text === "wait" && e.sessionId === ccSession));
   await inCode(cc, "$stop", { ts: "960.000006" });
-  await waitFor(() => calls("reactions.add").some((c) => c.params.timestamp === "960.000005" && c.params.name === "black_square_for_stop"));
+  await ended("960.000005", "stopped");
 
   // The Home tab still draws: a code channel's session has no thread ts.
   const published = calls("views.publish").length;

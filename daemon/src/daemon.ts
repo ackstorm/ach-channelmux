@@ -592,8 +592,6 @@ export function createDaemon(cfg: DaemonConfig) {
     return p;
   }
 
-  // How a turn ended, as a reaction on the message that asked for it.
-  const OUTCOME = { done: "white_check_mark", failed: "x", stopped: "black_square_for_stop" } as const;
   // One line under each reply: "📁 `repo` · 🌿 `main` · Model two · 2 files changed +12 −3 · Context 24k / 200k (12%)
   // · Cost $0.012" (the branch only in a git repo, the counts only after edits, context and cost once the agent
   // reports them). A code channel's context bar shows folder, branch and model: there only the rest.
@@ -665,7 +663,7 @@ export function createDaemon(cfg: DaemonConfig) {
         if (t.base) save();
       }
       const out = createOutput((m, p) => slack.apiCall(m, p), { channel: t.channel, thread: inThread(t) }, { title, log });
-      let outcome: keyof typeof OUTCOME = "failed";
+      let outcome: "done" | "failed" | "stopped" = "failed";
       outputs.set(t.sessionId, out);
       turnOf.set(t.sessionId, ++turns);
       await out.begin();
@@ -708,8 +706,7 @@ export function createDaemon(cfg: DaemonConfig) {
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
         }
         outputs.delete(t.sessionId);
-        // Last: once it shows, the turn is over ($fork, $clear and $done no longer refuse).
-        if (ts) void slack.reactions.add({ channel: t.channel, timestamp: ts, name: OUTCOME[outcome] }).catch(() => {});
+        log("turn_ended", { outcome, ts }); // last: the turn is over ($fork, $clear and $done no longer refuse)
       }
     });
     queues.set(t.sessionId, turn);
@@ -1001,8 +998,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const shown = first.picker && (await slack.chat.update({ channel: p.channel, ts: first.picker, ...headed(head) }).then(() => true, () => false));
     if (!shown) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), ...headed(head), unfurl_links: false });
     if (recap) await slack.chat.postMessage({ channel: p.channel, thread_ts: inThread(where), markdown_text: recap } as any); // Slack refuses text with markdown_text
-    // No reaction on a code channel's first message: it is in the channel it was opened from.
-    await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.top ? undefined : first.ts }); // Slack shows ":" and "·" as "_" in titles
+    await prompt(t, await blocksFor(first), { title: `${basename(cwd)} - ${(first.text || first.files?.[0]?.name || "").split("\n")[0].replaceAll(/[:·]/g, "")}`, ts: first.ts }); // Slack shows ":" and "·" as "_" in titles
   }
 
   const stop = async (t: Thread) => {
