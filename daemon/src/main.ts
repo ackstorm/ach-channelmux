@@ -73,5 +73,10 @@ const daemon = createDaemon({
   onAgentExit: () => process.exit(1),
 });
 
-await daemon.start();
+await daemon.start().catch((err) => {
+  if (err.message !== "already_connected") throw err;
+  // Exit code 3: the supervisor must not restart it (examples/coder/daemon.sh).
+  console.error(JSON.stringify({ msg: "already_connected", error: "another daemon of this user is connected to the relay; stopping" }));
+  process.exit(3);
+});
 for (const sig of ["SIGINT", "SIGTERM"]) process.on(sig, () => daemon.stop().finally(() => process.exit(0)));

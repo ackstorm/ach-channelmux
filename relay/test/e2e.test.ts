@@ -431,20 +431,21 @@ test("Home tab: opening it reaches the owner's daemon, which may publish only th
   await assert.rejects(pepe1.app.client.views.publish({ user_id: "UXAVI", view }), /restricted_action/);
 });
 
-test("criterion 4: a second daemon parks as standby and takes over when the first dies", async () => {
-  const pepe2 = await daemon("pepe2", "gw-pepe");
-  assert.deepEqual(gw.state(USERS.UPEPE), { primary: gw.state(USERS.UPEPE)!.primary, standby: 1 });
+test("criterion 4: a second daemon of the same owner is refused while the first is connected", async () => {
+  const before = gw.state(USERS.UPEPE)!.primary;
+  const res = await fetch(`${GW}/api/apps.connections.open`, { method: "POST", headers: { authorization: "Bearer gw-pepe" } });
+  assert.deepEqual(await res.json(), { ok: false, error: "already_connected" });
+  assert.deepEqual(gw.state(USERS.UPEPE), { primary: before }); // the first one keeps it
   const n1 = pepe1.got.length;
   await slack.emit("events_api", slack.dm("UPEPE", "still pepe1"));
   await waitFor(() => pepe1.got.length === n1 + 1);
-  assert.equal(pepe2.got.length, 0);
 
   await pepe1.app.stop();
-  await waitFor(() => gw.state(USERS.UPEPE)!.standby === 0);
-  await slack.emit("events_api", slack.dm("UPEPE", "now pepe2"));
-  await waitFor(() => pepe2.got.length === 1);
-  assert.equal(pepe2.got[0].text, "now pepe2");
-  assert.equal(pepe1.got.at(-1).text, "still pepe1");
+  await waitFor(() => gw.state(USERS.UPEPE)!.primary === null);
+  const pepe3 = await daemon("pepe3", "gw-pepe"); // once it is gone, another one connects
+  await slack.emit("events_api", slack.dm("UPEPE", "now pepe3"));
+  await waitFor(() => pepe3.got.length === 1);
+  assert.equal(pepe3.got[0].text, "now pepe3");
 });
 
 test("offline: every message gets OFFLINE_MESSAGE where it was written, and nothing is replayed on connect", async () => {

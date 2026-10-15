@@ -7,7 +7,7 @@
 //   - proxies an allowlist of Web API methods with the real bot token, scoped
 //     to the owner's DM,
 //   - proxies inbound file downloads so daemons never hold the bot token,
-//   - parks extra daemons of the same owner as hot standby,
+//   - refuses a second daemon of the same owner while one is connected,
 //   - tells the owner, in the thread, when none of their daemons is connected,
 //   - spends the Slack app's shared rate limits for every daemon (limiter.ts).
 
@@ -69,8 +69,7 @@ interface Owner {
   name?: string; // Slack display name, for the session preamble
   tz?: string; // Slack IANA time zone, for the session preamble
   dm: string;
-  primary: Conn | null;
-  standby: Conn[];
+  primary: Conn | null; // the owner's one daemon
   triggers: Set<string>;
   views: Set<string>;
   files: Map<string, string>; // fileId -> original url_private_download
@@ -234,7 +233,6 @@ export function createGateway(cfg: GatewayConfig) {
       tz: user?.tz,
       dm,
       primary: null,
-      standby: [],
       triggers: new Set(),
       views: new Set(),
       files: new Map(),
@@ -333,12 +331,6 @@ export function createGateway(cfg: GatewayConfig) {
       if (f.url_private) f.url_private = proxied;
       if (f.url_private_download) f.url_private_download = proxied;
     }
-  }
-
-  function promote(owner: Owner) {
-    owner.primary = owner.standby.shift() ?? null;
-    if (!owner.primary) return;
-    log("subscriber_promoted", { owner: owner.email, conn: owner.primary.id });
   }
 
   // Nothing is held while offline: every message for the agent gets the notice, where it was written.
@@ -525,6 +517,8 @@ export function createGateway(cfg: GatewayConfig) {
     delete params.token;
 
     if (method === "apps.connections.open") {
+      // One daemon per owner: a second one is refused while the first is connected, and stops (see the daemon).
+      if (owner.primary) return { ok: false, error: "already_connected" };
       const ticket = randomUUID();
       tickets.set(ticket, { owner, exp: Date.now() + 30_000 });
       const wsBase = cfg.publicUrl.replace(/^http/, "ws");
@@ -638,11 +632,14 @@ export function createGateway(cfg: GatewayConfig) {
 
   function attach(owner: Owner, ws: WebSocket) {
     const conn: Conn = { id: randomUUID().slice(0, 8), ws, alive: true, pending: new Map() };
-    // Claim is synchronous on the event loop, so two upgrades cannot both become primary.
-    const role = owner.primary ? "standby" : "primary";
-    if (role === "primary") owner.primary = conn;
-    else owner.standby.push(conn);
-    log("subscriber_connected", { owner: owner.email, conn: conn.id, role });
+    // Two daemons that got a ticket before either connected: the first wins. Claim is synchronous on the event loop.
+    // ponytail: the loser's Socket Mode client then retries until the slot frees, as a reconnecting daemon does.
+    if (owner.primary) {
+      log("subscriber_refused", { owner: owner.email, conn: conn.id });
+      return ws.close(4009, "already_connected");
+    }
+    owner.primary = conn;
+    log("subscriber_connected", { owner: owner.email, conn: conn.id });
 
     ws.on("pong", () => (conn.alive = true));
     ws.on("message", (raw) => {
@@ -660,27 +657,23 @@ export function createGateway(cfg: GatewayConfig) {
     });
     ws.on("close", () => {
       for (const r of conn.pending.values()) r(undefined);
-      if (owner.primary === conn) {
-        log("subscriber_lost", { owner: owner.email, conn: conn.id });
-        promote(owner);
-      } else {
-        owner.standby = owner.standby.filter((c) => c !== conn);
-      }
+      if (owner.primary !== conn) return;
+      log("subscriber_lost", { owner: owner.email, conn: conn.id });
+      owner.primary = null;
     });
     ws.send(JSON.stringify({ type: "hello", num_connections: 1, debug_info: { gateway: true } }));
   }
 
   const pinger = setInterval(() => {
     for (const owner of ownerByEmail.values()) {
-      for (const c of [owner.primary, ...owner.standby]) {
-        if (!c) continue;
-        if (!c.alive) {
-          c.ws.terminate();
-          continue;
-        }
-        c.alive = false;
-        c.ws.ping();
+      const c = owner.primary;
+      if (!c) continue;
+      if (!c.alive) {
+        c.ws.terminate();
+        continue;
       }
+      c.alive = false;
+      c.ws.ping();
     }
   }, cfg.pingIntervalMs ?? 10_000);
 
@@ -712,7 +705,7 @@ export function createGateway(cfg: GatewayConfig) {
     /** For tests and metrics. */
     state(email: string) {
       const o = ownerByEmail.get(email);
-      return o ? { primary: o.primary?.id ?? null, standby: o.standby.length } : null;
+      return o ? { primary: o.primary?.id ?? null } : null;
     },
   };
 }

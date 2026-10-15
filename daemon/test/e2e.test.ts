@@ -1122,6 +1122,13 @@ test("$done closes a code channel: a summary, then the channel archived with it;
   await waitFor(() => posts.find((p) => p.params.thread_ts === "930.000001" && p.params.text === "`$done` closes a code channel; this is not one."));
 });
 
+test("a second daemon of the same user stops at start: the relay refuses it while the first is connected", async () => {
+  const second = newDaemon({ stateFile: join(base, ".state", "second.json") });
+  await assert.rejects(second.start(), /already_connected/);
+  await slack.emit("events_api", slack.dm("UPEPE", "$help", { ts: "970.000001", thread_ts: "930.000001" }));
+  await waitFor(() => posts.some((p) => p.params.thread_ts === "930.000001" && /\$clear/.test(p.params.text ?? ""))); // the first still answers
+});
+
 test("a long folder path keeps its start and its name, the middle cut", () => {
   assert.equal(short("/workspace/local/x"), "/workspace/local/x");
   const long = `/workspace/local/${"epepe".repeat(10)}/deeper/ach-project`;

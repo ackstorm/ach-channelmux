@@ -1509,7 +1509,22 @@ export function createDaemon(cfg: DaemonConfig) {
   });
 
   return {
+    /** Rejects with "already_connected" when another daemon of the same owner is connected to the relay. */
     async start() {
+      // Bolt retries a refused connection forever (a reconnecting daemon waits for its old socket to go); a new
+      // daemon asks first, and stops. A restart's own old socket takes a moment to close at the relay: 5 s of grace.
+      // ponytail: a dead daemon's socket can hold the slot up to 20 s (relay pings); a restart sooner stops too.
+      let open: any;
+      for (let i = 0; i < 10; i++) {
+        open = await slack.apiCall("apps.connections.open").catch((err) => err.data);
+        if (open?.error !== "already_connected") break;
+        await sleep(500);
+      }
+      if (open?.error === "already_connected") {
+        stopping = true;
+        proc.kill();
+        throw new Error("already_connected");
+      }
       await ready;
       await new Promise<void>((r) => mcp.listen(0, "127.0.0.1", r));
       mcpPort = (mcp.address() as AddressInfo).port;

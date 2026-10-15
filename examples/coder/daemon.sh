@@ -44,12 +44,19 @@ fi
 # The token stays in the env; nothing is written to disk but the thread -> session map.
 # Restart on exit with a growing pause; give up after 10 quick failures in a
 # row (about 27 minutes of retries). A run longer than 5 minutes resets the count.
+# Exit code 3: another of the user's daemons is connected to the relay; not restarted.
 RELAY_URL=$ACH_CHANNELMUX_URL RELAY_TOKEN=$CODER_AGENT_TOKEN BASE_DIR=$BASE_DIR \
 nohup bash -c '
   fails=0
   while [ "$fails" -lt 10 ]; do
     start=$(date +%s)
-    "$0" || echo "ach-channelmux-daemon exited with $?"
+    code=0
+    "$0" || code=$?
+    if [ "$code" -eq 3 ]; then
+      echo "ach-channelmux-daemon: another of your daemons is connected to the relay; stopped (stop that one, then restart this workspace)"
+      exit 0
+    fi
+    [ "$code" -eq 0 ] || echo "ach-channelmux-daemon exited with $code"
     if [ $(( $(date +%s) - start )) -gt 300 ]; then fails=0; else fails=$((fails + 1)); fi
     sleep $(( fails * 30 ))
   done
