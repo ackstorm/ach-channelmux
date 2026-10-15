@@ -61,6 +61,7 @@ jobs:
         with:
           node-version: '22'
           cache: npm
+      - run: sudo apt-get update -q && sudo apt-get install -y -q --no-install-recommends ffmpeg # send_voice encodes its clips with it
       - run: npm ci --ignore-scripts
       - run: npm test
 
