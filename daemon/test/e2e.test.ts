@@ -412,14 +412,6 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   assert.ok(!since(n).some((c) => c.method === "files.getUploadURLExternal"));
 });
 
-test("the footer shows the turn's tokens (cache when reported) and its cost beside the session's", async () => {
-  const n = mark();
-  await slack.emit("events_api", slack.dm("UPEPE", "count tokens", { ts: "100.000062", thread_ts: "100.000001" }));
-  await turnEnded("100.000062");
-  const end = JSON.parse(since(n).find((c) => c.method === "chat.stopStream")!.params.blocks);
-  assert.match(end[1].elements[0].text, /· ↓ 30k in · ↑ 480 out · 12k cached · \*Context\* 30k \/ 200k \(15%\) · \*Cost\* \$0\.0080 \(session \$0\.020\)$/);
-});
-
 test("a one-line edit counts its one changed line", async () => {
   const n = mark();
   await slack.emit("events_api", slack.dm("UPEPE", "small edit", { ts: "100.000061", thread_ts: "100.000001" }));

@@ -596,22 +596,13 @@ export function createDaemon(cfg: DaemonConfig) {
   // · Cost $0.012" (the branch only in a git repo, the counts only after edits, context and cost once the agent
   // reports them). A code channel's context bar shows folder, branch and model: there only the rest.
   // ponytail: counts the edits the agent reported; changes made by shell commands are not in it.
-  async function footer(t: Thread, edits?: Map<string, [number, number]>, turn: { usage?: acp.Usage | null; costBefore?: number } = {}) {
+  async function footer(t: Thread, edits?: Map<string, [number, number]>) {
     let added = 0;
     let removed = 0;
     for (const [a, r] of edits?.values() ?? []) [added, removed] = [added + a, removed + r];
     const files = edits && `${edits.size} file${edits.size > 1 ? "s" : ""} changed +${added} −${removed}`;
     const where = t.top ? [] : [`📁 \`${basename(t.cwd)}\``, await branchOf(t.cwd).then((b) => b && `🌿 \`${b}\``), modelName(t)];
-    // This turn's tokens (ACP's experimental usage), cache only when the agent reports it.
-    const u = turn.usage;
-    const spent = u && [`↓ ${tokens(u.inputTokens)} in`, `↑ ${tokens(u.outputTokens)} out`,
-      u.cachedReadTokens && `${tokens(u.cachedReadTokens)} cached`, u.cachedWriteTokens && `${tokens(u.cachedWriteTokens)} cache write`].filter(Boolean).join(" · ");
-    // The turn's cost: what the session's grew by, when it was known before the turn.
-    const [context, cost] = usageOf(t);
-    const total = usage.get(t.sessionId)?.cost;
-    const delta = total && turn.costBefore !== undefined && total.amount > turn.costBefore ? total.amount - turn.costBefore : undefined;
-    const costs = delta !== undefined ? `*Cost* ${money(delta, total!.currency)} (session ${money(total!.amount, total!.currency)})` : cost;
-    return [...where, files, spent, context, costs].filter(Boolean).join(" · ");
+    return [...where, files, ...usageOf(t)].filter(Boolean).join(" · ");
   }
   // The session's model by its short name (no provider prefix); undefined when the agent has no model setting.
   const modelName = (t: Thread) => {
@@ -673,8 +664,6 @@ export function createDaemon(cfg: DaemonConfig) {
       }
       const out = createOutput((m, p) => slack.apiCall(m, p), { channel: t.channel, thread: inThread(t) }, { title, log });
       let outcome: "done" | "failed" | "stopped" = "failed";
-      let costBefore: number | undefined;
-      let spent: acp.Usage | null | undefined;
       outputs.set(t.sessionId, out);
       turnOf.set(t.sessionId, ++turns);
       await out.begin();
@@ -683,14 +672,11 @@ export function createDaemon(cfg: DaemonConfig) {
         const ran = shellNotes.get(t.sessionId);
         shellNotes.delete(t.sessionId);
         const context: acp.ContentBlock[] = ran ? [{ type: "text", text: `[Shell commands the user ran in this folder since your last turn]\n${ran.join("\n\n")}` }] : [];
-        costBefore = usage.get(t.sessionId)?.cost?.amount;
         let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...(await content)] });
-        spent = r.usage;
         // Some models end a turn right after their tool calls, with no reply: ask once for one.
         if (r.stopReason === "end_turn" && out.quiet && !command) {
           log("nudged", { session: t.sessionId });
           r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
-          spent = r.usage ?? spent; // ponytail: the nudge's tokens, not the sum of both prompts
           // Still nothing (some models end with an empty reply): say so, or the turn looks finished and answered.
           if (r.stopReason === "end_turn" && out.quiet) out.text("_The agent ended its turn without a reply._");
         }
@@ -703,7 +689,7 @@ export function createDaemon(cfg: DaemonConfig) {
       } finally {
         const edits = turnEdits.get(t.sessionId);
         turnEdits.delete(t.sessionId);
-        const line = await footer(t, edits, { usage: spent, costBefore });
+        const line = await footer(t, edits);
         await out.end(line ? [{ type: "divider" }, { type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
         if (t.top && edits) await changesTab(t);
         await contextBar(t); // the turn may have changed the branch
@@ -1066,11 +1052,10 @@ export function createDaemon(cfg: DaemonConfig) {
   const choicesOf = (o: any) => (o.options as any[]).flatMap((x) => x.options ?? [x]) as { value: string; name: string; description?: string }[];
   const currentName = (o: any) => choicesOf(o).find((c) => c.value === o.currentValue)?.name ?? String(o.currentValue);
   const tokens = (n: number) => (n >= 1e6 ? `${+(n / 1e6).toFixed(1)}M` : n >= 1e3 ? `${Math.round(n / 1e3)}k` : String(n));
-  const money = (amount: number, currency: string) => `${currency === "USD" ? "$" : `${currency} `}${amount.toFixed(amount < 0.01 ? 4 : amount < 1 ? 3 : 2)}`;
   const usageOf = (t: Thread) => {
     const u = usage.get(t.sessionId);
     const context = u?.size ? [`*Context* ${tokens(u.used)} / ${tokens(u.size)} (${u.used && u.used < u.size / 100 ? "<1" : Math.round((100 * u.used) / u.size)}%)`] : [];
-    if (u?.cost) context.push(`*Cost* ${money(u.cost.amount, u.cost.currency)}`);
+    if (u?.cost) context.push(`*Cost* ${u.cost.currency === "USD" ? "$" : `${u.cost.currency} `}${u.cost.amount.toFixed(u.cost.amount < 1 ? 3 : 2)}`);
     return context;
   };
   // The message's text: what a notification or a client without blocks shows.
