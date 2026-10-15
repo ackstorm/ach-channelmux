@@ -1,5 +1,6 @@
 // Renders one agent turn into a Slack thread. With native streaming (chat.startStream),
-// text grows in one message and each tool call is a task card. If a stream cannot start or
+// text grows in one message and each stretch (the model's thinking and the tools it calls between
+// two texts) is a task card, with the tool running now in a second one. If a stream cannot start or
 // breaks (feature off, or the relay refusing it because the shared rate budget is spent),
 // the rest of the turn goes out as plain messages, one per finished text segment (cut at
 // tool calls), split to Slack's 12k limit. The session status (Slack's "Working…" and stop
@@ -14,22 +15,16 @@ const FLUSH_MS = 1_000;
 const STREAM_MAX_AGE_MS = 240_000;
 // Slack drops a session's "processing" status after an hour unless it is sent again.
 const STATUS_REFRESH_MS = 30 * 60_000;
-// A pending card shows nothing below its title, unlike a running one: sent as running, a tool keeps its card's height.
-const TASK_STATUS: Record<string, string> = { pending: "in_progress", in_progress: "in_progress", completed: "complete", failed: "error" };
 
 // task_update field limits, probed against Slack (2026-10-08): 800 chars of output passed, 1000 failed
 // with msg_too_long; the margins are deliberate.
 const TITLE_MAX = 200;
-const DETAILS_MAX = 250;
 const OUTPUT_MAX = 500;
 
 /** What a tool card shows. Missing fields keep their earlier value. */
 export interface ToolInfo {
   title?: string;
   status?: string; // ACP: pending, in_progress, completed, failed
-  details?: string; // what ran: command, path, pattern
-  output?: string; // what came back: start of the result, edit sizes, exit code
-  sources?: { type: "url"; text: string; url: string }[]; // a fetched page, as a link
 }
 
 const clip = (s: string, max: number) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
@@ -122,9 +117,6 @@ export function describePermission(toolCall: any, input: any, cwd: string) {
   return `🔐 The agent wants to ${verb} ${subject}${shown ? `\n${fence(shown, 500)}` : ""}`;
 }
 
-/** Turn diffs longer than this (what a card shows) also go to the thread as a changes.diff snippet. */
-export const DIFF_IN_CARD = 400;
-
 /** A finished edit's diffs. opencode's write reports none: its input (path and whole content) stands for one. */
 export function editsOf(u: any, input: any): { path: string; oldText?: string | null; newText?: string | null }[] {
   if (u.status !== "completed") return [];
@@ -153,7 +145,7 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   const child = u._meta?.["opencode/child-session"]?.title;
   let title: string | undefined = u.title ?? undefined;
   if (child && title?.startsWith(`${child}: `)) title = title.slice(child.length + 2);
-  const subject = path ? rel(path) : (i.description ?? i.id); // a subagent's task, a skill's name
+  const subject = path ? rel(path) : (i.url ?? i.description ?? i.id); // a subagent's task, a skill's name
   // A shell card is its command; a long or multi-line one (a heredoc) is titled by the agent's own
   // description of it, or its first line, and shown whole in the details.
   const short = command !== undefined && !command.includes("\n") && command.length <= 100;
@@ -164,40 +156,11 @@ export function describeTool(u: any, input: any, cwd: string): ToolInfo {
   if (called.length) title = [...new Set(called)].join(", ");
   else if (typeof i.code === "string" && i.code.trim()) title = i.code.trim().split("\n")[0]; // no tool called: its first line
   if (child && title) title = `↳ ${title}`;
-  const sources = typeof i.url === "string" && /^https?:\/\//.test(i.url) ? [{ type: "url" as const, text: clip(i.url, DETAILS_MAX), url: i.url }] : undefined;
-  let details: string | undefined;
-  if (i.pattern) details = `${i.pattern}${path ? ` in ${rel(path)}` : ""}`;
-  else if (i.url && !sources) details = String(i.url); // a link says it otherwise
-  else if (typeof i.code === "string") details = i.code;
-  else if (command && !short) details = command;
-  let output: string | undefined;
   let status: string | undefined = u.status ?? undefined;
-  if (u.status === "completed" || u.status === "failed") {
-    const content: any[] = u.content ?? [];
-    const diffs = content.filter((c) => c.type === "diff");
-    const text = content.filter((c) => c.type === "content" && c.content?.type === "text").map((c) => c.content.text).join("\n").trim()
-      .replace(/^<subagent[^>]*>\n?([\s\S]*?)\n?<\/subagent>$/, "$1");
-    const exit = u.rawOutput?.metadata?.exit;
-    const failed = typeof exit === "number" && exit !== 0 ? `exit ${exit}\n` : "";
-    // opencode reports a command that exits non-zero, or a tool error, as completed
-    if (failed || u.rawOutput?.metadata?.error === true) status = "failed";
-    const room = OUTPUT_MAX - 40; // headers and fences
-    if (diffs.length) {
-      const head = diffs.map((d) => {
-        const { added, removed } = changed(d.oldText, d.newText);
-        return `${rel(d.path)}  +${added.length} −${removed.length}`;
-      }).join("\n");
-      output = `${head}\n${fence(diffs.map((d) => diffLines(d.oldText, d.newText)).join("\n"), room - head.length, "diff")}`;
-    } else if (text) output = `${failed}${fence(text, room)}`;
-    else if (failed) output = failed.trim();
-  }
-  return {
-    ...(title && { title: clip(title, TITLE_MAX) }),
-    ...(status && { status }),
-    ...(details && { details: clip(details, DETAILS_MAX) }),
-    ...(output && { output: clip(output, OUTPUT_MAX) }),
-    ...(sources && { sources }),
-  };
+  // opencode reports a command that exits non-zero, or a tool error, as completed
+  const exit = u.rawOutput?.metadata?.exit;
+  if (u.status === "completed" && ((typeof exit === "number" && exit !== 0) || u.rawOutput?.metadata?.error === true)) status = "failed";
+  return { ...(title && { title: clip(title, TITLE_MAX) }), ...(status && { status }) };
 }
 
 type Api = (method: string, params: Record<string, unknown>) => Promise<any>;
@@ -230,14 +193,22 @@ export function splitMarkdown(text: string, max = MAX_TEXT): string[] {
   return parts;
 }
 
-// A card's text as rich_text elements: fenced code preformatted, the rest plain.
-const rich = (s: string) =>
-  s.split(/```\w*\n?([\s\S]*?)\n?```/).flatMap((part, i) =>
-    part.trim() ? [{ type: i % 2 ? "rich_text_preformatted" : "rich_text_section", elements: [{ type: "text", text: i % 2 ? part : part.trim() }] }] : []);
-const CONTENT = ["details", "output", "sources"];
+const USING = "Using tool: ";
+const THOUGHT_MAX = 3_000; // a rewritten card's thinking; Slack took 24k characters in a chat.update (probed 2026-10-15)
+const txt = (text: string, style?: Record<string, boolean>) => ({ type: "text", text, ...(style && { style }) });
+// "**Heading**" in the model's thinking as bold text, the rest as typed.
+const bold = (s: string) => s.split(/\*\*([^*\n]+)\*\*/).flatMap((p, i) => (p ? [txt(p, i % 2 ? { bold: true } : undefined)] : []));
 const taskCard = (id: string, title: string, status: string, fields: Record<string, unknown>) => ({
-  type: "task_card", task_id: id, title, status: status === "complete" || status === "error" ? status : "in_progress", ...fields,
+  type: "task_card", task_id: id, title, status: status === "complete" ? "complete" : "in_progress", ...fields,
 });
+const plural = (n: number, w: string) => `${n} ${w}${n === 1 ? "" : "s"}`;
+
+// A stretch is the model's thinking and the tools it calls between two texts, or up to a question: card s<n> sums it
+// up and stays; while a tool runs after something else was shown, r<n> shows it. A stream cannot remove r<n>: each
+// stopped message is rewritten without it.
+type Entry = { thought: string } | { tool: string };
+type Stretch = { n: number; entries: Entry[]; tools: string[]; thought: boolean; thinkMs: number; closed: boolean; out: string; sent: number };
+
 export function createOutput(api: Api, where: { channel: string; thread?: string }, opts: { title?: string; log?: Log; statusRefreshMs?: number } = {}) {
   const log = opts.log ?? (() => {});
   const { channel, thread } = where;
@@ -254,20 +225,13 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let refresh: ReturnType<typeof setInterval> | undefined;
   let suspended = false;
   const held = new Set<string>(); // cards updated during a pause: a new message would show them running under the question
-  let thinking: { id: string; text: string; heading: string; shown: number } | null = null; // the model's thinking since its last text or tool
-  let texts = 0; // texts so far: the thinking between two texts is one card
-  const tasks = new Map<string, Chunk>(); // ACP tool call id (or thoughtN) -> its card's last known fields, whole
-  // A run is the tools called between two texts; it takes two cards, each on its own line. a<n> shows its first
-  // tool, then counts the tools before the one running now, which b<n> shows (each tool's content under its title:
-  // Slack appends content to a card); text or the turn's end makes a<n> count them all. A stream can neither
-  // remove b<n> nor clear a<n>'s content: the message is rewritten without them once it stops.
-  type Run = { n: number; tools: string[]; closed: boolean };
-  const runs: Run[] = [];
-  let current: Run | null = null;
-  const runOf = new Map<string, Run>(); // ACP tool call id -> its run
+  let thinking: { text: string; heading: string; shown: number; since: number } | null = null; // the model's thinking since its last text or tool
+  const stretches: Stretch[] = [];
+  let current: Stretch | null = null; // the open stretch
+  const stretchOf = new Map<string, Stretch>(); // ACP tool call id -> its stretch
+  const tools = new Map<string, { title: string; status: string }>(); // ACP status: in_progress, completed, failed
   const queued = new Map<string, { title: string; status: string }>(); // card id -> its title and status last queued
-  const filled = new Set<string>(); // "<card>:<field>" and "<card>:<tool>:<field>" given content in a b<n> card
-  const sentTasks = new Map<string, Chunk>(); // card id -> last update delivered; replayed into a rolled-over stream
+  const sentCards = new Set<string>(); // card ids delivered to a stream
   type Layout = ({ text: string } | { card: string })[];
   let layout: Layout = []; // the current stream message as sent, in order
   // A tool that finishes waits for what comes next (another tool, or text), to go out in the same append: the cards
@@ -275,7 +239,6 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   let later: Chunk[] = [];
   const shownIn = new Map<string, string>(); // card id -> the message it is in
   const stopped = new Map<string, Layout>(); // earlier messages of the turn, by ts
-  const left = new Set<string>(); // cards of runs already closed when their message stopped: they stay there
   const rewritten = new Map<string, string>(); // message ts -> its blocks as last rewritten
   let chain: Promise<unknown> = Promise.resolve();
   const run = (fn: () => Promise<unknown>) =>
@@ -290,35 +253,44 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     const ts = stream.ts;
     stream = null;
     stopped.set(ts, layout);
-    for (const x of layout) if ("card" in x && closedRun(x.card)) left.add(x.card);
     await api("chat.stopStream", { channel, ts, ...(blocks && { blocks }) }); // also sets the session back to active
     await rewrite(ts, layout, blocks);
   }
 
-  // A stopped message is sent again with each run's cards as one, its count, with nothing inside.
+  const stretchOfCard = (card: string) => stretches[Number(card.slice(1)) - 1];
+  const done = (t: string) => ["completed", "failed"].includes(tools.get(t)!.status);
+
+  // What a stretch did, in order: each thought, and each run of tools as a list of their titles.
+  function inside(s: Stretch) {
+    const elements: any[] = [];
+    for (const e of s.entries) {
+      if ("thought" in e) elements.push({ type: "rich_text_section", elements: bold(clip(e.thought, THOUGHT_MAX)) });
+      else {
+        const t = tools.get(e.tool)!;
+        const item = { type: "rich_text_section", elements: [txt(t.title, { code: true }), ...(t.status === "failed" ? [txt(" (failed)", { italic: true })] : [])] };
+        const last = elements.at(-1);
+        if (last?.type === "rich_text_list") last.elements.push(item);
+        else elements.push({ type: "rich_text_list", style: "bullet", elements: [item] });
+      }
+    }
+    return elements.length ? { output: { type: "rich_text", elements } } : {};
+  }
+
+  // A stopped message is sent again with each stretch as one card: its thinking and its tools inside, no running card.
   // ponytail: a rewrite Slack refuses (size, more than 50 blocks) leaves the message as streamed.
   async function rewrite(ts: string, lay: Layout, extra: unknown[] = []) {
-    const runOfCard = (card: string) => runs[Number(card.slice(1)) - 1];
-    const folded = (card: string) => card[0] === "b" || (card[0] === "a" && (runOfCard(card).closed || runOfCard(card).tools.length > 1));
-    if (!lay.some((x) => "card" in x && folded(x.card))) return;
+    if (!lay.some((x) => "card" in x)) return;
     const blocks = lay.flatMap((x): unknown[] => {
       if ("text" in x) {
         const t = x.text.trim();
         return t ? [{ type: "markdown", text: openFence(x.text) ? `${t}\n\`\`\`` : t }] : [];
       }
-      if (x.card[0] === "b") return [];
-      // As it stands now: a run's count may have grown since the message stopped.
-      const { title, status } = (x.card[0] === "a" ? head(runOfCard(x.card)) : sentTasks.get(x.card)) as { title: string; status: string };
-      // One still running here goes on in the next message, as settle() says.
-      const done = finished(status);
-      if (folded(x.card)) return [taskCard(x.card, title, done ? status : "complete", {})];
-      const t = { ...tasks.get(x.card[0] === "a" ? runOfCard(x.card).tools[0] : x.card)!, ...(done ? {} : { output: "↓ continues below" }) };
-      return [taskCard(x.card, t.title as string, done ? status : "complete", {
-        ...(t.details ? { details: { type: "rich_text", elements: rich(t.details as string) } } : {}),
-        ...(t.output ? { output: { type: "rich_text", elements: rich(t.output as string) } } : {}),
-        ...(t.sources ? { sources: t.sources } : {}),
-      })];
+      if (x.card[0] === "r") return [];
+      const s = stretchOfCard(x.card);
+      const h = head(s);
+      return [taskCard(x.card, h.title, h.status, inside(s))];
     });
+    if (!blocks.length && !extra.length) return;
     const text = lay.map((x) => ("text" in x ? x.text : "")).join("").trim();
     const body = JSON.stringify([...blocks, ...extra]);
     if (rewritten.get(ts) === body) return;
@@ -343,15 +315,17 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
 
   const textOf = (chunks: Chunk[]) => chunks.map((c) => (c.type === "markdown_text" ? c.text : "")).join("");
 
-  const finished = (status: unknown) => status === "complete" || status === "error";
-  // The cards a new message carries on: the open run's, and a running thought. A closed run stays where it is.
-  const goesOn = (t: Chunk) =>
-    (current !== null && [`a${current.n}`, `b${current.n}`].includes(t.id as string)) || ((t.id as string).startsWith("thought") && !finished(t.status));
-  const closedRun = (id: string) => /^[ab]\d+$/.test(id) && runs[Number(id.slice(1)) - 1]?.closed;
+  // The card a new message carries on: the open stretch's running tool. Every other card stays in the message that
+  // first showed it, which is rewritten as it now stands.
+  const goesOn = (id: string) => current !== null && id === `r${current.n}`;
+  const behind = (id: string) => {
+    const ts = shownIn.get(id);
+    return ts !== undefined && stopped.has(ts) && !goesOn(id);
+  };
 
   // A new stream message carries, whole, the cards that go on, and, before text, the fence the last one left open.
   async function start(chunks: Chunk[]) {
-    const open = [...sentTasks.values()].filter((t) => goesOn(t) && !chunks.some((c) => c.id === t.id)).map((t) => whole(t.id as string));
+    const open = [...sentCards].filter((id) => goesOn(id) && !chunks.some((c) => c.id === id)).map(whole);
     const r = await api("chat.startStream", { channel, ...(thread && { thread_ts: thread }), task_display_mode: "timeline", chunks: [...open, ...chunks] });
     stream = { ts: r.ts, started: Date.now() };
     sent = "";
@@ -363,18 +337,8 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   async function roll(close: boolean) {
     const fence = openFence(sent);
     if (fence && close && stream) await api("chat.appendStream", { channel, ts: stream.ts, chunks: [{ type: "markdown_text", text: "\n```" }] }).then(() => record([{ type: "markdown_text", text: "\n```" }]), () => {});
-    if (close) await settle();
     await stopStream();
     reopen = fence;
-  }
-
-  // A card still running when its message ends would stay unfinished there (red after a pause, a spinner
-  // after a rollover): it is closed with a pointer, and the next message shows it running again.
-  async function settle() {
-    const open = [...sentTasks.values()].filter((t) => !finished(t.status) && goesOn(t));
-    if (!stream || !open.length) return;
-    const chunks = open.map((t) => ({ type: "task_update", id: t.id, title: t.title, status: "complete", output: "↓ continues below" }));
-    await api("chat.appendStream", { channel, ts: stream.ts, chunks }).catch(() => {});
   }
 
   async function send(chunks: Chunk[]): Promise<boolean> {
@@ -384,9 +348,9 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       // A card left in an earlier message is not shown again here: that message is rewritten as it now stands.
       // The fence the last message left open is reopened before the first text of this one, not before its cards.
       const drop = async () => {
-        const behind = new Set(chunks.filter((c) => left.has(c.id as string)).map((c) => shownIn.get(c.id as string)!));
-        for (const ts of behind) await rewrite(ts, stopped.get(ts)!);
-        chunks = chunks.filter((c) => !left.has(c.id as string));
+        const stale = new Set(chunks.filter((c) => behind(c.id as string)).map((c) => shownIn.get(c.id as string)!));
+        for (const ts of stale) await rewrite(ts, stopped.get(ts)!);
+        chunks = chunks.filter((c) => !behind(c.id as string));
         const at = chunks.findIndex((c) => c.type === "markdown_text");
         if (reopen && at >= 0) {
           chunks = [...chunks.slice(0, at), { type: "markdown_text", text: `${reopen}\n` }, ...chunks.slice(at)];
@@ -409,7 +373,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       }
       sent += textOf(chunks);
       record(chunks);
-      for (const c of chunks) if (c.type === "task_update") sentTasks.set(c.id as string, c);
+      for (const c of chunks) if (c.type === "task_update") sentCards.add(c.id as string);
       return true;
     } catch (err) {
       log("stream_fallback", { error: String(err) });
@@ -439,78 +403,70 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
 
   function tool(id: string, info: ToolInfo) {
-    if (thinking && id !== thinking.id) endThought();
-    const prev = tasks.get(id);
-    const details = info.details ?? (prev?.details as string | undefined);
-    const output = info.output ?? (prev?.output as string | undefined);
-    const sources = info.sources ?? prev?.sources;
-    const task: Chunk = {
-      type: "task_update",
-      title: clip(String(info.title ?? prev?.title ?? "tool"), TITLE_MAX),
-      status: TASK_STATUS[info.status ?? ""] ?? prev?.status ?? "in_progress",
-      ...(details && { details }),
-      ...(output && { output }),
-      ...(sources ? { sources } : {}),
+    const ended = endThought();
+    const prev = tools.get(id);
+    const next = {
+      title: clip(info.title ?? prev?.title ?? "tool", TITLE_MAX - USING.length),
+      status: info.status ? (info.status === "pending" ? "in_progress" : info.status) : (prev?.status ?? "in_progress"),
     };
     // Agents repeat unchanged updates; each would cost an append from the shared budget.
-    const same = (k: string) => JSON.stringify(prev?.[k]) === JSON.stringify(task[k]);
-    if (prev && ["title", "status", "details", "output", "sources"].every(same)) return chain;
-    tasks.set(id, task);
+    if (prev && prev.title === next.title && prev.status === next.status) return chain;
+    tools.set(id, next);
     afterTool = true;
     quiet = true;
-    // Slack appends a card's details, output and sources to what it already shows: send them only when they change.
-    // A text that only grew sends what it gained.
-    const gain = (k: string) => (typeof prev?.[k] === "string" && (task[k] as string).startsWith(prev[k] as string) ? (task[k] as string).slice((prev[k] as string).length) : task[k]);
-    const added = Object.fromEntries(CONTENT.filter((k) => task[k] && !same(k)).map((k) => [k, gain(k)]));
-    if (id.startsWith("thought")) return emit([update(id, task as { title: string; status: string }, added)], false);
-    let r = runOf.get(id);
-    if (!r) {
-      r = current ??= runs[runs.push({ n: runs.length + 1, tools: [], closed: false }) - 1];
-      r.tools.push(id);
-      runOf.set(id, r);
+    let s = stretchOf.get(id);
+    if (!s) {
+      s = current ??= newStretch();
+      s.tools.push(id);
+      s.entries.push({ tool: id });
+      stretchOf.set(id, s);
     }
-    if (!r.closed && id === r.tools.at(-1) && finished(task.status)) {
-      later.push(...cards(r, id, added).filter((c) => c !== null));
+    const cs = cards(s);
+    if (s.closed) {
+      // Its message may have stopped already: it is rewritten with the tool as it now stands.
+      const ts = shownIn.get(`s${s.n}`);
+      if (ts && stopped.has(ts)) run(() => rewrite(ts, stopped.get(ts)!));
+    }
+    if (!ended && !s.closed && id === s.tools.at(-1) && done(id)) {
+      later.push(...cs.filter((c) => c !== null));
       return run(flush); // the text before it is not held back
     }
-    return emit(cards(r, id, added));
+    return emit(cs);
   }
 
-  // A run's cards as they stand, with what tool `id` added to its own.
-  function cards(r: Run, id?: string, added: Record<string, unknown> = {}) {
-    const a = update(`a${r.n}`, head(r), !r.closed && r.tools.length === 1 ? added : {});
-    if (r.tools.length < 2) return [a];
-    const last = r.tools.at(-1)!;
-    return [a, update(`b${r.n}`, now(r), !r.closed && id === last ? headed(`b${r.n}`, last, added) : {})];
+  function newStretch() {
+    const s: Stretch = { n: stretches.length + 1, entries: [], tools: [], thought: false, thinkMs: 0, closed: false, out: "", sent: 0 };
+    stretches.push(s);
+    return s;
   }
-  // The first card's title and status: its tool alone and running, else the count of those before the running one.
-  function head(r: Run) {
-    if (!r.closed && r.tools.length === 1) return now(r);
-    const counted = r.closed ? r.tools : r.tools.slice(0, -1);
-    const states = counted.map((t) => tasks.get(t)!.status);
-    const failed = states.filter((x) => x === "error").length;
-    const title = `🔧 ${counted.length} tool${counted.length === 1 ? "" : "s"} used${failed ? ` · ${failed} failed` : ""}`;
-    return { title, status: states.every(finished) ? "complete" : "in_progress" };
-  }
-  // The running tool's title and status; closed, its card is done (and goes when the message is rewritten).
-  function now(r: Run) {
-    const t = tasks.get(r.tools.at(-1)!)!;
-    return { title: t.title as string, status: r.closed ? "complete" : (t.status as string) };
-  }
-  // What a tool adds to the running-tool card, the first part of each field under the tool's title.
-  function headed(card: string, tool: string, added: Record<string, unknown>) {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(added)) {
-      if (k === "sources") {
-        out[k] = v;
-        continue;
-      }
-      const gap = filled.has(`${card}:${k}`) ? "\n" : "";
-      const title = filled.has(`${card}:${tool}:${k}`) ? "" : `── ${tasks.get(tool)!.title}\n`;
-      filled.add(`${card}:${k}`).add(`${card}:${tool}:${k}`);
-      out[k] = `${gap}${title}${v}`;
+
+  // The summary card: thinking now; the one tool of a stretch without thinking; else what the stretch did, counting
+  // the tools before the one running.
+  function head(s: Stretch) {
+    if (thinking && s === current) return { title: clip(thinking.heading ? `Thinking · ${thinking.heading}` : "Thinking…", TITLE_MAX), status: "in_progress", solo: false };
+    if (!s.thought && !s.closed && s.tools.length === 1) {
+      return { title: clip(`${USING}${tools.get(s.tools[0])!.title}`, TITLE_MAX), status: done(s.tools[0]) ? "complete" : "in_progress", solo: true };
     }
-    return out;
+    const running = s.closed ? undefined : s.tools.find((t) => !done(t));
+    const counted = s.tools.filter((t) => t !== running);
+    const failed = counted.filter((t) => tools.get(t)!.status === "failed").length;
+    const parts = [s.thought ? `Thought for ${Math.max(1, Math.round(s.thinkMs / 1000))}s` : "", counted.length ? `${plural(counted.length, "tool")} used` : "", failed ? `${failed} failed` : ""].filter(Boolean);
+    return { title: parts.join(" · "), status: "complete", solo: false };
+  }
+  // The running tool's card: the stretch's last tool, done once the stretch is.
+  function runningCard(s: Stretch) {
+    const last = s.tools.at(-1)!;
+    return { title: clip(`${USING}${tools.get(last)!.title}`, TITLE_MAX), status: s.closed || done(last) ? "complete" : "in_progress" };
+  }
+  // The stretch's cards as they stand: its summary, and the running tool when the summary says something else
+  // (or did, so it is finished there too).
+  function cards(s: Stretch) {
+    const h = head(s);
+    const last = s.tools.at(-1);
+    const r = last !== undefined && !h.solo && (queued.has(`r${s.n}`) || (!s.closed && !done(last)));
+    const out = s.out.slice(s.sent); // Slack appends a card's output to what it shows: send only the new part
+    s.sent = s.out.length;
+    return [update(`s${s.n}`, h, out ? { output: out } : {}), r ? update(`r${s.n}`, runningCard(s), {}) : null];
   }
   // A card's update, or null when it shows nothing new.
   function update(card: string, state: { title: string; status: string }, content: Record<string, unknown>): Chunk | null {
@@ -519,10 +475,11 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     queued.set(card, { title: state.title, status: state.status });
     return { type: "task_update", id: card, title: state.title, status: state.status, ...content };
   }
-  // What waits from a finished tool goes first, except with a thought: thinking does not end a tool's turn on screen.
+  // What waits from a finished tool goes first. Of several updates to the running-tool card only the last goes out.
   // The text before the cards goes first; `before`, when given, is all of it (text after them is pending too).
   function emit(updates: (Chunk | null)[], merge = true, before?: string) {
-    const chunks = [...(merge ? later.splice(0) : []), ...updates.filter((c) => c !== null)];
+    const all = [...(merge ? later.splice(0) : []), ...updates.filter((c) => c !== null)];
+    const chunks = all.filter((c, i) => (c.id as string)[0] !== "r" || !all.slice(i + 1).some((d) => d.id === c.id));
     if (!chunks.length) return before ? run(() => put(before)) : chain;
     return run(async () => {
       if (suspended) return void chunks.forEach((c) => held.add(c.id as string));
@@ -532,15 +489,11 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
   }
   // A card whole, for a message that has not shown it.
   function whole(card: string): Chunk {
-    if (card.startsWith("thought")) return { ...tasks.get(card)!, id: card };
-    const r = runs[Number(card.slice(1)) - 1];
-    const b = card[0] === "b";
-    const tool = b ? r.tools.at(-1)! : r.tools[0];
-    const t = tasks.get(tool)!;
-    const shows = !r.closed && (b || r.tools.length === 1);
-    const content = Object.fromEntries((shows ? CONTENT : []).filter((k) => t[k]).map((k) => [k, b && k !== "sources" ? `── ${t.title}\n${t[k]}` : t[k]]));
-    if (b) for (const k of Object.keys(content)) filled.add(`${card}:${k}`).add(`${card}:${tool}:${k}`);
-    return { type: "task_update", id: card, ...(b ? now(r) : head(r)), ...content };
+    const s = stretchOfCard(card);
+    if (card[0] === "r") return { type: "task_update", id: card, ...runningCard(s) };
+    s.sent = s.out.length;
+    const { title, status } = head(s);
+    return { type: "task_update", id: card, title, status, ...(s.out && { output: s.out }) };
   }
   // The held cards, whole: the message they go to has not shown them yet.
   async function release() {
@@ -548,27 +501,32 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     held.clear();
     if (cards.length) await send(cards);
   }
-  // Text, or the turn's end, closes the run: its first card counts all its tools, before the text that follows.
+  // Text, a question or the turn's end closes the stretch: its summary counts all its tools, before the text that follows.
   function close() {
-    const r = current;
-    if (!r) return;
+    endThought();
+    const s = current;
+    if (!s) return;
     current = null;
-    r.closed = true;
+    s.closed = true;
     const before = pending;
     pending = "";
-    void emit(cards(r), true, before);
+    void emit(cards(s), true, before);
   }
 
-  // The model's thinking between two texts is one folded card: it runs while the model thinks, and each stretch's
-  // end goes into it when a tool or text follows (two appends a stretch, not one per chunk).
+  // The model's thinking joins its stretch: the card follows the heading it is on while it thinks, and when a tool
+  // or text follows, the thinking's tail goes into the card's output (two updates, not one per chunk).
   function endThought() {
-    if (!thinking) return;
-    const { id, text } = thinking;
+    if (!thinking || !current) return false;
+    const { text, since } = thinking;
     thinking = null;
-    const tail = text.trim().replaceAll("\`\`\`", "ˋˋˋ");
-    const before = tasks.get(id)?.output as string | undefined;
-    const add = tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail;
-    void tool(id, { title: "Thinking", status: "completed", ...((add || before) && { output: before && add ? `${before}\n\n${add}` : before || add }) });
+    current.thinkMs += Date.now() - since;
+    const body = text.trim();
+    if (body) {
+      current.entries.push({ thought: body });
+      const tail = body.replaceAll("\`\`\`", "ˋˋˋ");
+      current.out += `${current.out ? "\n\n" : ""}${tail.length > OUTPUT_MAX ? `…${tail.slice(-(OUTPUT_MAX - 1))}` : tail}`;
+    }
+    return true;
   }
 
   return {
@@ -578,9 +536,7 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     },
     text(s: string) {
       if (s.trim()) {
-        endThought();
         close();
-        texts++;
         quiet = false;
       }
       if (afterTool) {
@@ -591,17 +547,21 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
       if (streaming && !timer) timer = setTimeout(() => run(flush), FLUSH_MS);
     },
     // While the model thinks, its card's title follows the heading it is on ("**Planning the Steps**", as Gemini
-    // writes them), at most once a second; the finished card is "Thinking" again.
+    // writes them), at most once a second.
     thought(s: string) {
       if (!thinking) {
-        thinking = { id: `thought${texts}`, text: "", heading: "", shown: -Infinity }; // its first heading shows at once
-        void tool(thinking.id, { title: "Thinking", status: "in_progress" });
+        const st = (current ??= newStretch());
+        st.thought = true;
+        thinking = { text: "", heading: "", shown: -Infinity, since: Date.now() }; // its first heading shows at once
+        afterTool = true;
+        quiet = true;
+        void emit(cards(st));
       }
       thinking.text += s;
       const heading = [...thinking.text.matchAll(/\*\*([^*\n]+)\*\*/g)].at(-1)?.[1].trim() ?? "";
       if (heading && heading !== thinking.heading && Date.now() - thinking.shown >= FLUSH_MS) {
         Object.assign(thinking, { heading, shown: Date.now() });
-        void tool(thinking.id, { title: `Thinking · ${heading}` });
+        void emit(cards(current!));
       }
     },
     tool,
@@ -609,13 +569,12 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     get quiet() {
       return quiet;
     },
-    /** Before posting buttons (blocks only go out when a stream stops). */
+    /** Before posting buttons (blocks only go out when a stream stops). A question ends the stretch like text does. */
     pause: () => {
-      void emit([]); // a finished tool's card, before the stream stops
-      suspended = true;
+      close();
       return run(async () => {
+        suspended = true;
         await flush();
-        await settle();
         await stopStream().catch(() => {});
         await status("suspended");
       });
@@ -630,7 +589,6 @@ export function createOutput(api: Api, where: { channel: string; thread?: string
     /** Blocks (e.g. the footer line) go under the streamed reply; without a stream they are dropped. */
     end: (blocks?: unknown[]) => {
       clearInterval(refresh);
-      endThought();
       close();
       suspended = false;
       return run(async () => {

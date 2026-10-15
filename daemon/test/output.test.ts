@@ -44,7 +44,7 @@ test("a turn streams text and tool cards into one message, then stops the stream
   ]); // the finished tool waits for the text, to go out with its count
   assert.deepEqual(calls[0].params, { channel_id: "D1", thread_ts: "1.0", status: "processing", title: "repo: fix the bug" });
   assert.equal(chunks(calls).filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "in_progress"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]); // pending goes as running
+  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["Using tool: ls", "in_progress"], ["Using tool: ls", "complete"], ["1 tool used", "complete"]]); // pending goes as running
 });
 
 test("blocks given to end() go under the streamed reply; without a stream there is nothing to attach them to", async () => {
@@ -99,91 +99,69 @@ test("pause ends the stream and suspends the session; later text opens a new str
   ]);
 });
 
-test("a card running when the stream pauses is closed there with a pointer and runs on in the next message", async () => {
+test("a question ends the stretch: its tool finishing after the answer updates the first message, not a new card", async () => {
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
-  await out.tool("t1", { title: "execute", status: "in_progress" }); // e.g. waiting for the user's answer
+  await out.tool("q", { title: "slack.ask_user", status: "in_progress" });
   await out.pause();
   await out.resume();
-  await out.tool("t1", { title: "slack.ask_user", status: "completed" });
-  await out.end();
-  const cards = calls.filter((c) => c.method.startsWith("chat.")).map((c) => [c.method, ...(c.params.chunks ?? []).map((x: any) => `${x.title}:${x.status}${x.output ? `:${x.output}` : ""}`)]);
-  assert.deepEqual(cards, [
-    ["chat.startStream", "execute:in_progress"],
-    ["chat.appendStream", "execute:complete:↓ continues below"],
-    ["chat.stopStream"],
-    ["chat.startStream", "slack.ask_user:complete", "🔧 1 tool used:complete"],
-    ["chat.stopStream"],
-    ["chat.update"],
-  ]);
-});
-
-test("a card updated while paused for the user waits for the resume: no message shows it running under the question", async () => {
-  const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
-  await out.tool("t1", { title: "execute", status: "in_progress" });
-  await out.pause();
-  const paused = calls.length;
-  await out.tool("t1", { title: "slack.ask_user", status: "in_progress", details: "Which colour?" });
-  assert.equal(calls.length, paused); // no new stream, and the session stays suspended
-  await out.resume();
-  await out.tool("t1", { title: "slack.ask_user", status: "completed" });
-  await out.end();
-  const after = calls.slice(paused).filter((c) => c.method.startsWith("chat.")).map((c) => [c.method, ...(c.params.chunks ?? []).map((x: any) => `${x.title}:${x.status}${x.details ? `:${x.details}` : ""}`)]);
-  assert.deepEqual(after, [
-    ["chat.startStream", "slack.ask_user:in_progress:Which colour?"],
-    ["chat.appendStream", "slack.ask_user:complete", "🔧 1 tool used:complete"],
-    ["chat.stopStream"],
-    ["chat.update"],
-  ]);
-});
-
-test("a run of tools shows the one running and a count of those before it; once its message stops, only the count", async () => {
-  const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
-  out.thought("hmm");
-  await out.tool("g", { title: "grep X", status: "in_progress", details: "X in ." });
-  await out.tool("g", { status: "completed", output: "a.ts:1" });
-  await out.tool("l", { title: "ls -la", status: "completed", output: "src" });
-  await out.tool("c", { title: "cat file", status: "failed", output: "exit 1" });
-  out.text("Found it.");
-  await out.tool("r", { title: "read y", status: "completed" });
+  await out.tool("q", { status: "completed" });
+  await out.tool("e", { title: "edit a.css", status: "completed" });
   out.text("Done.");
-  await out.end([{ type: "context", elements: [] }]);
-  const card = (x: any) => `${x.id} ${x.title}:${x.status}${x.details ? ` d=${x.details}` : ""}${x.output ? ` o=${x.output}` : ""}`;
-  assert.deepEqual(chunks(calls).filter((c: any) => c.type === "task_update").map(card), [
-    "thought0 Thinking:in_progress",
-    "thought0 Thinking:complete o=hmm",
-    "a1 grep X:in_progress d=X in .", // the first tool shows itself, content and all
-    "a1 grep X:complete o=a.ts:1",
-    "a1 🔧 1 tool used:complete", // the second: a count of those before it, and itself in a card below
-    "b1 ls -la:complete o=── ls -la\nsrc",
-    "a1 🔧 2 tools used:complete",
-    "b1 cat file:error o=\n── cat file\nexit 1", // Slack appends content: each tool's under its title
-    "a1 🔧 3 tools used · 1 failed:complete", // text closes the run: the count takes them all
-    "b1 cat file:complete",
-    "a2 read y:complete",
-    "a2 🔧 1 tool used:complete",
-  ]);
-  const update = calls.at(-1)!;
-  assert.equal(update.method, "chat.update");
-  assert.equal(update.params.ts, "9.1");
-  const row = (b: any) => (b.type === "task_card" ? `${b.title}:${b.status}${b.output ? "+" : ""}` : b.text ?? b.type);
-  assert.deepEqual(update.params.blocks.map(row), ["Thinking:complete+", "🔧 3 tools used · 1 failed:complete", "Found it.", "🔧 1 tool used:complete", "Done.", "context"]);
+  await out.end();
+  const first = calls.find((c) => c.method === "chat.stopStream")!.params.ts;
+  assert.equal(calls.filter((c) => c.method === "chat.update" && c.params.ts === first).at(-1)!.params.blocks[0].title, "1 tool used");
+  const second = calls.filter((c) => c.method === "chat.startStream")[1].params.chunks.map((c: any) => c.id);
+  assert.ok(!second.includes("s1") && !second.includes("r1"), String(second));
 });
 
-test("the thinking between two texts is one card, each stretch added to it", async () => {
+test("a stretch is one card: thinking, then a count of the tools before the one running, which shows below", async (t) => {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
-  out.thought("one");
-  await out.tool("a", { title: "ls", status: "completed" });
-  out.thought("two");
-  await out.tool("b", { title: "cat", status: "completed" });
-  out.text("ok");
-  out.thought("three");
+  out.thought("**Reading**\n\nThe user wants X.");
+  t.mock.timers.tick(10_000);
+  await out.tool("g", { title: "grep X", status: "in_progress" });
+  await out.tool("g", { status: "completed" });
+  await out.tool("l", { title: "ls", status: "in_progress" });
+  await out.tool("l", { status: "failed" });
+  out.text("Found it.");
+  await out.tool("c", { title: "cat y", status: "completed" });
+  out.text("Done.");
   await out.end();
-  const thinking = chunks(calls).filter((c: any) => c.title === "Thinking").map((c: any) => `${c.id}:${c.status}${c.output ? `:${c.output}` : ""}`);
-  assert.deepEqual(thinking, ["thought0:in_progress", "thought0:complete:one", "thought0:in_progress", "thought0:complete:\n\ntwo", "thought1:in_progress", "thought1:complete:three"]);
+  const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.id} ${c.title}:${c.status}`);
+  assert.deepEqual(titles, [
+    "s1 Thinking…:in_progress",
+    "s1 Thinking · Reading:in_progress",
+    "s1 Thought for 10s:complete",
+    "r1 Using tool: grep X:in_progress",
+    "s1 Thought for 10s · 1 tool used:complete", // grep's finish waits for ls: one append
+    "r1 Using tool: ls:in_progress",
+    "s1 Thought for 10s · 2 tools used · 1 failed:complete", // text ends the stretch
+    "r1 Using tool: ls:complete", // never "error"
+    "s2 Using tool: cat y:complete", // no thinking: the first tool is the card
+    "s2 1 tool used:complete",
+  ]);
+});
+
+test("a stopped message is rewritten with one card per stretch: its thinking in bold and its tools, no running card", async () => {
+  const { api, calls } = fakeApi();
+  const out = createOutput(api, where);
+  out.thought("**Reading**\n\nThe user wants X.");
+  await out.tool("g", { title: "grep X", status: "completed" });
+  await out.tool("l", { title: "ls", status: "failed" });
+  out.text("Done.");
+  await out.end();
+  const blocks = calls.at(-1)!.params.blocks;
+  assert.deepEqual(blocks.map((b: any) => b.type), ["task_card", "markdown"]);
+  assert.equal(blocks[0].status, "complete");
+  assert.deepEqual(blocks[0].output.elements, [
+    { type: "rich_text_section", elements: [{ type: "text", text: "Reading", style: { bold: true } }, { type: "text", text: "\n\nThe user wants X." }] },
+    { type: "rich_text_list", style: "bullet", elements: [
+      { type: "rich_text_section", elements: [{ type: "text", text: "grep X", style: { code: true } }] },
+      { type: "rich_text_section", elements: [{ type: "text", text: "ls", style: { code: true } }, { type: "text", text: " (failed)", style: { italic: true } }] },
+    ] },
+  ]);
 });
 
 test("task cards get short ids and repeated identical updates are not sent", async () => {
@@ -195,7 +173,7 @@ test("task cards get short ids and repeated identical updates are not sent", asy
   await out.tool(long, { status: "completed" });
   await out.end();
   const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["a1", "in_progress"], ["a1", "complete"], ["a1", "complete"]]);
+  assert.deepEqual(tasks.map((c: any) => [c.id, c.status]), [["s1", "in_progress"], ["s1", "complete"], ["s1", "complete"]]);
 });
 
 test("describePermission says what the agent wants to do to what", () => {
@@ -209,69 +187,40 @@ test("describePermission says what the agent wants to do to what", () => {
   assert.equal(describePermission({ title: "todo", kind: "other" }, { items: 2 }, cwd), '🔐 The agent wants to use *todo*\n```\n{"items":2}\n```');
 });
 
-test("describeTool turns opencode's tool updates into card title, details and output", () => {
+test("describeTool turns opencode's tool updates into card title and status", () => {
   const cwd = "/w/proj";
   // Shapes recorded from opencode 2.0.24 over ACP.
   const read = describeTool({ title: "read", status: "completed", locations: [{ path: "/w/proj/calc.py" }], content: [{ type: "content", content: { type: "text", text: "1: def add(a, b):" } }] }, { path: "calc.py" }, cwd);
-  assert.deepEqual(read, { title: "read calc.py", status: "completed", output: "```\n1: def add(a, b):\n```" });
+  assert.deepEqual(read, { title: "read calc.py", status: "completed" });
   const edit = describeTool({ title: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Edited calc.py" } }, { type: "diff", path: "/w/proj/calc.py", oldText: "    return a - b", newText: "    return a + b\n" }] }, { path: "calc.py", oldString: "x", newString: "y" }, cwd);
-  assert.deepEqual(edit, { title: "edit calc.py", status: "completed", output: "calc.py  +1 −1\n```diff\n@@ -1,1 +1,1 @@\n-    return a - b\n+    return a + b\n```" });
+  assert.deepEqual(edit, { title: "edit calc.py", status: "completed" });
   // opencode's write reports no diff: its input stands for one (a new file's lines).
   const write = { title: "write", kind: "edit", status: "completed", content: [{ type: "content", content: { type: "text", text: "Created file successfully: hello.txt" } }] };
   assert.equal(fullDiff(write, cwd, { filePath: "/w/proj/hello.txt", content: "hola\nadiós\n" }), "--- hello.txt\n+++ hello.txt\n@@ -1,0 +1,2 @@\n+hola\n+adiós");
   assert.equal(fullDiff({ ...write, status: "in_progress" }, cwd, { filePath: "/w/proj/hello.txt", content: "hola\n" }), undefined);
   const shell = describeTool({ title: "python3 t.py", status: "completed", rawOutput: { metadata: { exit: 1 } }, content: [{ type: "content", content: { type: "text", text: "Traceback" } }] }, { command: "python3 t.py", cwd }, cwd);
-  assert.deepEqual(shell, { title: "python3 t.py", status: "failed", output: "exit 1\n```\nTraceback\n```" }); // shown as an error card
+  assert.deepEqual(shell, { title: "python3 t.py", status: "failed" }); // exit 1
   assert.equal(describeTool({ status: "completed" }, { command: "ls" }, cwd).title, "ls"); // the final update carries no title
   const pending = describeTool({ title: "shell", kind: "execute", status: "pending", locations: [{ path: cwd }] }, { cwd }, cwd);
   assert.deepEqual(pending, { title: "shell", status: "pending" }); // not "shell /w/proj"
   const grep = describeTool({ title: "grep", kind: "search", status: "pending" }, { pattern: "TODO", path: "/w/proj/src" }, cwd);
-  assert.deepEqual(grep, { title: "grep src", status: "pending", details: "TODO in src" });
+  assert.deepEqual(grep, { title: "grep src", status: "pending" });
   // A subagent, the tools it runs, a skill, opencode's code tool.
   const meta = { "opencode/child-session": { id: "ses_c", title: "Count txt files" } };
   const sub = describeTool({ title: "subagent", kind: "think", status: "completed", content: [{ type: "content", content: { type: "text", text: '<subagent sessionID="ses_c" state="completed">\nThere are 2.\n</subagent>' } }] }, { agent: "general", description: "Count txt files", prompt: "..." }, cwd);
-  assert.deepEqual(sub, { title: "subagent Count txt files", status: "completed", output: "```\nThere are 2.\n```" });
-  assert.deepEqual(describeTool({ title: "Count txt files: glob", kind: "search", status: "pending", _meta: meta }, { pattern: "*.txt" }, cwd), { title: "↳ glob", status: "pending", details: "*.txt" });
+  assert.deepEqual(sub, { title: "subagent Count txt files", status: "completed" });
+  assert.deepEqual(describeTool({ title: "Count txt files: glob", kind: "search", status: "pending", _meta: meta }, { pattern: "*.txt" }, cwd), { title: "↳ glob", status: "pending" });
   assert.equal(describeTool({ title: "Count txt files: read", kind: "read", status: "pending", _meta: meta }, { path: "a.txt" }, cwd).title, "↳ read a.txt");
   assert.equal(describeTool({ title: "skill", kind: "other", status: "pending" }, { id: "using-superpowers" }, cwd).title, "skill using-superpowers");
   const code = describeTool({ title: "execute", kind: "other", status: "completed", rawOutput: { metadata: { error: true } }, content: [{ type: "content", content: { type: "text", text: "Unknown tool" } }] }, { code: "await x()" }, cwd);
-  assert.deepEqual(code, { title: "await x()", status: "failed", details: "await x()", output: "```\nUnknown tool\n```" }); // no tool called: its first line
+  assert.deepEqual(code, { title: "await x()", status: "failed" }); // a tool error; no tool called: its first line
   const calls = 'await tools.slack["send_voice"]({ text: "hi" })\nawait tools.github.list_issues({})\nawait tools.slack.send_voice({})';
-  assert.deepEqual(describeTool({ title: "execute", kind: "other", status: "pending" }, { code: calls }, cwd), { title: "slack.send_voice, github.list_issues", status: "pending", details: calls });
+  assert.deepEqual(describeTool({ title: "execute", kind: "other", status: "pending" }, { code: calls }, cwd), { title: "slack.send_voice, github.list_issues", status: "pending" });
   const fetch = describeTool({ title: "webfetch", kind: "fetch", status: "pending" }, { url: "https://example.com/a", format: "markdown" }, cwd);
-  assert.deepEqual(fetch, { title: "webfetch", status: "pending", sources: [{ type: "url", text: "https://example.com/a", url: "https://example.com/a" }] });
+  assert.deepEqual(fetch, { title: "webfetch https://example.com/a", status: "pending" });
   const heredoc = "cat << 'EOF' > f.py\ndef f():\n    return 1\nEOF";
-  assert.deepEqual(describeTool({ title: "bash", kind: "execute", status: "pending" }, { command: heredoc, description: "Create f.py" }, cwd), { title: "Create f.py", status: "pending", details: heredoc });
+  assert.deepEqual(describeTool({ title: "bash", kind: "execute", status: "pending" }, { command: heredoc, description: "Create f.py" }, cwd), { title: "Create f.py", status: "pending" });
   assert.equal(describeTool({ title: "bash", kind: "execute", status: "pending" }, { command: heredoc }, cwd).title, "cat << 'EOF' > f.py …");
-  const long = describeTool({ title: "t", status: "completed", content: [{ type: "content", content: { type: "text", text: "z".repeat(2000) } }] }, {}, cwd).output!;
-  assert.ok(long.length <= 500 && long.endsWith("…\n```"), "clipped inside a closed fence");
-});
-
-test("a card's details and output reach the stream, and a repeated identical update is not resent", async () => {
-  const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
-  await out.tool("x", { title: "shell", status: "pending", details: "$ ls" });
-  await out.tool("x", { status: "completed", output: "a.txt" });
-  await out.tool("x", { status: "completed", output: "a.txt" });
-  await out.end();
-  const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.status, c.details, c.output]), [["in_progress", "$ ls", undefined], ["complete", undefined, "a.txt"], ["complete", undefined, undefined]]);
-});
-
-test("the model's thinking is one card, opened when it starts and filled when text follows", async () => {
-  const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
-  out.thought("Let me ");
-  out.thought("check the ```code```.");
-  out.text("Answer.");
-  await out.end();
-  const all = chunks(calls);
-  assert.deepEqual(all.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status, c.output]), [
-    ["Thinking", "in_progress", undefined],
-    ["Thinking", "complete", "Let me check the ˋˋˋcodeˋˋˋ."],
-  ]);
-  assert.equal(all.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "\n\nAnswer.");
-  assert.equal(out.quiet, false);
 });
 
 test("a long turn sends its processing status again before Slack drops it", async () => {
@@ -284,24 +233,11 @@ test("a long turn sends its processing status again before Slack drops it", asyn
   assert.ok(n >= 3, `processing sent ${n} times`);
 });
 
-test("a card's sources, details and output go out once: Slack adds them to those it shows", async () => {
-  const { api, calls } = fakeApi();
-  const out = createOutput(api, where);
-  const sources = [{ type: "url" as const, text: "https://e.com", url: "https://e.com" }];
-  await out.tool("x", { title: "webfetch", status: "in_progress", details: "GET", sources });
-  await out.tool("x", { status: "completed", output: "Example", details: "GET", sources });
-  await out.tool("x", { status: "failed", output: "Example" });
-  await out.end();
-  const tasks = chunks(calls).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(tasks.map((c: any) => [c.sources?.length, c.details, c.output]), [[1, "GET", undefined], [undefined, undefined, "Example"], [undefined, undefined, undefined], [undefined, undefined, undefined]]);
-});
-
 test("an edit reported as the whole file before and after shows only the lines it changed, with 3 lines around", () => {
   const file = (mid: string) => ["a", "b", "c", mid, "e", "f"].join("\n") + "\n";
   assert.deepEqual(changed(file("d"), file("D")), { removed: ["d"], added: ["D"] });
   assert.deepEqual(changed(file("d"), file("d").replace("e\n", "e\nnew\n")), { removed: [], added: ["new"] });
   const edit = { title: "edit", status: "completed", content: [{ type: "diff", path: "/w/proj/x.js", oldText: file("d"), newText: file("D") }] };
-  assert.equal(describeTool(edit, { path: "x.js" }, "/w/proj").output, "x.js  +1 −1\n```diff\n@@ -1,6 +1,6 @@\n a\n b\n c\n-d\n+D\n e\n f\n```");
   assert.equal(fullDiff(edit, "/w/proj"), "--- x.js\n+++ x.js\n@@ -1,6 +1,6 @@\n a\n b\n c\n-d\n+D\n e\n f");
 });
 
@@ -411,31 +347,27 @@ test("a finished tool stays on screen until what follows: the next tool and the 
   const sends = calls.filter((c) => c.method === "chat.startStream" || c.method === "chat.appendStream");
   const row = (c: any) => c.params.chunks.map((x: any) => (x.type === "markdown_text" ? x.text.trim() : `${x.id} ${x.title}:${x.status}`));
   assert.deepEqual(sends.map(row), [
-    ["a1 grep X:in_progress"],
-    ["a1 grep X:complete", "a1 🔧 1 tool used:complete", "b1 ls:in_progress"], // one append: the cards keep their height
-    ["b1 ls:complete", "a1 🔧 2 tools used:complete"],
+    ["s1 Using tool: grep X:in_progress"],
+    ["s1 Using tool: grep X:complete", "s1 1 tool used:complete", "r1 Using tool: ls:in_progress"], // one append: the cards keep their height
+    ["s1 2 tools used:complete", "r1 Using tool: ls:complete"],
     ["Found it."], // the count goes out before the text
   ]);
 });
 
-test("a run closed when its message rolls over keeps its card there: the count is updated in place, not repeated below", async () => {
+test("a stretch cut by a rollover keeps its summary in the first message, counting there; the new one shows the running tool", async () => {
   const { api, calls, failNext } = failingOnce("msg_too_long");
   const out = createOutput(api, where);
-  for (let i = 0; i < 3; i++) {
-    await out.tool(`t${i}`, { title: `tool ${i}`, status: "in_progress" });
-    await out.tool(`t${i}`, { status: "completed" });
-  }
-  failNext(); // the message is full: the text closing the run goes on in a new one
-  out.text("El servidor");
-  await out.tool("x", { title: "fetch", status: "completed" });
-  out.text("Done.");
+  await out.tool("t0", { title: "npm test", status: "in_progress" });
+  await out.tool("t0", { status: "completed" });
+  failNext(); // the message is full: the next tool goes on in a new one
+  await out.tool("t1", { title: "npm run build", status: "in_progress" });
+  await out.tool("t1", { status: "completed" });
+  out.text("Built.");
   await out.end();
-  const second = calls.filter((c) => c.method === "chat.startStream")[1];
-  const after = calls.slice(calls.indexOf(second)).flatMap((c) => c.params.chunks ?? []).filter((x: any) => x.type === "task_update").map((x: any) => x.id);
-  assert.ok(!after.includes("a1") && !after.includes("b1"), `run 1 is not repeated below: ${after}`);
-  const firstTs = calls.find((c) => c.method === "chat.stopStream")!.params.ts;
-  const rewrites = calls.filter((c) => c.method === "chat.update" && c.params.ts === firstTs);
-  assert.equal(rewrites.at(-1)!.params.blocks.find((b: any) => b.type === "task_card").title, "🔧 3 tools used");
+  const first = calls.find((c) => c.method === "chat.stopStream")!.params.ts;
+  assert.equal(calls.filter((c) => c.method === "chat.update" && c.params.ts === first).at(-1)!.params.blocks[0].title, "2 tools used");
+  const later = calls.slice(calls.findLastIndex((c) => c.method === "chat.startStream")).flatMap((c) => c.params.chunks ?? []).map((c: any) => c.id).filter(Boolean);
+  assert.ok(!later.includes("s1"), String(later));
 });
 
 test("a tool the agent reports as pending goes out running: a pending card shows less and the run's cards would jump", async () => {
@@ -452,7 +384,7 @@ test("a tool the agent reports as pending goes out running: a pending card shows
   assert.ok(!statuses.includes("pending"), statuses.join());
 });
 
-test("while the model thinks, its card shows the heading it is on; the finished card is Thinking again", async (t) => {
+test("while the model thinks, its card shows the heading it is on; the finished card says for how long", async (t) => {
   t.mock.timers.enable({ apis: ["Date", "setTimeout"] });
   const { api, calls } = fakeApi();
   const out = createOutput(api, where);
@@ -466,9 +398,9 @@ test("while the model thinks, its card shows the heading it is on; the finished 
   await out.end();
   const titles = chunks(calls).filter((c: any) => c.type === "task_update").map((c: any) => `${c.title}:${c.status}`);
   assert.deepEqual(titles, [
-    "Thinking:in_progress",
+    "Thinking…:in_progress",
     "Thinking · Testing Slack Interface:in_progress",
     "Thinking · Planning the Steps:in_progress",
-    "Thinking:complete",
+    "Thought for 2s:complete",
   ]);
 });

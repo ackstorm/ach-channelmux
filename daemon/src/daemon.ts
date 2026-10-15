@@ -16,7 +16,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { promisify } from "node:util";
 import bolt from "@slack/bolt";
 import * as acp from "@agentclientprotocol/sdk";
-import { DIFF_IN_CARD, changed, createOutput, describePermission, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
+import { changed, createOutput, describePermission, describeTool, editsOf, fullDiff, type Output } from "./output.ts";
 
 const { App, LogLevel } = bolt;
 
@@ -649,10 +649,10 @@ export function createDaemon(cfg: DaemonConfig) {
         turnEdits.delete(t.sessionId);
         const line = await footer(t, edits);
         await out.end(line ? [{ type: "context", elements: [{ type: "mrkdwn", text: line }] }] : undefined);
-        // Edits too long for their cards: the whole turn's changes as one diff snippet.
+        // The whole turn's changes as one diff snippet: the cards list the tools, not their diffs.
         const diffs = turnDiffs.get(t.sessionId);
         turnDiffs.delete(t.sessionId);
-        if (diffs && diffs.join("\n").length > DIFF_IN_CARD) {
+        if (diffs?.length) {
           await upload(t, "changes.diff", Buffer.from(diffs.join("\n")), { snippet: "diff" }).catch((err) => log("diff_upload_failed", { error: String(err) }));
         }
         if (t.top && edits) await changesTab(t);

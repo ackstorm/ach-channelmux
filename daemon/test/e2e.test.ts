@@ -204,7 +204,7 @@ test("a new DM gets the picker in its thread; browsing to a folder and starting 
   assert.equal(firstStatus.params.title, "beta - fix the bug");
   const chunks = streamed(since(n));
   assert.equal(chunks.filter((c: any) => c.type === "markdown_text").map((c: any) => c.text).join(""), "On it, checking.\n\nDone.");
-  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["ls", "in_progress"], ["ls", "complete"], ["🔧 1 tool used", "complete"]]);
+  assert.deepEqual(chunks.filter((c: any) => c.type === "task_update").map((c: any) => [c.title, c.status]), [["Using tool: ls", "in_progress"], ["Using tool: ls", "complete"], ["1 tool used", "complete"]]);
 });
 
 test("a permission request becomes buttons whose click answers the agent", async () => {
@@ -338,7 +338,7 @@ test("the model's thinking shows as a Thinking card", async () => {
   await slack.emit("events_api", slack.dm("UPEPE", "think", { ts: "100.000017", thread_ts: "100.000001" }));
   await waitFor(() => since(n).some((c) => c.method === "chat.stopStream"));
   const cards = streamed(since(n)).filter((c: any) => c.type === "task_update");
-  assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thinking", "in_progress", undefined], ["Thinking", "complete", "Weighing it."]]);
+  assert.deepEqual(cards.map((c: any) => [c.title, c.status, c.output]), [["Thinking…", "in_progress", undefined], ["Thought for 1s", "complete", "Weighing it."]]);
 });
 
 test("a failed turn offers Retry, which sends the same message again", async () => {
@@ -377,7 +377,7 @@ test("a subagent's own reply is not streamed as the agent's reply", async () => 
   assert.equal(text, "Parent reply.");
 });
 
-test("a turn that edits ends with a line of its changes (branch, files, lines); an edit too long for its card also comes as a changes.diff snippet", async () => {
+test("a turn that edits ends with a line of its changes (branch, files, lines) and its changes as a changes.diff snippet, however short", async () => {
   const n = mark();
   execFileSync("git", ["init", "-q", "-b", "work", join(base, "beta")]);
   await slack.emit("events_api", slack.dm("UPEPE", "big edit", { ts: "100.000013", thread_ts: "100.000001" }));
@@ -392,6 +392,15 @@ test("a turn that edits ends with a line of its changes (branch, files, lines); 
   const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
   assert.match(body, /^--- big\.py\n\+\+\+ big\.py\n@@ -1,30 \+1,30 @@\n-old line 0/);
   assert.match(body, /\+new line 29$/);
+});
+
+test("a one-line edit also comes as a changes.diff snippet", async () => {
+  const n = mark();
+  await slack.emit("events_api", slack.dm("UPEPE", "small edit", { ts: "100.000054", thread_ts: "100.000001" }));
+  const done = await waitFor(() => since(n).find((c) => c.method === "files.completeUploadExternal"));
+  const body = slack.uploads.get(JSON.parse(done.params.files)[0].id)!.body;
+  assert.equal(body, "--- small.py\n+++ small.py\n@@ -1,1 +1,1 @@\n-a = 1\n+a = 2");
+  await turnEnded("100.000054");
 });
 
 test("attached files are saved to a temp folder and the agent gets their paths, not their content", async () => {

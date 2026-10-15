@@ -133,6 +133,11 @@ new acp.AgentSideConnection(
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e1", title: "edit", kind: "edit", status: "pending" } });
           await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e1", status: "completed", content: [{ type: "diff", path: `${cwd}/big.py`, oldText, newText }] } });
           await say(sessionId, "Edited.");
+        } else if (text === "small edit") {
+          const { cwd } = sessions.get(sessionId)!;
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call", toolCallId: "e2", title: "edit", kind: "edit", status: "pending" } });
+          await conn.sessionUpdate({ sessionId, update: { sessionUpdate: "tool_call_update", toolCallId: "e2", status: "completed", content: [{ type: "diff", path: `${cwd}/small.py`, oldText: "a = 1", newText: "a = 2" }] } });
+          await say(sessionId, "Edited.");
         } else if (text === "ask twice") {
           // Two questions at once (e.g. two subagents): the second is refused, the first still gets its answer.
           const url = mcpUrl(sessionId);
