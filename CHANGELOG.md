@@ -6,6 +6,14 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Prometheus usage metrics in the relay, per owner email, on `METRICS_PORT` (default 9090,
+  kept off the ingress): messages, threads, commands and clicks, files, Slack calls,
+  daemon connections and relay log events. Counts only, no message text.
+- Chart: `metrics.serviceMonitor` (metrics-only Service and ServiceMonitor) and
+  `metrics.dashboards` (Grafana dashboard ConfigMap; LLM spend per user from LiteLLM).
+
 ### Removed
 
 - The relay's working notice (`🥧 *Baking…*` while 👀 is on a message) and its

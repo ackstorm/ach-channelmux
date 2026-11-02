@@ -9,16 +9,20 @@
 //   - proxies inbound file downloads so daemons never hold the bot token,
 //   - refuses a second daemon of the same owner while one is connected,
 //   - tells the owner, in the thread, when none of their daemons is connected,
-//   - spends the Slack app's shared rate limits for every daemon (limiter.ts).
+//   - spends the Slack app's shared rate limits for every daemon (limiter.ts),
+//   - counts usage per owner on a separate metrics port (metrics.ts).
 
 import http from "node:http";
 import { randomUUID } from "node:crypto";
 import { SocketModeClient } from "@slack/socket-mode";
 import { WebSocketServer, WebSocket } from "ws";
 import { createLimiter } from "./limiter.ts";
+import { createMetrics } from "./metrics.ts";
 
 export interface GatewayConfig {
   port: number;
+  /** Serves /metrics (Prometheus) on its own port, kept off the ingress: its labels are owners' emails. Unset: off. */
+  metricsPort?: number;
   publicUrl: string; // e.g. https://slack-gw.example.com (no trailing slash)
   upstreamApiUrl: string; // https://slack.com/api/
   appToken: string; // xapp-…
@@ -152,6 +156,12 @@ export function addShortcutPreamble(
   body.message.text = m.text;
 }
 
+/** An interaction's kind for metrics, without per-item suffixes: perm_once -> "block_actions:perm", picker_open_3 -> "block_actions:picker_open", cfg:model -> "block_actions:cfg". */
+export function actionKind(body: { type?: string; callback_id?: string; view?: { callback_id?: string }; actions?: { action_id?: string }[] }) {
+  const id = body.actions?.[0]?.action_id ?? body.view?.callback_id ?? body.callback_id ?? "";
+  return `${body.type}:${id.replace(/:.*$/, "").replace(/_\d+$/, "").replace(/^(perm|ask)_.*$/, "$1")}`;
+}
+
 /** "name=email,…" and "name,…" (a leading # is dropped) -> channel name -> its owner. */
 export function parseChannels(channels: string, code: string): Record<string, { email: string; code: boolean }> {
   const names = (s: string) => s.split(",").map((x) => x.trim().replace(/^#/, "")).filter(Boolean);
@@ -169,7 +179,12 @@ export function parseChannels(channels: string, code: string): Record<string, { 
 }
 
 export function createGateway(cfg: GatewayConfig) {
-  const log = cfg.log ?? ((m, d) => console.log(JSON.stringify({ msg: m, ...d })));
+  const metrics = createMetrics();
+  const write = cfg.log ?? ((m, d) => console.log(JSON.stringify({ msg: m, ...d })));
+  const log = (msg: string, data?: Record<string, unknown>) => {
+    metrics.inc("channelmux_events_total", { event: msg, owner: String(data?.owner ?? "") });
+    write(msg, data);
+  };
   const upstream = cfg.upstreamApiUrl.endsWith("/") ? cfg.upstreamApiUrl : cfg.upstreamApiUrl + "/";
   const ackTimeout = cfg.interactiveAckTimeoutMs ?? 2500;
 
@@ -334,8 +349,9 @@ export function createGateway(cfg: GatewayConfig) {
   }
 
   // Nothing is held while offline: every message for the agent gets the notice, where it was written.
-  async function goOffline(env: Envelope, channel: string, inChannel: boolean) {
+  async function goOffline(owner: Owner, env: Envelope, channel: string, inChannel: boolean) {
     if (env.type !== "events_api") return; // interactions expire in seconds; drop
+    log("offline_notice", { owner: owner.email });
     const ev = (env.payload as any).event.message ?? (env.payload as any).event; // an edit carries the message inside
     // The Home tab says so itself: the daemon that would draw it is not there.
     if (ev.type === "app_home_opened") {
@@ -377,6 +393,16 @@ export function createGateway(cfg: GatewayConfig) {
       return userId ? { userId } : null;
     }
     return null; // slash commands, app_home, etc. are not routed in v1
+  }
+
+  // Who wrote it (in a channel, not always the owner), and what: a command's name, never its arguments.
+  async function countMessage(owner: Owner, ev: any, where: string, mention: string) {
+    const author = where === "dm" ? owner.email : ((await authorOf(ev.user)).email ?? ev.user);
+    metrics.inc("channelmux_messages_total", { owner: owner.email, author, where });
+    if (!ev.thread_ts && where !== "code") metrics.inc("channelmux_threads_total", { owner: owner.email, author, where });
+    const cmd = (ev.text ?? "").replaceAll(mention, "").match(/^\s*(?:(\$[a-zA-Z][\w-]*)|(!))/); // "/…" is also a path
+    if (cmd) metrics.inc("channelmux_actions_total", { owner: owner.email, kind: cmd[1] ?? "!shell" });
+    if (ev.files?.length) metrics.inc("channelmux_files_in_total", { owner: owner.email }, ev.files.length);
   }
 
   async function onUpstream(evt: {
@@ -431,6 +457,7 @@ export function createGateway(cfg: GatewayConfig) {
         viewOwner.set(body.view.id, owner);
       }
       addShortcutPreamble(body, cfg.sessionPreamble, owner);
+      metrics.inc("channelmux_actions_total", { owner: owner.email, kind: actionKind(body) });
     }
     rewriteFiles(owner, body?.event?.files);
     let quiet = false; // a channel message not for the agent: no offline notice
@@ -452,11 +479,13 @@ export function createGateway(cfg: GatewayConfig) {
         await slack("chat.postEphemeral", { channel: ev.channel, user: ev.user, thread_ts: ev.thread_ts ?? ev.ts, text });
         return;
       }
+      if (ev.type === "app_home_opened") metrics.inc("channelmux_actions_total", { owner: owner.email, kind: "app_home_opened" });
       if (ev.type === "message") {
         // The context block names who wrote it: in a channel that is not always the owner.
         const author = inChannel && ev.user && wantsPreamble(ev, cfg.sessionPreamble) ? await authorOf(ev.user) : owner;
         addPreamble(ev, cfg.sessionPreamble, author);
         if (!quiet) owner.threadOf.set(ev.ts, ev.thread_ts ?? ev.ts);
+        if (!quiet && ev.subtype !== "message_changed") countMessage(owner, ev, codeOwner ? "code" : inChannel ? "channel" : "dm", mention).catch(() => {}); // never delays delivery
         if (owner.threadOf.size > 1000) owner.threadOf.delete(owner.threadOf.keys().next().value!);
       }
     }
@@ -472,7 +501,7 @@ export function createGateway(cfg: GatewayConfig) {
 
     if (!owner.primary) {
       if (type !== "events_api") await evt.ack();
-      return quiet ? undefined : goOffline(env, key.channel ?? owner.dm, inChannel);
+      return quiet ? undefined : goOffline(owner, env, key.channel ?? owner.dm, inChannel);
     }
 
     if (type === "events_api") {
@@ -592,6 +621,7 @@ export function createGateway(cfg: GatewayConfig) {
         // Slack answers HTTP 200 with ok:false; the SDK treats non-200 as unrecoverable.
         if (!owner) return json(200, { ok: false, error: "invalid_auth" });
         const result = await apiCall(owner, api[1], params);
+        metrics.inc("channelmux_api_calls_total", { owner: owner.email, method: api[1], ok: String(Boolean(result.ok)) });
         if (!result.ok) log("api_denied", { owner: owner.email, method: api[1], error: result.error });
         return json(200, result);
       }
@@ -613,6 +643,12 @@ export function createGateway(cfg: GatewayConfig) {
       log("http_error", { error: String(err) });
       json(500, { ok: false, error: "internal_error" });
     }
+  });
+
+  const metricsServer = http.createServer((req, res) => {
+    if (req.url !== "/metrics") return void res.writeHead(404).end();
+    res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
+    res.end(metrics.text());
   });
 
   // ---------- downstream WebSocket: Socket Mode facade ----------
@@ -640,6 +676,7 @@ export function createGateway(cfg: GatewayConfig) {
       return ws.close(4009, "already_connected");
     }
     owner.primary = conn;
+    metrics.set("channelmux_daemon_connected", { owner: owner.email }, 1);
     log("subscriber_connected", { owner: owner.email, conn: conn.id });
 
     ws.on("pong", () => (conn.alive = true));
@@ -661,6 +698,7 @@ export function createGateway(cfg: GatewayConfig) {
       if (owner.primary !== conn) return;
       log("subscriber_lost", { owner: owner.email, conn: conn.id });
       owner.primary = null;
+      metrics.set("channelmux_daemon_connected", { owner: owner.email }, 0);
     });
     ws.send(JSON.stringify({ type: "hello", num_connections: 1, debug_info: { gateway: true } }));
   }
@@ -691,6 +729,7 @@ export function createGateway(cfg: GatewayConfig) {
   return {
     async start() {
       await new Promise<void>((r) => server.listen(cfg.port, r));
+      if (cfg.metricsPort !== undefined) await new Promise<void>((r) => metricsServer.listen(cfg.metricsPort, r));
       const me = await slack("auth.test", {});
       if (!me.ok) throw new Error(`auth.test: ${me.error}`);
       botUserId = me.user_id;
@@ -702,6 +741,7 @@ export function createGateway(cfg: GatewayConfig) {
       await upstreamClient.disconnect();
       for (const ws of wss.clients) ws.terminate();
       await new Promise<void>((r) => server.close(() => r()));
+      if (metricsServer.listening) await new Promise<void>((r) => metricsServer.close(() => r()));
     },
     /** For tests and metrics. */
     state(email: string) {

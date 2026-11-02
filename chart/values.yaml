@@ -35,6 +35,24 @@ channels: ""
 # Of those, the channels where a mention opens a Slack code channel: "name,…" (or ids, as in channels).
 codeChannels: ""
 
+# Prometheus /metrics on port 9090 (named "metrics"): usage per owner email (messages, threads,
+# commands, clicks, files, Slack calls, connections). Never exposed by the main Service or the ingress.
+# With serviceMonitor.enabled, a metrics-only Service and a Prometheus Operator ServiceMonitor scrape it.
+# The dashboard's user list comes from channelmux_daemon_connected, so it needs the scrape.
+metrics:
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    # Extra labels, e.g. the release label your Prometheus selects ServiceMonitors by.
+    labels: {}
+  # Grafana dashboard (chart/dashboards/) as a ConfigMap for the Grafana sidecar. labels must match the
+  # sidecar's label; annotations place it in a folder, e.g. {grafana_folder: "100 - Application - ACH Agents"}
+  # (the sidecar needs folderAnnotation=grafana_folder). Its LLM panels read LiteLLM's Prometheus metrics.
+  dashboards:
+    enabled: false
+    labels: {grafana_dashboard: "1"}
+    annotations: {}
+
 resources: {}
 extraEnv: []
 

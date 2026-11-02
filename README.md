@@ -26,6 +26,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | Files | `url_private*` (and a voice clip's `vtt` transcript) in delivered events and `conversations.replies` are rewritten to `/files/<id>/<name>`; only the owner's daemon can fetch them. Uploads go straight to Slack's presigned URL (daemons need egress to `files.slack.com`). |
 | Session preamble | A top-level DM starts a thread and a new agent session; the relay appends a context block with the user's name, email and local time, plus `SESSION_PREAMBLE` (default in `relay/src/main.ts`: the user sees only reply text, so acknowledge before using tools and quote tool output). Thread replies, edits and daemon commands (`/cmd`, `$cmd`, `!shell`) pass untouched. |
 | Offline | No daemon connected: every message for the agent gets `OFFLINE_MESSAGE` as a reply where it was written (top level or its thread; in a channel only in a code channel, a message that mentions the bot, or a reply in the thread of one the relay forwarded since it started, and always in the thread); the Home tab shows 🔴 Offline with it. Nothing is held or replayed. |
+| Metrics | Prometheus `/metrics` on `METRICS_PORT` only, never on the daemons' port or the ingress: its labels are owners' emails. Per owner: messages to the agent (`channelmux_messages_total`, with `author`, who wrote it in a channel, and `where`: `dm`, `channel`, `code`), new threads (`channelmux_threads_total`), commands (`$name`, `!shell`), clicks, modal submits, shortcuts and Home opens (`channelmux_actions_total{kind}`), attached files, Slack calls by method and `ok` (replies: `chat.postMessage`, `chat.startStream`), the daemon's connection (`channelmux_daemon_connected`), and every relay log event (`channelmux_events_total{event}`: connections, refusals, rate limits, offline notices, errors). Counts only: no message text, no command arguments. In memory; they reset on a restart. Tokens and cost come from the model gateway (e.g. LiteLLM spend per key), not from here. |
 | State | In memory. One replica. Slack redelivers unacked envelopes (deduplicated by `event_id`); daemons reconnect on their own. |
 
 ## Configuration
@@ -41,6 +42,7 @@ Slack ──Socket Mode──▶ ach-channelmux ──"Socket Mode"──▶ dae
 | `CHANNELS` | Optional; `name=owner email,…` or `id=owner email,…` (chart `channels`): channels whose mentions go to that owner's daemon. An id (`C0123ABCD`) survives renames and cannot be taken by a new channel of that name. Default: DMs only. |
 | `CODE_CHANNELS` | Optional; `name,…` or ids, as written in `CHANNELS` (chart `codeChannels`): of those, the channels where a mention opens a Slack code channel. |
 | `PORT` | Default `8080`. |
+| `METRICS_PORT` | Prometheus `/metrics`. Default `9090`; `""` disables. Keep it off the ingress. |
 
 Slack app: create it from `slack-app-manifest.json` (Socket Mode, `message.im`, `message.channels`,
 `message.groups` and `app_home_opened` events, interactivity, App Home Home and
@@ -60,6 +62,14 @@ helm install ach-channelmux oci://ghcr.io/ackstorm/charts/ach-channelmux -n ach 
 
 The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot-token`
 (see `chart/values.yaml`). Image: `ghcr.io/ackstorm/ach-channelmux`.
+`--set metrics.serviceMonitor.enabled=true` adds a metrics-only Service and a Prometheus Operator
+`ServiceMonitor` (`metrics.serviceMonitor.labels` for the label your Prometheus selects them by).
+`--set metrics.dashboards.enabled=true` adds the Grafana dashboard (`chart/dashboards/ach-channelmux.json`) as a
+ConfigMap for the Grafana sidecar (`metrics.dashboards.labels`, default `grafana_dashboard: "1"`;
+`metrics.dashboards.annotations` for its folder). Per user: messages, threads, commands and clicks, files, replies,
+connections, offline notices, problems, and LLM spend and requests through Slack from LiteLLM's Prometheus metrics
+(`user_email`, user agent `opencode/…/acp`, the daemon's agent; LiteLLM's token metrics carry no user agent, so the
+tokens column counts all of a user's clients).
 
 ## Daemon
 

@@ -21,6 +21,7 @@ Slack ⇄ relay (one bot token: the trust boundary) ⇄ N daemons (one active pe
 
 - `relay/src/gateway.ts`: the relay (upstream Socket Mode, downstream Socket Mode facade, DM, channel and code channel routing, Web API allowlist, files, preamble).
 - `relay/src/limiter.ts`: paces and retries upstream Slack calls, shared across every daemon.
+- `relay/src/metrics.ts`: per-owner usage counters, served as Prometheus `/metrics` on `METRICS_PORT` (labels are emails: never on the ingress).
 - `relay/src/resolver.ts`: token → owner email through the configured endpoint.
 - `relay/src/main.ts`: env config and the default session preamble.
 - `relay/test/`: `e2e.test.ts` (mock Slack + real Bolt clients as daemons), `resolver.test.ts`, `limiter.test.ts`, `load.test.ts`, `mock-slack.ts`.

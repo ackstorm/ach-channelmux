@@ -6,6 +6,7 @@
 //   AUTH_RESOLVER_HEADER               request header carrying the token
 //   AUTH_RESOLVER_EMAIL_FIELD          dotted path to the owner's email in the JSON reply (default "email")
 //   PORT                               default 8080
+//   METRICS_PORT                       Prometheus /metrics, default 9090 ("" disables); keep it off the ingress
 //   SESSION_PREAMBLE                   optional; added to each thread's first message (default below, "" disables)
 //   OFFLINE_MESSAGE                    optional; reply while the user's daemon is not connected
 //   CHANNELS                           optional; name or id=owner email,… channels whose mentions go to that owner's daemon (default: DMs only)
@@ -39,6 +40,7 @@ const env = (k: string, d?: string) => {
 
 const gw = createGateway({
   port: Number(env("PORT", "8080")),
+  metricsPort: Number(env("METRICS_PORT", "9090")) || undefined,
   publicUrl: env("PUBLIC_URL").replace(/\/$/, ""),
   upstreamApiUrl: env("SLACK_API_URL", "https://slack.com/api/"),
   appToken: env("SLACK_APP_TOKEN"),

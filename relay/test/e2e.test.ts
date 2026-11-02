@@ -5,7 +5,7 @@ import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
-import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime } from "../src/gateway.ts";
+import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime, actionKind } from "../src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
@@ -521,6 +521,61 @@ test("CHANNELS maps channel names to owners; CODE_CHANNELS must be among them", 
   assert.deepEqual(parseChannels("", ""), {});
   assert.throws(() => parseChannels("sales=bot@example.com", "other"), /CODE_CHANNELS: other is not in CHANNELS/);
   assert.throws(() => parseChannels("sales", ""), /CHANNELS: "sales" is not name=email/);
+});
+
+test("metrics: per-owner usage on the metrics port only, no message text", async () => {
+  const [port, metricsPort] = [await freePort(), await freePort()];
+  const url = `http://127.0.0.1:${port}`;
+  const gw3 = createGateway({ port, metricsPort, publicUrl: url, upstreamApiUrl: `${slack.url}/api/`, appToken: APP_TOKEN, botToken: BOT_TOKEN, resolveToken: async (t) => TOKENS[t] ?? null, rates: {}, channels: CHANNELS, log: () => {} });
+  await gw3.start();
+  const scrape = async () => (await fetch(`http://127.0.0.1:${metricsPort}/metrics`)).text();
+  const has = async (...lines: string[]) => {
+    const end = Date.now() + 3000;
+    let text = "";
+    while (Date.now() < end) {
+      text = await scrape();
+      if (lines.every((l) => text.split("\n").includes(l))) return text;
+      await sleep(20);
+    }
+    assert.fail(`missing in /metrics:\n${lines.filter((l) => !text.split("\n").includes(l)).join("\n")}`);
+  };
+  const pepe = await daemon("pepe-m", "gw-pepe", url);
+  try {
+    await has('channelmux_daemon_connected{owner="pepe@example.com"} 1');
+    await slack.emit("events_api", slack.dm("UPEPE", "secret plan"));
+    await slack.emit("events_api", slack.dm("UPEPE", "$model gpt", { thread_ts: "1.0" }));
+    await slack.emit("events_api", slack.dm("UPEPE", "look", { thread_ts: "1.0", subtype: "file_share", files: [{ id: "F1", name: "a.png", url_private: `${slack.url}/files/F1/a.png` }, { id: "F2", name: "b.png", url_private: `${slack.url}/files/F2/b.png` }] }));
+    await slack.emit("events_api", slack.dm("UPEPE", "! ls", { thread_ts: "1.0" }));
+    await slack.emit("events_api", inChannel("C_DEV", "UXAVI", "<@UBOT> review this"));
+    await slack.emit("interactive", { type: "block_actions", user: { id: "UPEPE" }, trigger_id: "T_M", channel: { id: "D_UPEPE" }, actions: [{ action_id: "perm_once" }] }, true);
+    await waitFor(() => pepe.got.length === 6);
+    assert.ok((await pepe.app.client.chat.postMessage({ channel: "D_UPEPE", text: "hi" })).ok);
+    await assert.rejects(pepe.app.client.chat.postMessage({ channel: "C_OTHER", text: "x" }), /restricted_action/);
+    const text = await has(
+      'channelmux_messages_total{owner="pepe@example.com",author="pepe@example.com",where="dm"} 4',
+      'channelmux_threads_total{owner="pepe@example.com",author="pepe@example.com",where="dm"} 1',
+      'channelmux_messages_total{owner="pepe@example.com",author="xavi@example.com",where="channel"} 1',
+      'channelmux_threads_total{owner="pepe@example.com",author="xavi@example.com",where="channel"} 1',
+      'channelmux_actions_total{owner="pepe@example.com",kind="$model"} 1',
+      'channelmux_actions_total{owner="pepe@example.com",kind="!shell"} 1',
+      'channelmux_actions_total{owner="pepe@example.com",kind="block_actions:perm"} 1',
+      'channelmux_files_in_total{owner="pepe@example.com"} 2',
+      'channelmux_api_calls_total{owner="pepe@example.com",method="chat.postMessage",ok="true"} 1',
+      'channelmux_api_calls_total{owner="pepe@example.com",method="chat.postMessage",ok="false"} 1',
+      'channelmux_events_total{event="subscriber_connected",owner="pepe@example.com"} 1',
+    );
+    assert.doesNotMatch(text.split("\n").filter((l) => !l.startsWith("#")).join("\n"), /secret|gpt|\bls\b|review/);
+    assert.equal((await fetch(`${url}/metrics`)).status, 404); // not on the daemons' (ingress) port
+    await pepe.app.stop();
+    await has('channelmux_daemon_connected{owner="pepe@example.com"} 0');
+  } finally {
+    await pepe.app.stop();
+    await gw3.stop();
+  }
+  assert.equal(actionKind({ type: "block_actions", actions: [{ action_id: "picker_open_3" }] }), "block_actions:picker_open");
+  assert.equal(actionKind({ type: "block_actions", actions: [{ action_id: "cfg:model" }] }), "block_actions:cfg");
+  assert.equal(actionKind({ type: "view_submission", view: { callback_id: "picker_folder" } }), "view_submission:picker_folder");
+  assert.equal(actionKind({ type: "message_action", callback_id: "send_to_agent" }), "message_action:send_to_agent");
 });
 
 test("unknown daemon token is rejected", async () => {

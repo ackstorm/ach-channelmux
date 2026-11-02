@@ -38,9 +38,13 @@ spec:
           ports:
             - name: http
               containerPort: 8080
+            - name: metrics
+              containerPort: 9090
           env:
             - name: PORT
               value: "8080"
+            - name: METRICS_PORT
+              value: "9090"
             - name: PUBLIC_URL
               value: {{ required "publicUrl is required (e.g. http://<release>.<namespace>.svc)" .Values.publicUrl | quote }}
             - name: AUTH_RESOLVER_URL

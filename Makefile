@@ -8,6 +8,8 @@ help: ## List targets
 test: ## Tests + Helm lint
 	npm test
 	helm lint $(CHART) --set publicUrl=http://ach-channelmux.ach.svc --set authResolver.url=http://whoami.example --set authResolver.header=X-Token
+	helm template t $(CHART) --set publicUrl=x --set authResolver.url=x --set authResolver.header=x --set metrics.dashboards.enabled=true --set metrics.serviceMonitor.enabled=true \
+		| python3 -c 'import sys, yaml, json; d = [x for x in yaml.safe_load_all(sys.stdin) if x]; cm = [x for x in d if x["kind"] == "ConfigMap"]; assert len(cm) == 1 and [json.loads(v) for v in cm[0]["data"].values()]; assert {x["kind"] for x in d} >= {"ServiceMonitor", "Service"}'
 
 .PHONY: daemon-bin
 daemon-bin: ## Build the daemon binaries and checksums into dist/ (needs bun)

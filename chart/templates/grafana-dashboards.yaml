@@ -1,0 +1,21 @@
+{{- if .Values.metrics.dashboards.enabled }}
+{{- $root := . }}
+{{- range $path, $_ := .Files.Glob "dashboards/*.json" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-dashboard-%s" $root.Release.Name (base $path | trimSuffix ".json") | trunc 63 | trimSuffix "-" }}
+  namespace: {{ $root.Release.Namespace }}
+  labels:
+    {{- include "ach-channelmux.labels" $root | nindent 4 }}
+    {{- toYaml $root.Values.metrics.dashboards.labels | nindent 4 }}
+  {{- with $root.Values.metrics.dashboards.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+data:
+  {{ base $path }}: |-
+{{ $root.Files.Get $path | indent 4 }}
+{{- end }}
+{{- end }}
