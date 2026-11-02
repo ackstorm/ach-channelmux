@@ -68,8 +68,8 @@ The chart expects a secret `ach-channelmux-slack` with keys `app-token` and `bot
 ConfigMap for the Grafana sidecar (`metrics.dashboards.labels`, default `grafana_dashboard: "1"`;
 `metrics.dashboards.annotations` for its folder). Per user: messages, threads, commands and clicks, files, replies,
 connections, offline notices, problems, and LLM spend and requests through Slack from LiteLLM's Prometheus metrics
-(`user_email`, user agent `opencode/…/acp`, the daemon's agent; LiteLLM's token metrics carry no user agent, so the
-tokens column counts all of a user's clients).
+(`user_email`, user agent `opencode/…/acp`, the daemon's agent). Tokens are not shown: LiteLLM's token metrics carry
+no user agent, so they cannot tell Slack from a user's other clients.
 
 ## Daemon
 

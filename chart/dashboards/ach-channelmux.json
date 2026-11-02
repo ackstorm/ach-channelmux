@@ -341,7 +341,7 @@
     {
       "type": "stat",
       "title": "LLM spend via Slack (range)",
-      "description": "LiteLLM spend of opencode under ACP (user agent opencode/…/acp), the daemon's agent, for the selected owners.",
+      "description": "LiteLLM spend of opencode under ACP (user agent opencode/…/acp), the daemon's agent, for the selected users.",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -349,7 +349,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum(label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\") and on (owner) group by (owner) (max_over_time(channelmux_daemon_connected{owner=~\"$owner\"}[$__range] @ end()))) or vector(0)",
+          "expr": "sum(label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\", user_email=~\"$owner\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) or vector(0)",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -463,7 +463,7 @@
     {
       "type": "table",
       "title": "Users (range)",
-      "description": "One row per owner (the daemon's user). Replies: agent messages and streams posted. LLM spend and requests: LiteLLM, opencode under ACP only. Tokens: every LiteLLM call of that user, from any client (LiteLLM's token metrics carry no user agent).",
+      "description": "One row per owner (the daemon's user). Replies: agent messages and streams posted. LLM spend and requests: LiteLLM, opencode under ACP only (a user with spend but no row data otherwise has not connected since the relay last restarted).",
       "datasource": {
         "type": "prometheus",
         "uid": "${datasource}"
@@ -531,7 +531,7 @@
         },
         {
           "refId": "F",
-          "expr": "sum by (owner) (label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) and on (owner) group by (owner) (max_over_time(channelmux_daemon_connected{owner=~\"$owner\"}[$__range] @ end()))",
+          "expr": "sum by (owner) (label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\", user_email=~\"$owner\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) > 0",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -543,19 +543,7 @@
         },
         {
           "refId": "G",
-          "expr": "sum by (owner) (label_replace(increase(litellm_proxy_total_requests_metric_total{user_agent=~\"opencode/.+/acp\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) and on (owner) group by (owner) (max_over_time(channelmux_daemon_connected{owner=~\"$owner\"}[$__range] @ end()))",
-          "datasource": {
-            "type": "prometheus",
-            "uid": "${datasource}"
-          },
-          "legendFormat": "",
-          "instant": true,
-          "range": false,
-          "format": "table"
-        },
-        {
-          "refId": "H",
-          "expr": "sum by (owner) (label_replace(increase(litellm_total_tokens_metric_total[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) and on (owner) group by (owner) (max_over_time(channelmux_daemon_connected{owner=~\"$owner\"}[$__range] @ end()))",
+          "expr": "sum by (owner) (label_replace(increase(litellm_proxy_total_requests_metric_total{user_agent=~\"opencode/.+/acp\", user_email=~\"$owner\"}[$__range]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) > 0",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"
@@ -610,9 +598,8 @@
               "Value #E": 5,
               "Value #F": 6,
               "Value #G": 7,
-              "Value #H": 8,
-              "Value #I": 9,
-              "Value #J": 10
+              "Value #I": 8,
+              "Value #J": 9
             },
             "renameByName": {
               "Value #A": "Messages",
@@ -622,7 +609,6 @@
               "Value #E": "Replies",
               "Value #F": "LLM spend (Slack)",
               "Value #G": "LLM requests (Slack)",
-              "Value #H": "Tokens (all clients)",
               "Value #I": "Offline notices",
               "Value #J": "Online"
             }
@@ -743,22 +729,6 @@
               {
                 "id": "unit",
                 "value": "none"
-              },
-              {
-                "id": "decimals",
-                "value": 0
-              }
-            ]
-          },
-          {
-            "matcher": {
-              "id": "byName",
-              "options": "Tokens (all clients)"
-            },
-            "properties": [
-              {
-                "id": "unit",
-                "value": "short"
               },
               {
                 "id": "decimals",
@@ -1018,7 +988,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "sum by (owner) (label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\"}[$__interval]), \"owner\", \"$1\", \"user_email\", \"(.+)\") and on (owner) group by (owner) (max_over_time(channelmux_daemon_connected{owner=~\"$owner\"}[$__range] @ end()))) > 0",
+          "expr": "sum by (owner) (label_replace(increase(litellm_spend_metric_total{user_agent=~\"opencode/.+/acp\", user_email=~\"$owner\"}[$__interval]), \"owner\", \"$1\", \"user_email\", \"(.+)\")) > 0",
           "datasource": {
             "type": "prometheus",
             "uid": "${datasource}"

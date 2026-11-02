@@ -6,6 +6,12 @@ All notable changes are documented here. The format follows
 
 ## [Unreleased]
 
+### Fixed
+
+- Dashboard: LLM spend and requests count every user with Slack-agent traffic, not only
+  those whose daemon connected since the relay last restarted; the tokens column, which
+  counted all of a user's LiteLLM clients, is gone.
+
 ### Added
 
 - Prometheus usage metrics in the relay, per owner email, on `METRICS_PORT` (default 9090,
