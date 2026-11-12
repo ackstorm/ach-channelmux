@@ -4,6 +4,8 @@
 //   RELAY_TOKEN   token the relay resolves to this daemon's owner
 //   BASE_DIR      folder offered by the picker, with its subfolders (default: current directory)
 //   AGENT_CMD     ACP agent command, split on spaces (default "opencode acp")
+//   AGENT_IDLE_TIMEOUT  seconds without a turn before the agent process is killed; the next message
+//                       starts it again (default 300; 0: never)
 //   STATE_FILE    thread -> session map (default ~/.local/state/ach-channelmux/threads.json)
 //
 // Voice clips Slack did not transcribe go to a speech-to-text model when AUDIO_STT_BASE_URL is set:
@@ -49,6 +51,7 @@ const daemon = createDaemon({
   relayUrl: env("RELAY_URL"),
   token: env("RELAY_TOKEN"),
   agentCmd: env("AGENT_CMD", "opencode acp").split(" ").filter(Boolean),
+  agentIdleMs: Number(env("AGENT_IDLE_TIMEOUT", "300")) * 1000,
   baseDir: resolve(env("BASE_DIR", process.cwd())),
   stateFile: env("STATE_FILE", join(homedir(), ".local/state/ach-channelmux/threads.json")),
   stt: process.env.AUDIO_STT_BASE_URL

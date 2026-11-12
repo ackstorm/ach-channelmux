@@ -4,7 +4,7 @@
 // In a channel the relay forwards, a message that mentions the bot does the same; in a
 // code channels' origin it opens a Slack code channel instead, which is the session (its key is the channel id).
 
-import { execFile, spawn } from "node:child_process";
+import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
@@ -90,6 +90,8 @@ export interface DaemonConfig {
   stt?: { url: string; model: string; language?: string; prompt?: string; headers: () => Promise<Record<string, string>> };
   /** Text to speech for the agent's send_voice tool: an OpenAI-compatible API (its /audio/speech). */
   tts?: { url: string; model: string; voice: string; prompt?: string; headers: () => Promise<Record<string, string>> };
+  /** Idle time after which the agent process is killed, respawned on the next call; unset or 0: never. */
+  agentIdleMs?: number;
   /** Called when the agent process exits on its own. */
   onAgentExit?: (code: number | null) => void;
   log?: (msg: string, extra?: unknown) => void;
@@ -175,13 +177,7 @@ export function createDaemon(cfg: DaemonConfig) {
 
   // ---------- ACP agent ----------
 
-  const proc = spawn(cfg.agentCmd[0], cfg.agentCmd.slice(1), { stdio: ["pipe", "pipe", "inherit"], cwd: cfg.baseDir });
   let stopping = false;
-  proc.on("exit", (code) => {
-    if (stopping) return;
-    log("agent_exited", { code });
-    cfg.onAgentExit?.(code);
-  });
   const client: acp.Client = {
     async sessionUpdate({ sessionId, update }) {
       if (update.sessionUpdate === "config_option_update") {
@@ -256,11 +252,45 @@ export function createDaemon(cfg: DaemonConfig) {
       return { outcome: optionId ? { outcome: "selected", optionId } : { outcome: "cancelled" } };
     },
   };
-  const agent = new acp.ClientSideConnection(
-    () => client,
-    acp.ndJsonStream(Writable.toWeb(proc.stdin!), Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>),
-  );
-  const ready = agent.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} });
+  // The agent process runs while it is used: after agentIdleMs with no turn or permission prompt it is
+  // killed, and the next call spawns a new one, which loads its sessions again.
+  let current: { proc: ChildProcess; conn: acp.ClientSideConnection; ready: Promise<acp.InitializeResponse> } | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  function spawnAgent() {
+    const proc = spawn(cfg.agentCmd[0], cfg.agentCmd.slice(1), { stdio: ["pipe", "pipe", "inherit"], cwd: cfg.baseDir });
+    const conn = new acp.ClientSideConnection(
+      () => client,
+      acp.ndJsonStream(Writable.toWeb(proc.stdin!), Readable.toWeb(proc.stdout!) as ReadableStream<Uint8Array>),
+    );
+    const c = { proc, conn, ready: conn.initialize({ protocolVersion: acp.PROTOCOL_VERSION, clientCapabilities: {} }) };
+    proc.on("exit", (code) => {
+      if (stopping || current !== c) return;
+      log("agent_exited", { code });
+      cfg.onAgentExit?.(code);
+    });
+    return (current = c);
+  }
+  function touch() {
+    clearTimeout(idleTimer);
+    if (cfg.agentIdleMs) (idleTimer = setTimeout(idle, cfg.agentIdleMs)).unref?.();
+  }
+  function idle() {
+    if (outputs.size || permissions.size) return touch();
+    const c = current;
+    current = undefined;
+    loaded.clear();
+    warm.clear();
+    log("agent_idle_stopped");
+    c?.proc.kill();
+  }
+  async function agent() {
+    const c = current ?? spawnAgent();
+    touch();
+    await c.ready;
+    return c.conn;
+  }
+  const ready = spawnAgent().ready;
+  touch();
 
   const MAX_FILE = 20 * 1024 * 1024;
 
@@ -585,7 +615,7 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!p) {
       replaying.add(t.sessionId);
       history.delete(t.sessionId);
-      p = withTools(t.thread, t.cwd, (mcpServers) => agent.loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
+      p = withTools(t.thread, t.cwd, async (mcpServers) => (await agent()).loadSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }))
         .then((r) => r?.configOptions && !configs.has(t.sessionId) && setConfigs(t.sessionId, r.configOptions));
       p.finally(() => replaying.delete(t.sessionId)).catch(() => loaded.delete(t.sessionId));
       loaded.set(t.sessionId, p);
@@ -673,11 +703,11 @@ export function createDaemon(cfg: DaemonConfig) {
         const ran = shellNotes.get(t.sessionId);
         shellNotes.delete(t.sessionId);
         const context: acp.ContentBlock[] = ran ? [{ type: "text", text: `[Shell commands the user ran in this folder since your last turn]\n${ran.join("\n\n")}` }] : [];
-        let r = await agent.prompt({ sessionId: t.sessionId, prompt: [...context, ...(await content)] });
+        let r = await (await agent()).prompt({ sessionId: t.sessionId, prompt: [...context, ...(await content)] });
         // Some models end a turn right after their tool calls, with no reply: ask once for one.
         if (r.stopReason === "end_turn" && out.quiet && !command) {
           log("nudged", { session: t.sessionId });
-          r = await agent.prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
+          r = await (await agent()).prompt({ sessionId: t.sessionId, prompt: [{ type: "text", text: NUDGE }] });
           // Still nothing (some models end with an empty reply): say so, or the turn looks finished and answered.
           if (r.stopReason === "end_turn" && out.quiet) out.text("_The agent ended its turn without a reply._");
         }
@@ -701,6 +731,7 @@ export function createDaemon(cfg: DaemonConfig) {
           await say(t, "The turn failed.", [section("⚠️ The turn failed.", button("Retry", "retry", id))]).catch(() => {});
         }
         outputs.delete(t.sessionId);
+        touch(); // idle counts from the turn's end
         log("turn_ended", { outcome, ts }); // last: the turn is over ($fork, $clear and $done no longer refuse)
       }
     });
@@ -829,7 +860,7 @@ export function createDaemon(cfg: DaemonConfig) {
   async function sessions() {
     if (!(await canList)) return [];
     // ponytail: first page only (opencode: the 100 most recent sessions).
-    const { sessions: all } = await agent.listSessions({});
+    const { sessions: all } = await (await agent()).listSessions({});
     const roots: [string, string][] = [[cfg.baseDir, ""]];
     const realBase = real(cfg.baseDir);
     if (realBase) roots.push([realBase, ""]);
@@ -956,7 +987,7 @@ export function createDaemon(cfg: DaemonConfig) {
     let recap = "";
     try {
       if (choice === "new") {
-        const { sessionId, configOptions } = await withTools(p.thread, cwd, (mcpServers) => agent.newSession({ cwd, mcpServers }));
+        const { sessionId, configOptions } = await withTools(p.thread, cwd, async (mcpServers) => (await agent()).newSession({ cwd, mcpServers }));
         await applyDefaults(sessionId, configOptions);
         t = { ...where, sessionId, cwd };
         loaded.set(sessionId, Promise.resolve());
@@ -1012,7 +1043,7 @@ export function createDaemon(cfg: DaemonConfig) {
       permissions.delete(id);
       p.resolve();
     }
-    await agent.cancel({ sessionId: t.sessionId });
+    await (await agent()).cancel({ sessionId: t.sessionId });
   };
 
   // ---------- commands: $model, $compact, $clear, $stop, $help, ! shell ----------
@@ -1115,7 +1146,7 @@ export function createDaemon(cfg: DaemonConfig) {
     for (const [configId, value] of Object.entries(defaults).sort(([a], [b]) => Number(b === "model") - Number(a === "model"))) {
       const o: any = current?.find((x) => x.id === configId);
       if (!o || o.currentValue === value || !choicesOf(o).some((c) => c.value === value)) continue;
-      const r = await agent.setSessionConfigOption({ sessionId, configId, value }).catch((err) => void log("default_failed", { configId, error: String(err) }));
+      const r = await (await agent()).setSessionConfigOption({ sessionId, configId, value }).catch((err) => void log("default_failed", { configId, error: String(err) }));
       if (r) current = r.configOptions;
     }
     if (current) setConfigs(sessionId, current);
@@ -1203,7 +1234,7 @@ export function createDaemon(cfg: DaemonConfig) {
 
   async function clear(t: Thread) {
     if (outputs.has(t.sessionId)) return void (await say(t, "A turn is running: `$stop` it first."));
-    const { sessionId, configOptions } = await withTools(t.thread, t.cwd, (mcpServers) => agent.newSession({ cwd: t.cwd, mcpServers }));
+    const { sessionId, configOptions } = await withTools(t.thread, t.cwd, async (mcpServers) => (await agent()).newSession({ cwd: t.cwd, mcpServers }));
     await applyDefaults(sessionId, configOptions);
     bySession.delete(t.sessionId);
     const fresh = { ...t, sessionId };
@@ -1223,7 +1254,7 @@ export function createDaemon(cfg: DaemonConfig) {
     const title = (await sessions()).find((x) => x.sessionId === t.sessionId)?.title;
     const root: any = await slack.chat.postMessage({ channel: t.channel, text: `🍴 Fork of ${title ? `*${title}*` : "a session"} in \`${t.cwd}\`. Reply in this thread to continue it.` });
     try {
-      const { sessionId, configOptions } = await withTools(root.ts, t.cwd, (mcpServers) => agent.unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
+      const { sessionId, configOptions } = await withTools(root.ts, t.cwd, async (mcpServers) => (await agent()).unstable_forkSession({ sessionId: t.sessionId, cwd: t.cwd, mcpServers }));
       if (configOptions) setConfigs(sessionId, configOptions);
       const copy = { channel: t.channel, thread: root.ts, sessionId, cwd: t.cwd };
       threads[root.ts] = copy;
@@ -1466,12 +1497,12 @@ export function createDaemon(cfg: DaemonConfig) {
     if (!o || a.selected_option.value === o.currentValue) return;
     try {
       const before = selects(t);
-      let r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
+      let r = await (await agent()).setSessionConfigOption({ sessionId: t.sessionId, configId: o.id, value: a.selected_option.value });
       // A new model sets the effort back to the agent's default (opencode): the one in use is set again where offered.
       for (const was of o.category === "model" ? before.filter((x) => x.category === "thought_level") : []) {
         const now: any = r.configOptions.find((x) => x.id === was.id);
         if (now && now.currentValue !== was.currentValue && choicesOf(now).some((c) => c.value === was.currentValue)) {
-          r = await agent.setSessionConfigOption({ sessionId: t.sessionId, configId: was.id, value: was.currentValue });
+          r = await (await agent()).setSessionConfigOption({ sessionId: t.sessionId, configId: was.id, value: was.currentValue });
         }
       }
       setConfigs(t.sessionId, r.configOptions);
@@ -1537,7 +1568,7 @@ export function createDaemon(cfg: DaemonConfig) {
       }
       if (open?.error === "already_connected") {
         stopping = true;
-        proc.kill();
+        current?.proc.kill();
         throw new Error("already_connected");
       }
       await ready;
@@ -1556,7 +1587,8 @@ export function createDaemon(cfg: DaemonConfig) {
       stopping = true;
       await app.stop();
       mcp.close();
-      proc.kill();
+      clearTimeout(idleTimer);
+      current?.proc.kill();
     },
   };
 }

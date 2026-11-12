@@ -262,6 +262,28 @@ test("after a restart a thread reloads its session without re-posting its histor
   assert.equal(streamed(since(n)).some((c: any) => String(c.text).includes("OLD HISTORY")), false);
 });
 
+test("an idle agent is killed; the next message starts a new one, which reloads the session", async () => {
+  await daemon.stop();
+  daemon = newDaemon({ agentIdleMs: 300, onAgentExit: () => assert.fail("the idle kill is not an agent crash") });
+  try {
+    await daemon.start();
+    const idled = () => logged.filter((e) => e.msg === "agent_idle_stopped").length;
+    await slack.emit("events_api", slack.dm("UPEPE", "busy", { ts: "100.000062", thread_ts: "100.000001" }));
+    await turnEnded("100.000062");
+    const before = idled();
+    await waitFor(() => idled() > before);
+    await slack.emit("events_api", slack.dm("UPEPE", "awake?", { ts: "100.000063", thread_ts: "100.000001" }));
+    await turnEnded("100.000063");
+    const log = agentLog();
+    assert.deepEqual(log.at(-2), { m: "load", sessionId: "ses_1", cwd: join(base, "beta") });
+    assert.deepEqual(log.at(-1), { m: "prompt", sessionId: "ses_1", text: "awake?" });
+  } finally {
+    await daemon.stop();
+    daemon = newDaemon();
+    await daemon.start();
+  }
+});
+
 test("when Slack refuses streaming, replies arrive as one message per segment", async () => {
   slack.fail.set("chat.startStream", "feature_not_enabled");
   try {

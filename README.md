@@ -103,6 +103,7 @@ no user agent, so they cannot tell Slack from a user's other clients.
 | `RELAY_URL`, `RELAY_TOKEN` | The relay and the token it resolves to this daemon's owner. |
 | `BASE_DIR` | Root of the picker; folders below it can be chosen. Default: current directory. |
 | `AGENT_CMD` | ACP agent command. Default `opencode acp`. |
+| `AGENT_IDLE_TIMEOUT` | Seconds without a turn before the agent process is killed to free its memory; the next message starts it again and reloads its session. Default `300`; `0`: never. |
 | `STATE_FILE` | Default `~/.local/state/ach-channelmux/threads.json`. |
 | `AUDIO_STT_BASE_URL` | OpenAI-compatible API (e.g. `https://llm.example.com/v1`) that transcribes voice clips Slack did not. Unset: off. |
 | `AUDIO_STT_MODEL` | Default `whisper-1`. `AUDIO_STT_LANGUAGE` (e.g. `es`) and `AUDIO_STT_PROMPT` (names and terms to spell right) are optional. |
