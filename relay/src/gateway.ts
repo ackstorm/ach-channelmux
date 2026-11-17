@@ -331,6 +331,12 @@ export function createGateway(cfg: GatewayConfig) {
     });
   }
 
+  // A proxied download carries the bot token, so only a file on Slack's own file host is proxied (or on the
+  // upstream's: a mock Slack serves its files there). An external file (Google Drive, an app's remote file) has
+  // its own host's URL, which may be any host: it stays as Slack gave it.
+  const fileOrigins = ["https://files.slack.com", new URL(upstream).origin];
+  const hosted = (url: unknown) => typeof url === "string" && fileOrigins.includes(URL.parse(url)?.origin ?? "");
+
   function rewriteFiles(owner: Owner, files: any) {
     if (!Array.isArray(files)) return;
     const proxy = (key: string, name: string, original: string) => {
@@ -339,9 +345,9 @@ export function createGateway(cfg: GatewayConfig) {
     };
     for (const f of files) {
       if (!f.id) continue;
-      if (f.vtt) f.vtt = proxy(`${f.id}.vtt`, "transcript.vtt", f.vtt); // a voice clip's transcript
+      if (hosted(f.vtt)) f.vtt = proxy(`${f.id}.vtt`, "transcript.vtt", f.vtt); // a voice clip's transcript
       const original = f.url_private_download ?? f.url_private;
-      if (!original) continue;
+      if (!hosted(original)) continue;
       const proxied = proxy(f.id, f.name ?? "file", original);
       if (f.url_private) f.url_private = proxied;
       if (f.url_private_download) f.url_private_download = proxied;
@@ -437,8 +443,9 @@ export function createGateway(cfg: GatewayConfig) {
       if (entry === null) log("channel_unmapped", { channel: key.channel });
       return;
     }
-    // A modal's submit has no channel: the view says whose it is.
-    const owner = codeOwner ?? (entry ? await ownerFor(entry.email) : viewOwner.get(body?.view?.id) ?? (await ownerForSlackUser(key.userId!)));
+    // A modal's submit has no channel: the view says whose it is. A view pushed by a daemon's ack has an id this
+    // relay never saw: its root view says it.
+    const owner = codeOwner ?? (entry ? await ownerFor(entry.email) : viewOwner.get(body?.view?.id) ?? viewOwner.get(body?.view?.root_view_id) ?? (await ownerForSlackUser(key.userId!)));
     if (!owner) {
       log("unknown_owner", { user: key.userId, channel: key.channel });
       if (type !== "events_api") await evt.ack();

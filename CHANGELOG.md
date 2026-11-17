@@ -8,6 +8,10 @@ All notable changes are documented here. The format follows
 
 ### Fixed
 
+- Relay: only files Slack hosts (`files.slack.com`) are proxied. An external file (Google
+  Drive, an app's remote file) keeps its own URL, and the bot token is never sent to its host.
+- Relay: in a channel, the session step of the picker reaches the channel owner's daemon
+  whoever presses Start.
 - Dashboard: LLM spend and requests count every user with Slack-agent traffic, not only
   those whose daemon connected since the relay last restarted; the tokens column, which
   counted all of a user's LiteLLM clients, is gone.

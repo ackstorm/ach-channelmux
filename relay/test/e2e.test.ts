@@ -3,6 +3,7 @@
 
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
+import http from "node:http";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
 import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime, actionKind } from "../src/gateway.ts";
@@ -254,6 +255,18 @@ test("a button in a channel thread clicked by another user reaches the channel o
   assert.equal(pepe1.got.length, n);
 });
 
+test("a view pushed on a channel's modal is the channel owner's too, whoever submits it", async () => {
+  const before = pepe1.got.length;
+  await slack.emit("interactive", { type: "block_actions", user: { id: "UXAVI" }, trigger_id: "T_PUSH", channel: { id: "C_DEV" }, container: { type: "message", channel_id: "C_DEV" }, actions: [{ action_id: "new_session", type: "button" }] }, true);
+  await waitFor(() => pepe1.got.length === before + 1);
+  const view = { type: "modal" as const, callback_id: "settings", title: { type: "plain_text" as const, text: "x" }, blocks: [] };
+  const opened = await pepe1.app.client.views.open({ trigger_id: "T_PUSH", view });
+  // The daemon's ack pushes the next view, so Slack gives it an id the relay never saw: its root view says whose it is.
+  const pushed = { id: "V_PUSHED", root_view_id: opened.view!.id, previous_view_id: opened.view!.id, callback_id: "settings", state: { values: {} } };
+  const reply = await slack.emit("interactive", { type: "view_submission", user: { id: "UXAVI" }, trigger_id: "T_PUSH2", view: pushed }, true);
+  assert.deepEqual(reply, { response_action: "errors", errors: { cwd: "rejected by pepe1" } });
+});
+
 test("!ls from a non-owner in a channel is refused with an ephemeral note; from the owner it passes", async () => {
   const notes = (text: string) => slack.calls.filter((c) => c.method === "chat.postEphemeral" && c.params.user === "UXAVI" && c.params.text === text);
   const before = pepe1.got.length;
@@ -382,6 +395,39 @@ test("files: URLs are rewritten and only the owner can fetch them", async () => 
   assert.equal(await ok.text(), "content of F1");
   const denied = await fetch(url, { headers: { authorization: "Bearer gw-xavi" } });
   assert.equal(denied.status, 404);
+});
+
+test("files: an external file keeps its URL, and the bot token never goes to its host", async () => {
+  let auth: string | undefined;
+  const host = http.createServer((req, res) => {
+    auth = req.headers.authorization;
+    res.end("x");
+  });
+  await new Promise<void>((r) => host.listen(0, "127.0.0.1", r));
+  // Slack gives an external file (Google Drive, an app's remote file) its own host's URL as url_private.
+  const external = `http://127.0.0.1:${(host.address() as any).port}/document/d/abc`;
+  const lookalike = "https://files.slack.com.example.com/files-pri/T1-F_FAKE/b.txt";
+  const ev = slack.dm("UPEPE", "see doc", {
+    subtype: "file_share",
+    files: [
+      { id: "F_EXT", name: "doc", mode: "external", is_external: true, url_private: external, vtt: external },
+      { id: "F_FAKE", name: "b.txt", url_private: lookalike },
+      { id: "F_HOSTED", name: "c.txt", url_private: "https://files.slack.com/files-pri/T1-F_HOSTED/c.txt" },
+    ],
+  });
+  const before = pepe1.got.length;
+  await slack.emit("events_api", ev);
+  await waitFor(() => pepe1.got.length === before + 1);
+  const statuses: number[] = [];
+  for (const path of ["F_EXT/doc", "F_EXT.vtt/transcript.vtt"]) {
+    statuses.push((await fetch(`${GW}/files/${path}`, { headers: { authorization: "Bearer gw-pepe" } })).status);
+  }
+  host.close();
+  assert.equal(auth, undefined);
+  assert.deepEqual(statuses, [404, 404]);
+  const [ext, fake, hosted] = pepe1.got.at(-1).files;
+  assert.deepEqual([ext.url_private, ext.vtt, fake.url_private], [external, external, lookalike]);
+  assert.ok(hosted.url_private.startsWith(`${GW}/files/F_HOSTED/`), hosted.url_private); // Slack's own file host
 });
 
 test("interactivity: ack payload is relayed and views.open needs a delivered trigger", async () => {
