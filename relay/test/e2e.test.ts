@@ -6,13 +6,14 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { createServer } from "node:net";
 import bolt from "@slack/bolt";
+import { WebSocket } from "ws";
 import { createGateway, addPreamble, parseChannels, addShortcutPreamble, localTime, actionKind } from "../src/gateway.ts";
 import { createMockSlack, APP_TOKEN, BOT_TOKEN } from "./mock-slack.ts";
 
 const { App, LogLevel } = bolt;
 
 const USERS = { UPEPE: "pepe@example.com", UXAVI: "xavi@example.com", UANA: "ana@example.com" };
-const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-pepe-case": "Pepe@Example.COM", "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com" };
+const TOKENS: Record<string, string> = { "gw-pepe": USERS.UPEPE, "gw-pepe-case": "Pepe@Example.COM", "gw-xavi": USERS.UXAVI, "gw-bot": "bot@example.com", "gw-nobody": "nobody@example.com", "gw-ana": USERS.UANA };
 const CHANNEL_NAMES = { C_DEV: "dev", C_CODE: "code", C_OTHER: "other", C_SALES: "sales", C_OPS: "ops", C_QA: "qa" };
 // Keyed by name, or by id (C_OPS): an id survives a rename and cannot be taken by a new channel of that name.
 const CHANNELS = { dev: { email: USERS.UPEPE, code: false }, code: { email: USERS.UPEPE, code: true }, sales: { email: "bot@example.com", code: false }, C_OPS: { email: USERS.UPEPE, code: false }, qa: { email: USERS.UANA, code: false } }; // ana never connects
@@ -430,6 +431,15 @@ test("files: an external file keeps its URL, and the bot token never goes to its
   assert.ok(hosted.url_private.startsWith(`${GW}/files/F_HOSTED/`), hosted.url_private); // Slack's own file host
 });
 
+test("files: a download Slack drops midway answers 500 and the relay keeps serving", async () => {
+  const before = pepe1.got.length;
+  await slack.emit("events_api", slack.dm("UPEPE", "big file", { subtype: "file_share", files: [{ id: "F_RESET", name: "a.bin", url_private: `${slack.url}/files/F_RESET/a.bin` }] }));
+  await waitFor(() => pepe1.got.length === before + 1);
+  const res = await fetch(pepe1.got.at(-1).files[0].url_private, { headers: { authorization: "Bearer gw-pepe" } });
+  assert.equal(res.status, 500);
+  assert.equal((await fetch(`${GW}/healthz`)).status, 200);
+});
+
 test("interactivity: ack payload is relayed and views.open needs a delivered trigger", async () => {
   await assert.rejects(
     pepe1.app.client.views.open({ trigger_id: "T_FORGED", view: { type: "modal", title: { type: "plain_text", text: "x" }, blocks: [] } }),
@@ -622,6 +632,17 @@ test("metrics: per-owner usage on the metrics port only, no message text", async
   assert.equal(actionKind({ type: "block_actions", actions: [{ action_id: "cfg:model" }] }), "block_actions:cfg");
   assert.equal(actionKind({ type: "view_submission", view: { callback_id: "picker_folder" } }), "view_submission:picker_folder");
   assert.equal(actionKind({ type: "message_action", callback_id: "send_to_agent" }), "message_action:send_to_agent");
+});
+
+test("a daemon socket that errors is dropped and the relay keeps serving", async () => {
+  const res = await fetch(`${GW}/api/apps.connections.open`, { method: "POST", headers: { authorization: "Bearer gw-ana" } });
+  const ws = new WebSocket(((await res.json()) as any).url);
+  ws.on("error", () => {});
+  await new Promise((r) => ws.once("open", r));
+  await waitFor(() => gw.state(USERS.UANA)?.primary != null);
+  (ws as any)._socket.write(Buffer.from([0x81, 0x01, 0x61])); // an unmasked frame, which the server's parser rejects
+  await waitFor(() => gw.state(USERS.UANA)!.primary === null);
+  assert.equal((await fetch(`${GW}/healthz`)).status, 200);
 });
 
 test("unknown daemon token is rejected", async () => {

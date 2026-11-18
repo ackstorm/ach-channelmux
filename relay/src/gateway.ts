@@ -639,10 +639,12 @@ export function createGateway(cfg: GatewayConfig) {
         const original = owner?.files.get(decodeURIComponent(file[1]));
         if (!owner || !original) return json(404, { ok: false, error: "file_not_found" });
         const upstreamRes = await fetch(original, { headers: { authorization: `Bearer ${cfg.botToken}` } });
+        // Read before answering: a download Slack drops midway must still be able to answer 500.
+        const body = Buffer.from(await upstreamRes.arrayBuffer());
         res.writeHead(upstreamRes.status, {
           "content-type": upstreamRes.headers.get("content-type") ?? "application/octet-stream",
         });
-        res.end(Buffer.from(await upstreamRes.arrayBuffer()));
+        res.end(body);
         return;
       }
       json(404, { ok: false, error: "unknown_method" });
@@ -676,6 +678,8 @@ export function createGateway(cfg: GatewayConfig) {
 
   function attach(owner: Owner, ws: WebSocket) {
     const conn: Conn = { id: randomUUID().slice(0, 8), ws, alive: true, pending: new Map() };
+    // A socket or protocol error is followed by "close", which frees the slot; unheard, it ends the process.
+    ws.on("error", () => {});
     // Two daemons that got a ticket before either connected: the first wins. Claim is synchronous on the event loop.
     // ponytail: the loser's Socket Mode client then retries until the slot frees, as a reconnecting daemon does.
     if (owner.primary) {

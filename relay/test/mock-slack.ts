@@ -32,6 +32,11 @@ export function createMockSlack(users: Record<string, string>, channels: Record<
     };
     if (url.pathname.startsWith("/files/")) {
       if (req.headers.authorization !== `Bearer ${BOT_TOKEN}`) return send({ ok: false }, 403);
+      if (url.pathname.includes("/F_RESET/")) {
+        res.writeHead(200, { "content-type": "application/octet-stream", "content-length": "100" });
+        res.write("partial");
+        return void setTimeout(() => res.destroy(), 20);
+      }
       res.writeHead(200, { "content-type": "text/plain" });
       if (url.pathname.endsWith(".vtt")) return res.end("WEBVTT\n\n1\n00:00:00.000 --> 00:00:02.000\nhello from\n\n2\n00:00:02.000 --> 00:00:04.000\na voice note\n");
       return res.end(`content of ${url.pathname.split("/")[2]}`);

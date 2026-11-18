@@ -8,6 +8,9 @@ All notable changes are documented here. The format follows
 
 ### Fixed
 
+- Relay: a file download Slack drops midway answers 500, and a socket or protocol error on a
+  daemon connection closes that connection. Either one stopped the relay process, dropping
+  every daemon and its open modals and file links until the pod restarted.
 - Relay: only files Slack hosts (`files.slack.com`) are proxied. An external file (Google
   Drive, an app's remote file) keeps its own URL, and the bot token is never sent to its host.
 - Relay: in a channel, the session step of the picker reaches the channel owner's daemon
