@@ -10,7 +10,7 @@
   "schemaVersion": 39,
   "version": 0,
   "editable": true,
-  "refresh": "1m",
+  "refresh": "",
   "time": {
     "from": "now-7d",
     "to": "now"
